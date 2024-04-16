@@ -17,7 +17,7 @@ limitations under the License.
 import fsspec
 import fsspec.registry
 from fsspec.asyn import AsyncFileSystem
-import pelicanfs.dir_header_parser as dir_header_parser
+from .dir_header_parser import parse_metalink, get_dirlist_loc
 import fsspec.implementations.http as fshttp
 import aiohttp
 import urllib.parse
@@ -91,7 +91,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns the highest priority cache for the namespace that appears to be owrking
         """
         headers = await self.get_director_headers(fileloc)
-        metalist = dir_header_parser.parse_metalink(headers)[1:]
+        metalist = parse_metalink(headers)[1:]
         while len(metalist) > 0:
             updatedUrl = metalist[0][0]
             metalist = metalist[1:]
@@ -122,7 +122,7 @@ class PelicanFileSystem(AsyncFileSystem):
             path = args[0]
             parsedUrl = urllib.parse.urlparse(path)
             headers = await self.get_director_headers(parsedUrl.path)
-            dirlistloc = dir_header_parser.get_dirlist_loc(headers)
+            dirlistloc = get_dirlist_loc(headers)
             if dirlistloc == None:
                 raise RuntimeError
             listUrl = dirlistloc + "/" + parsedUrl.path
@@ -146,7 +146,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         parsedUrl = urllib.parse.urlparse(path)
         headers = await self.get_director_headers(parsedUrl.path)
-        dirlistloc = dir_header_parser.get_dirlist_loc(headers)
+        dirlistloc = get_dirlist_loc(headers)
         if dirlistloc == "":
             raise RuntimeError
         listUrl = dirlistloc + "/" + path
