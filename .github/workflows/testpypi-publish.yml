@@ -1,5 +1,8 @@
 name: Publish PelicanFS distribution to TestPyPI
-on: pre-release
+on: 
+  release:
+    types:
+      - prereleased
 
 jobs:
   build:
