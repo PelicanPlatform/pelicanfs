@@ -98,12 +98,12 @@ class PelicanFileSystem(AsyncFileSystem):
             # Timeout response in seconds - the default response is 5 minutes
             timeout = aiohttp.ClientTimeout(total=2)
             async with aiohttp.ClientSession() as session:
-                async with session.get(updatedUrl, timeout=timeout) as resp:
-                    try:
+                try:
+                    async with session.get(updatedUrl, timeout=timeout) as resp:
                         resp.status
-                    except (aiohttp.client_exceptions.ClientConnectorError, FileNotFoundError, asyncio.TimeoutError):
-                        continue
-                    break
+                except (aiohttp.client_exceptions.ClientConnectorError, FileNotFoundError, asyncio.TimeoutError, asyncio.exceptions.TimeoutError):
+                    continue
+                break
         if len(metalist) == 0:
             # No working cache was found
             raise RuntimeError
@@ -223,6 +223,10 @@ class PelicanFileSystem(AsyncFileSystem):
             return result
         return wrapper
 
+    @_cache_dec
+    async def open_async(self, path, mode="rb", size=None, **kwargs):
+        return await self.httpFileSystem.open_async(path, mode, size, **kwargs)
+    
     @_cache_dec
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         return await self.httpFileSystem._cat_file(path, start, end, **kwargs)
