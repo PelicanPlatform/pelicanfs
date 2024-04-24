@@ -2,7 +2,7 @@
 
 ## Overview
 
-PelicanFS is a file system interface (fsspec) for the Pelican Platform.  For more information about the Pelican Platform, please visit the [Pelican Platform](https://pelicanplatform.org) and the [Pelican Platform Github](https://github.com/PelicanPlatform/pelican) pages. For more information about fsspec, visit the [filesystem-spec](https://filesystem-spec.readthedocs.io/en/latest/index.html) page.
+PelicanFS is a file system interface (fsspec) for the Pelican Platform.  For more information about pelican, see our [main website](https://pelicanplatform.org) or [Github page](https://github.com/PelicanPlatform/pelican). For more information about fsspec, visit the [filesystem-spec](https://filesystem-spec.readthedocs.io/en/latest/index.html) page.
 
 
 ## Limitations
@@ -21,7 +21,7 @@ from pelicanfs.core import PelicanFileSystem
 pelfs = PelicanFileSystem("https://osdf-director.osg-htc.org/")
 ```
 
-From there, use `pelfs` as you would an http fsspec using a namespace path as the url path. For example:
+Once `pelfs` is pointed at your federation's director, fsspec commands can be applied to Pelican namespaces. For example:
 
 ```python
 hello_world = pelfs.cat('/ospool/uc-shared/public/OSG-Staff/validation/test.txt')
@@ -36,7 +36,7 @@ Sometimes various systems that interact with an fsspec want a key-value mapper r
 from pelicanfs.core import PelicanFileSystem, PelicanMap
 
 pelfs = PelicanFileSystem(“some-director-url”)
-file1 = PelicanMap(“namespace/file/1”, pelfs=pelfs)
-file2 = PelicanMap(“namespace/file/2”, pelfs=pelfs)
+file1 = PelicanMap(“/namespace/file/1”, pelfs=pelfs)
+file2 = PelicanMap(“/namespace/file/2”, pelfs=pelfs)
 ds = xarray.open_mfdataset([file1,file2], engine='zarr')
 ```
