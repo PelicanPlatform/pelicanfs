@@ -11,7 +11,22 @@ PelicanFS is built on top of the http fsspec implementation. As such, any functi
 
 ### Installation
 
-To install pelican, run:```pip install pelicanfs```### Using PelicanFS
+To install pelican, run:
+
+```
+pip install pelicanfs
+```
+
+To install from source, run:
+
+```
+git clone https://github.com/PelicanPlatform/pelicanfs.git
+cd pelicanfs
+pip install -e .
+```
+
+
+### Using PelicanFS
 
 To use pelicanfs, first create a `PelicanFileSystem` and provide it with the url for the director of your data federation. As an example using the OSDF director
 
