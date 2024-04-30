@@ -36,7 +36,6 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/pelicanfs
     permissions:
       id-token: write
     steps:
