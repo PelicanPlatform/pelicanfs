@@ -355,19 +355,24 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _check_fspath(self, path: str) -> str:
         """
-        Given a path (either absolute or a pelican://-style URL),
+        Given a path (either absolute, a pelican://-style URL, or an https://-style),
         check that the pelican://-style URL is compatible with the current
         filesystem object and return the path.
         """
         if not path.startswith("/"):
-            pelican_url = urllib.parse.urlparse("pelican://" + path)
-            discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
-            discovery_str = discovery_url.geturl()
-            if not self.discoveryUrl:
-                self.discoveryUrl = discovery_str
-            elif self.discoveryUrl != discovery_str:
-                raise InvalidMetadata()
-            path = pelican_url.path
+            # This can potentially be an https:// path if it comes from a get_mapper call
+            if path.startswith("https://"):
+                http_url = urllib.parse.urlparse(path)
+                path = http_url.path
+            else:
+                pelican_url = urllib.parse.urlparse("pelican://" + path)
+                discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
+                discovery_str = discovery_url.geturl()
+                if not self.discoveryUrl:
+                    self.discoveryUrl = discovery_str
+                elif self.discoveryUrl != discovery_str:
+                    raise InvalidMetadata()
+                path = pelican_url.path
         return path
 
     def open(self, path, **kwargs):
@@ -489,5 +494,11 @@ class OSDFFileSystem(PelicanFileSystem):
         super().__init__("pelican://osg-htc.org", **kwargs)
 
 def PelicanMap(root, pelfs: PelicanFileSystem, check=False, create=False):
+    """
+    Returns and FSMap object assigning creating a mutable mapper at the root location
+    
+    TODO: This currently assigns a cache or origin to the mapper at creation. If that cache fails,
+    this doesn't change to a new cache (the mapping can become complex). This should be fixed in the future
+    """
     dataUrl = sync(pelfs.loop, pelfs.get_origin_url if pelfs.directReads else pelfs.get_working_cache, root)
     return pelfs.get_mapper(dataUrl, check=check, create=create)
