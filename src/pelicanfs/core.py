@@ -15,11 +15,8 @@ limitations under the License.
 """
 
 import cachetools
-import fsspec
-import fsspec.registry
 from fsspec.asyn import AsyncFileSystem, sync
-from fsspec.spec import AbstractBufferedFile
-from .dir_header_parser import parse_metalink, get_dirlist_loc
+from .dir_header_parser import parse_metalink
 import fsspec.implementations.http as fshttp
 import aiohttp
 import urllib.parse
@@ -124,6 +121,8 @@ class PelicanFileSystem(AsyncFileSystem):
         self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15*60)
         self._namespace_lock = threading.Lock()
 
+        self.token = kwargs.get('headers', {}).get('Authorization')
+
         # The internal filesystem
         self.httpFileSystem = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
 
@@ -191,7 +190,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns the highest priority cache for the namespace that appears to be working
         """
-        cacheUrl = self._match_namespace(fileloc)
+        fparsed = urllib.parse.urlparse(fileloc)
+        # Removing the query if need be
+        cacheUrl = self._match_namespace(fparsed.path)
         if cacheUrl:
             return cacheUrl
 
@@ -200,7 +201,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # add all the director-provided caches to the list (doing a round of de-dup)
         cache_list = []
         if self.preferredCaches:
-            cache_list = [urllib.parse.urljoin(cache, fileloc) if cache != "+" else "+" for cache in self.preferredCaches]
+            cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))._replace(query=fparsed.query).geturl() if cache != "+" else "+" for cache in self.preferredCaches]
             namespace = "/"
         if not self.preferredCaches or ("+" in self.preferredCaches):
             headers = await self.get_director_headers(fileloc)
@@ -208,7 +209,7 @@ class PelicanFileSystem(AsyncFileSystem):
             old_cache_list = cache_list
             cache_list = []
             cache_set = set()
-            new_caches = [entry[0] for entry in metalist]
+            new_caches = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
             for cache in old_cache_list:
                 if cache == "+":
                     for cache2 in new_caches:
@@ -225,6 +226,8 @@ class PelicanFileSystem(AsyncFileSystem):
             # Timeout response in seconds - the default response is 5 minutes
             timeout = aiohttp.ClientTimeout(total=5)
             session = await self.httpFileSystem.set_session()
+            if self.token:
+                session.headers["Authorization"] = self.token
             try:
                 async with session.head(updatedUrl, timeout=timeout) as resp:
                     if resp.status >= 200 and resp.status < 400:

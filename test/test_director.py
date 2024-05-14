@@ -208,3 +208,53 @@ def test_open_mapper(httpserver: HTTPServer, get_client):
 
     pelMap = pelicanfs.core.PelicanMap("/foo", pelfs=pelfs)
     assert pelMap['bar'] == b'hello, world!'
+
+def test_authorization_headers(httpserver: HTTPServer, get_client):
+    foo_bar_url = httpserver.url_for("/foo/bar")
+    test_headers_with_bearer = {"Authorization": "Bearer test"}
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+                 "Location": foo_bar_url,
+                 "X-Pelican-Namespace": "namespace=/foo"
+                },
+        )
+
+    httpserver.expect_request("/foo/bar", headers=test_headers_with_bearer, method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/bar", headers=test_headers_with_bearer, method="GET").respond_with_data("hello, world!")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        headers = test_headers_with_bearer
+    )
+
+    assert pelfs.cat("/foo/bar", headers={'Authorization': 'Bearer test'}) == b"hello, world!"
+
+def test_authz_query(httpserver: HTTPServer, get_client):
+    foo_bar_url = httpserver.url_for("/foo/bar")
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+                 "Location": foo_bar_url,
+                 "X-Pelican-Namespace": "namespace=/foo"
+                },
+        )
+
+    httpserver.expect_request("/foo/bar", query_string="authz=test", method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/bar", query_string="authz=test", method="GET").respond_with_data("hello, world!")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    assert pelfs.cat("/foo/bar?authz=test") == b"hello, world!"
