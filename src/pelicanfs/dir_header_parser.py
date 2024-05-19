@@ -37,20 +37,3 @@ def parse_metalink(headers: dict[str, str]) -> tuple[list[tuple[str, int]], str]
             break
 
     return linkPrio, namespace
-
-def get_dirlist_loc(headers={}):
-    """
-    Parse the headers to get the dirlist location
-
-    This will None if there is no dirlist location
-    """
-    if "X-Pelican-Namespace" in headers:
-        namespace = headers["X-Pelican-Namespace"]
-        elmts = namespace.split(", ")
-        for elm in elmts:
-            left, right = elm.split("=", 1)
-            if left == "collections-url":
-                return right
-        
-    
-    return None

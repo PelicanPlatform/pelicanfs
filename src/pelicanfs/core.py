@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import cachetools
+from fsspec.utils import glob_translate
 from fsspec.asyn import AsyncFileSystem, sync
 from .dir_header_parser import parse_metalink
 import fsspec.implementations.http as fshttp
@@ -139,13 +140,12 @@ class PelicanFileSystem(AsyncFileSystem):
         self._pipe_file = self.httpFileSystem._pipe_file
         self._mkdir = self.httpFileSystem._mkdir
         self._makedirs = self.httpFileSystem._makedirs
-        
 
-        # TODO: These functions are to be implemented. Currently A top level call to glob/du/info will result
-        # in a failure
-        self._glob = self.httpFileSystem._glob
-        self._du = self.httpFileSystem._du
-        self._info = self.httpFileSystem._info
+    @classmethod
+    def _strip_protocol(cls, path):
+        """For HTTP, we always want to keep the full URL"""
+        return path
+
 
     async def _discover_federation_metadata(self, discUrl):
         """
@@ -255,6 +255,21 @@ class PelicanFileSystem(AsyncFileSystem):
             raise NoAvailableSource()
         return origin
 
+    async def get_dirlist_url(self, fileloc: str) -> str:
+        """
+        Returns a dirlist host url for the given namespace locations
+        """
+        url = urllib.parse.urljoin(self.directorUrl, fileloc)
+
+        # Timeout response in seconds - the default response is 5 minutes
+        timeout = aiohttp.ClientTimeout(total=5)
+        session = await self.httpFileSystem.set_session()
+        async with session.request('PROPFIND', url, timeout=timeout) as resp:
+            dirlist_url = parse_metalink(resp.headers)[0][0][0]
+        if not dirlist_url:
+            raise NoAvailableSource()
+        return dirlist_url
+
     def _get_prefix_info(self, path: str) -> _CacheManager:
         """
         Given a path into the filesystem, return the information inthe
@@ -301,11 +316,9 @@ class PelicanFileSystem(AsyncFileSystem):
         This is for functions which need to list information in the origin directories such as "find", "isdir", "ls"
         """
         async def wrapper(self, *args, **kwargs):
-            path = args[0]
-            path = self._check_fspath(path)
-            # TODO: need to have a separate get_dirlist_url
-            listUrl = await self.get_origin_url(path)
-            result = await func(self, listUrl, *args[1:], **kwargs)
+            path = self._check_fspath(args[0])
+            dataUrl = await self.get_dirlist_url(path)
+            result = await func(self, dataUrl, *args[1:], **kwargs)
             return result
         return wrapper
 
@@ -321,11 +334,104 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
         return await self.httpFileSystem._find(path, maxdepth, withdirs, **kwargs)
     
+    async def _glob(self, path, maxdepth=None, **kwargs):
+        """
+        Find files by glob-matching.
+
+        This implementation is based of the one in HTTPSFileSystem,
+        except it cleans the path url of double '//' and checks for
+        the dirlisthost ahead of time
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        import re
+
+        dirlist_path = await self.get_dirlist_url(path)
+        # Need to ensure the path with the any sort of special `glob` characters is added back in
+        parsed_path = urllib.parse.urlparse(dirlist_path)
+        updated_path = urllib.parse.urlunparse(parsed_path._replace(path=path))
+
+        ends_with_slash = updated_path.endswith("/")  # _strip_protocol strips trailing slash
+        path = self._strip_protocol(updated_path)
+        append_slash_to_dirname = ends_with_slash or path.endswith(("/**", "/*"))
+        idx_star = path.find("*") if path.find("*") >= 0 else len(path)
+        idx_brace = path.find("[") if path.find("[") >= 0 else len(path)
+
+        min_idx = min(idx_star, idx_brace)
+
+        detail = kwargs.pop("detail", False)
+
+        if not fshttp.has_magic(path):
+            if await self._exists(path, **kwargs):
+                if not detail:
+                    return [path]
+                else:
+                    return {path: await self._info(path, **kwargs)}
+            else:
+                if not detail:
+                    return []  # glob of non-existent returns empty
+                else:
+                    return {}
+        elif "/" in path[:min_idx]:
+            min_idx = path[:min_idx].rindex("/")
+            root = path[: min_idx + 1]
+            depth = path[min_idx + 1 :].count("/") + 1
+        else:
+            root = ""
+            depth = path[min_idx + 1 :].count("/") + 1
+
+        if "**" in path:
+            if maxdepth is not None:
+                idx_double_stars = path.find("**")
+                depth_double_stars = path[idx_double_stars:].count("/") + 1
+                depth = depth - depth_double_stars + maxdepth
+            else:
+                depth = None
+
+        allpaths = await self._find(
+            root, maxdepth=depth, withdirs=True, detail=True, **kwargs
+        )
+
+        pattern = glob_translate(path + ("/" if ends_with_slash else ""))
+        pattern = re.compile(pattern)
+
+        allpaths_cleaned = {}
+        for p, info in allpaths.items():
+          parsed = list(urllib.parse.urlparse(p))
+          parsed[2] = re.sub("/{2,}", "/", parsed[2])
+          cleaned = urllib.parse.urlunparse(parsed)
+          allpaths_cleaned[cleaned] = info
+
+        out = {
+            (
+                p.rstrip("/")
+                if not append_slash_to_dirname
+                and info["type"] == "directory"
+                and p.endswith("/")
+                else p
+            ): info
+            for p, info in sorted(allpaths_cleaned.items())
+            if pattern.match(p.rstrip("/"))
+        }
+
+        if detail:
+            return out
+        else:
+            return list(out)
+
+
+    @_dirlist_dec
+    async def _info(self, path, **kwargs):
+        return await self.httpFileSystem._info(path, **kwargs)
+
+    @_dirlist_dec
+    async def _du(self, path, total=True, maxdepth=None, **kwargs):
+        return await self.httpFileSystem._du(path, total, maxdepth, **kwargs)
+
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
-        # TODO: need to have a separate get_dirlist_url
-        listUrl = await self.get_origin_url(path)
+        listUrl = await self.get_dirlist_url(path)
         async for _ in self.httpFileSystem._walk(listUrl, maxdepth, on_error, **kwargs):
                 yield _
 
