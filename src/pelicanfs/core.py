@@ -263,6 +263,18 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns a dirlist host url for the given namespace locations
         """
+
+        if not self.directorUrl:
+            metadata_json = await self._discover_federation_metadata(self.discoveryUrl)
+            # Ensure the director url has a '/' at the end
+            directorUrl = metadata_json.get('director_endpoint')
+            if not directorUrl:
+                raise InvalidMetadata()
+
+            if not directorUrl.endswith("/"):
+                directorUrl = directorUrl + "/"
+            self.directorUrl = directorUrl
+
         url = urllib.parse.urljoin(self.directorUrl, fileloc)
 
         # Timeout response in seconds - the default response is 5 minutes
