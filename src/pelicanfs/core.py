@@ -360,8 +360,8 @@ class PelicanFileSystem(AsyncFileSystem):
         filesystem object and return the path.
         """
         if not path.startswith("/"):
-            # This can potentially be an https:// path if it comes from a get_mapper call
-            if path.startswith("https://"):
+            # This can potentially be an https:// or http:// path if it comes from a get_mapper call
+            if path.startswith("https://") or path.startswith("http://"):
                 http_url = urllib.parse.urlparse(path)
                 path = http_url.path
             else:
