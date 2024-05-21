@@ -329,7 +329,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
         and uses that url for the given function.
 
-        This is for functions which need to list information in the origin directories such as "find", "isdir", "ls"
+        This is for functions which need to get information from origin directories "ls", "du", "info", etc.
         """
         async def wrapper(self, *args, **kwargs):
             path = self._check_fspath(args[0])
@@ -338,17 +338,67 @@ class PelicanFileSystem(AsyncFileSystem):
             return result
         return wrapper
 
+
+    def _remove_dirlist_from_path(self, path):
+        parsed_url = urllib.parse.urlparse(path)
+        updated_url = parsed_url._replace(netloc="", scheme="")
+        return urllib.parse.urlunparse(updated_url)
+
+    def _remove_dirlist_from_paths(self, paths):
+        if isinstance(paths, list):
+            return [self._remove_dirlist_from_paths(path) for path in paths]
+
+        if isinstance(paths, dict):
+            if 'name' in paths:
+                path = paths['name']
+                paths['name'] = self._remove_dirlist_from_path(path)
+                if 'url' in paths:
+                    url = paths['url']
+                    paths['url'] = self._remove_dirlist_from_path(url)
+                    return paths
+            else:
+                new_dict = {}
+                for key, item in paths.items():
+                    new_key = self._remove_dirlist_from_path(key)
+                    new_item = self._remove_dirlist_from_paths(item)
+                    new_dict[new_key] = new_item
+                return new_dict
+
+        if isinstance(paths, str):
+            return self._remove_dirlist_from_path(paths)
+
+        return paths
+
+    def _dirlist_dec(func):
+        """
+        Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
+        and uses that url for the given function. It then normalizes the paths or list of paths returned by the function
+
+        This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
+        """
+        async def wrapper(self, *args, **kwargs):
+            path = self._check_fspath(args[0])
+            dataUrl = await self.get_dirlist_url(path)
+            return await func(self, dataUrl, *args[1:], **kwargs)
+        return wrapper
+
+
     @_dirlist_dec
     async def _ls(self, path, detail=True, **kwargs):
-        return await self.httpFileSystem._ls(path, detail, **kwargs)
+        results = await self.httpFileSystem._ls(path, detail, **kwargs)
+        return self._remove_dirlist_from_paths(results)
 
     @_dirlist_dec
     async def _isdir(self, path):
         return await self.httpFileSystem._isdir(path)
-    
+
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
-        return await self.httpFileSystem._find(path, maxdepth, withdirs, **kwargs)
+        results = await self.httpFileSystem._find(path, maxdepth, withdirs, **kwargs)
+        return self._remove_dirlist_from_paths(results)
+    
+    async def _isfile(self, path):
+        return not await self._isdir(path)
     
     async def _glob(self, path, maxdepth=None, **kwargs):
         """
@@ -408,25 +458,18 @@ class PelicanFileSystem(AsyncFileSystem):
             root, maxdepth=depth, withdirs=True, detail=True, **kwargs
         )
 
-        pattern = glob_translate(path + ("/" if ends_with_slash else ""))
+        pattern = glob_translate(self._remove_dirlist_from_path(path) + ("/" if ends_with_slash else ""))
         pattern = re.compile(pattern)
-
-        allpaths_cleaned = {}
-        for p, info in allpaths.items():
-          parsed = list(urllib.parse.urlparse(p))
-          parsed[2] = re.sub("/{2,}", "/", parsed[2])
-          cleaned = urllib.parse.urlunparse(parsed)
-          allpaths_cleaned[cleaned] = info
 
         out = {
             (
-                p.rstrip("/")
+                self._remove_dirlist_from_path(p.rstrip("/"))
                 if not append_slash_to_dirname
                 and info["type"] == "directory"
                 and p.endswith("/")
-                else p
+                else self._remove_dirlist_from_path(p)
             ): info
-            for p, info in sorted(allpaths_cleaned.items())
+            for p, info in sorted(allpaths.items())
             if pattern.match(p.rstrip("/"))
         }
 
@@ -438,7 +481,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_dirlist_dec
     async def _info(self, path, **kwargs):
-        return await self.httpFileSystem._info(path, **kwargs)
+        results =  await self.httpFileSystem._info(path, **kwargs)
+        return self._remove_dirlist_from_paths(results)
 
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
@@ -449,7 +493,7 @@ class PelicanFileSystem(AsyncFileSystem):
         path = self._check_fspath(path)
         listUrl = await self.get_dirlist_url(path)
         async for _ in self.httpFileSystem._walk(listUrl, maxdepth, on_error, **kwargs):
-                yield _
+                yield self._remove_dirlist_from_path(_)
 
     def _io_wrapper(self, func):
         """
@@ -500,10 +544,10 @@ class PelicanFileSystem(AsyncFileSystem):
                 path = pelican_url.path
         return path
 
-    def open(self, path, **kwargs):
+    def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
         data_url = sync(self.loop, self.get_origin_cache if self.directReads else self.get_working_cache, path)
-        fp = self.httpFileSystem.open(data_url, **kwargs)
+        fp = self.httpFileSystem.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
         return fp
     
@@ -590,10 +634,6 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _exists(self, path, **kwargs):
         return await self.httpFileSystem._exists(path, **kwargs)
-    
-    @_cache_dec
-    async def _isfile(self, path, **kwargs):
-        return await self.httpFileSystem._isfile(path, **kwargs)
     
     @_cache_dec
     async def _get_file(self, rpath, lpath, **kwargs):
