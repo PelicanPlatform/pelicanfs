@@ -32,6 +32,11 @@ class PelicanException(RuntimeError):
     Base class for all Pelican-related failures
     """
 
+class BadDirectorResponse(PelicanException):
+    """
+    The director response did not include Link Headers
+    """
+
 class NoAvailableSource(PelicanException):
     """
     No source endpoint is currently available for the requested object
@@ -141,6 +146,7 @@ class PelicanFileSystem(AsyncFileSystem):
         self._mkdir = self.httpFileSystem._mkdir
         self._makedirs = self.httpFileSystem._makedirs
 
+    # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @classmethod
     def _strip_protocol(cls, path):
         """For HTTP, we always want to keep the full URL"""
@@ -150,6 +156,38 @@ class PelicanFileSystem(AsyncFileSystem):
             path = path[10:]
         return path
 
+    @staticmethod
+    def _remove_host_from_path(path):
+        parsed_url = urllib.parse.urlparse(path)
+        updated_url = parsed_url._replace(netloc="", scheme="")
+        return urllib.parse.urlunparse(updated_url)
+    
+    @staticmethod
+    def _remove_host_from_paths(paths):
+        if isinstance(paths, list):
+            return [PelicanFileSystem._remove_host_from_paths(path) for path in paths]
+
+        
+        if isinstance(paths, dict):
+            if 'name' in paths:
+                path = paths['name']
+                paths['name'] = PelicanFileSystem._remove_host_from_path(path)
+                if 'url' in paths:
+                    url = paths['url']
+                    paths['url'] = PelicanFileSystem._remove_host_from_path(url)
+                    return paths
+            else:
+                new_dict = {}
+                for key, item in paths.items():
+                    new_key = PelicanFileSystem._remove_host_from_path(key)
+                    new_item = PelicanFileSystem._remove_host_from_paths(item)
+                    new_dict[new_key] = new_item
+                return new_dict
+
+        if isinstance(paths, str):
+            return PelicanFileSystem._remove_host_from_path(paths)
+
+        return paths
 
     async def _discover_federation_metadata(self, discUrl):
         """
@@ -281,6 +319,8 @@ class PelicanFileSystem(AsyncFileSystem):
         timeout = aiohttp.ClientTimeout(total=5)
         session = await self.httpFileSystem.set_session()
         async with session.request('PROPFIND', url, timeout=timeout) as resp:
+            if 'Link' not in resp.headers:
+                raise BadDirectorResponse()
             dirlist_url = parse_metalink(resp.headers)[0][0][0]
         if not dirlist_url:
             raise NoAvailableSource()
@@ -338,37 +378,6 @@ class PelicanFileSystem(AsyncFileSystem):
             return result
         return wrapper
 
-
-    def _remove_dirlist_from_path(self, path):
-        parsed_url = urllib.parse.urlparse(path)
-        updated_url = parsed_url._replace(netloc="", scheme="")
-        return urllib.parse.urlunparse(updated_url)
-
-    def _remove_dirlist_from_paths(self, paths):
-        if isinstance(paths, list):
-            return [self._remove_dirlist_from_paths(path) for path in paths]
-
-        if isinstance(paths, dict):
-            if 'name' in paths:
-                path = paths['name']
-                paths['name'] = self._remove_dirlist_from_path(path)
-                if 'url' in paths:
-                    url = paths['url']
-                    paths['url'] = self._remove_dirlist_from_path(url)
-                    return paths
-            else:
-                new_dict = {}
-                for key, item in paths.items():
-                    new_key = self._remove_dirlist_from_path(key)
-                    new_item = self._remove_dirlist_from_paths(item)
-                    new_dict[new_key] = new_item
-                return new_dict
-
-        if isinstance(paths, str):
-            return self._remove_dirlist_from_path(paths)
-
-        return paths
-
     def _dirlist_dec(func):
         """
         Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
@@ -382,11 +391,10 @@ class PelicanFileSystem(AsyncFileSystem):
             return await func(self, dataUrl, *args[1:], **kwargs)
         return wrapper
 
-
     @_dirlist_dec
     async def _ls(self, path, detail=True, **kwargs):
         results = await self.httpFileSystem._ls(path, detail, **kwargs)
-        return self._remove_dirlist_from_paths(results)
+        return self._remove_host_from_paths(results)
 
     @_dirlist_dec
     async def _isdir(self, path):
@@ -395,7 +403,7 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
         results = await self.httpFileSystem._find(path, maxdepth, withdirs, **kwargs)
-        return self._remove_dirlist_from_paths(results)
+        return self._remove_host_from_paths(results)
     
     async def _isfile(self, path):
         return not await self._isdir(path)
@@ -412,13 +420,13 @@ class PelicanFileSystem(AsyncFileSystem):
             raise ValueError("maxdepth must be at least 1")
         import re
 
-        dirlist_path = await self.get_dirlist_url(path)
+        #dirlist_path = await self.get_dirlist_url(path)
         # Need to ensure the path with the any sort of special `glob` characters is added back in
-        parsed_path = urllib.parse.urlparse(dirlist_path)
-        updated_path = urllib.parse.urlunparse(parsed_path._replace(path=path))
+        #parsed_path = urllib.parse.urlparse(dirlist_path)
+        #updated_path = urllib.parse.urlunparse(parsed_path._replace(path=path))
 
-        ends_with_slash = updated_path.endswith("/")  # _strip_protocol strips trailing slash
-        path = self._strip_protocol(updated_path)
+        ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
+        path = self._strip_protocol(path)
         append_slash_to_dirname = ends_with_slash or path.endswith(("/**", "/*"))
         idx_star = path.find("*") if path.find("*") >= 0 else len(path)
         idx_brace = path.find("[") if path.find("[") >= 0 else len(path)
@@ -458,16 +466,16 @@ class PelicanFileSystem(AsyncFileSystem):
             root, maxdepth=depth, withdirs=True, detail=True, **kwargs
         )
 
-        pattern = glob_translate(self._remove_dirlist_from_path(path) + ("/" if ends_with_slash else ""))
+        pattern = glob_translate(path + ("/" if ends_with_slash else ""))
         pattern = re.compile(pattern)
 
         out = {
             (
-                self._remove_dirlist_from_path(p.rstrip("/"))
+                p.rstrip("/")
                 if not append_slash_to_dirname
                 and info["type"] == "directory"
                 and p.endswith("/")
-                else self._remove_dirlist_from_path(p)
+                else p
             ): info
             for p, info in sorted(allpaths.items())
             if pattern.match(p.rstrip("/"))
@@ -482,7 +490,7 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _info(self, path, **kwargs):
         results =  await self.httpFileSystem._info(path, **kwargs)
-        return self._remove_dirlist_from_paths(results)
+        return self._remove_host_from_paths(results)
 
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
@@ -493,7 +501,7 @@ class PelicanFileSystem(AsyncFileSystem):
         path = self._check_fspath(path)
         listUrl = await self.get_dirlist_url(path)
         async for _ in self.httpFileSystem._walk(listUrl, maxdepth, on_error, **kwargs):
-                yield self._remove_dirlist_from_path(_)
+                yield self._remove_host_from_path(_)
 
     def _io_wrapper(self, func):
         """
@@ -524,24 +532,19 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _check_fspath(self, path: str) -> str:
         """
-        Given a path (either absolute, a pelican://-style URL, or an https://-style),
+        Given a path (either absolute or a pelican://-style URL),
         check that the pelican://-style URL is compatible with the current
         filesystem object and return the path.
         """
         if not path.startswith("/"):
-            # This can potentially be an https:// or http:// path if it comes from a get_mapper call
-            if path.startswith("https://") or path.startswith("http://"):
-                http_url = urllib.parse.urlparse(path)
-                path = http_url.path
-            else:
-                pelican_url = urllib.parse.urlparse("pelican://" + path)
-                discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
-                discovery_str = discovery_url.geturl()
-                if not self.discoveryUrl:
-                    self.discoveryUrl = discovery_str
-                elif self.discoveryUrl != discovery_str:
-                    raise InvalidMetadata()
-                path = pelican_url.path
+            pelican_url = urllib.parse.urlparse("pelican://" + path)
+            discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
+            discovery_str = discovery_url.geturl()
+            if not self.discoveryUrl:
+                self.discoveryUrl = discovery_str
+            elif self.discoveryUrl != discovery_str:
+                raise InvalidMetadata()
+            path = pelican_url.path
         return path
 
     def open(self, path, mode, **kwargs):
@@ -642,7 +645,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_cache_multi_dec
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
-        return await self.httpFileSystem._cat(path, recursive, on_error, batch_size, **kwargs)
+        results = await self.httpFileSystem._cat(path, recursive, on_error, batch_size, **kwargs)
+        return self._remove_host_from_paths(results)
 
     @_cache_multi_dec
     async def _expand_path(self, path, recursive=False, maxdepth=None):
@@ -661,9 +665,5 @@ class OSDFFileSystem(PelicanFileSystem):
 def PelicanMap(root, pelfs: PelicanFileSystem, check=False, create=False):
     """
     Returns and FSMap object assigning creating a mutable mapper at the root location
-    
-    TODO: This currently assigns a cache or origin to the mapper at creation. If that cache fails,
-    this doesn't change to a new cache (the mapping can become complex). This should be fixed in the future
     """
-    dataUrl = sync(pelfs.loop, pelfs.get_origin_url if pelfs.directReads else pelfs.get_working_cache, root)
-    return pelfs.get_mapper(dataUrl, check=check, create=create)
+    return pelfs.get_mapper(root, check=check, create=create)

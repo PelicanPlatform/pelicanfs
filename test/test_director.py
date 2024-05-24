@@ -412,6 +412,7 @@ def test_open_preferred_plus(httpserver: HTTPServer, httpserver2: HTTPServer, ge
 
 def test_open_mapper(httpserver: HTTPServer, get_client):
     foo_url = httpserver.url_for("/foo")
+    foo_bar_url = httpserver.url_for("/foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo", method="GET").respond_with_data(
         "",
@@ -421,8 +422,19 @@ def test_open_mapper(httpserver: HTTPServer, get_client):
                  "X-Pelican-Namespace": "namespace=/foo"
                 },
         )
-    httpserver.expect_oneshot_request("/foo", method="HEAD").respond_with_data("hello, world!")
-    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo", method="HEAD").respond_with_data("hello, world!")
+    
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+                 "Location": foo_bar_url,
+                 "X-Pelican-Namespace": "namespace=/foo"
+                },
+        )
+
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("hello, world!")
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
