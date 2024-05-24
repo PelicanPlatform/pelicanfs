@@ -1,0 +1,75 @@
+{
+    "esmcat_version": "0.1.0",
+    "id": "pelican-test-intake",
+    "description": "This is an subset of the ESM collection for CESM2 Large Ensemble Zarr dataset publicly available on Amazon S3 (us-west-2 region) for testing with PelicanFS",
+    "catalog_file": "pelican-test-intake.csv",
+    "attributes": [
+      {
+        "column_name": "component",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "frequency",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "experiment",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "forcing_variant",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "variable",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "long_name",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "vertical_levels",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "start_time",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "end_time",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "units",
+        "vocabulary": ""
+      },
+      {
+        "column_name": "spatial_domain",
+        "vocabulary": ""
+      }
+    ],
+    "assets": {
+        "column_name": "path",
+        "format": "zarr"
+    },
+    "aggregation_control": {
+      "variable_column_name": "variable",
+      "groupby_attrs": [
+        "component",
+        "experiment",
+        "frequency",
+        "forcing_variant"
+      ],
+      "aggregations": [
+        {
+          "type": "union",
+          "attribute_name": "variable",
+          "options": {
+            "compat": "override"
+          }
+        }
+      ]
+    },
+    "last_updated": "2021-12-27T14:29:25Z"
+}    

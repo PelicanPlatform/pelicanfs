@@ -1,0 +1,5 @@
+variable,long_name,component,experiment,forcing_variant,frequency,vertical_levels,spatial_domain,units,start_time,end_time,path
+FLNS,net longwave flux at surface,atm,historical,cmip6,monthly,1.0,global,W/m2,1850-01-16 12:00:00,2014-12-16 12:00:00,osdf:///chtc/PUBLIC/eturetsky/ncar-subset/ncar/monthly/cesm2LE-historical-cmip6-FLNS.zarr
+FLNSC,clearsky net longwave flux at surface,atm,historical,cmip6,monthly,1.0,global,W/m2,1850-01-16 12:00:00,2014-12-16 12:00:00,osdf:///chtc/PUBLIC/eturetsky/ncar-subset/ncar/monthly/cesm2LE-historical-cmip6-FLNSC.zarr
+FLUT,upwelling longwave flux at top of model,atm,historical,cmip6,monthly,1.0,global,W/m2,1850-01-16 12:00:00,2014-12-16 12:00:00,osdf:///chtc/PUBLIC/eturetsky/ncar-subset/ncar/monthly/cesm2LE-historical-cmip6-FLUT.zarr
+FSNS,net solar flux at surface,atm,historical,cmip6,monthly,1.0,global,W/m2,1850-01-16 12:00:00,2014-12-16 12:00:00,osdf:///chtc/PUBLIC/eturetsky/ncar-subset/ncar/monthly/cesm2LE-historical-cmip6-FSNS.zarr
