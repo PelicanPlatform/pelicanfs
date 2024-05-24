@@ -5,7 +5,7 @@ print(packages)
 
 setup(
     name="pelicanfs",
-    version="1.0.0",
+    version="1.0.01",
     description="An FSSpec Implementation using the Pelican System",
     url = "https://github.com/PelicanPlatform/pelicanfs",
     classifiers=[
