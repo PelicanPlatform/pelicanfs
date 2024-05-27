@@ -81,7 +81,7 @@ class _CacheManager(object):
 
     def get_url(self, obj_name):
         """
-        Given an object name, return the currently-preferred
+        Given an object name, return the currently-preferred cache
         """
         with self._lock:
             if not self._cache_list:
@@ -161,13 +161,13 @@ class PelicanFileSystem(AsyncFileSystem):
         parsed_url = urllib.parse.urlparse(path)
         updated_url = parsed_url._replace(netloc="", scheme="")
         return urllib.parse.urlunparse(updated_url)
-    
+
     @staticmethod
     def _remove_host_from_paths(paths):
         if isinstance(paths, list):
             return [PelicanFileSystem._remove_host_from_paths(path) for path in paths]
 
-        
+
         if isinstance(paths, dict):
             if 'name' in paths:
                 path = paths['name']
@@ -367,20 +367,6 @@ class PelicanFileSystem(AsyncFileSystem):
     def _dirlist_dec(func):
         """
         Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
-        and uses that url for the given function.
-
-        This is for functions which need to get information from origin directories "ls", "du", "info", etc.
-        """
-        async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
-            dataUrl = await self.get_dirlist_url(path)
-            result = await func(self, dataUrl, *args[1:], **kwargs)
-            return result
-        return wrapper
-
-    def _dirlist_dec(func):
-        """
-        Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
         and uses that url for the given function. It then normalizes the paths or list of paths returned by the function
 
         This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
@@ -404,7 +390,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
         results = await self.httpFileSystem._find(path, maxdepth, withdirs, **kwargs)
         return self._remove_host_from_paths(results)
-    
+
     async def _isfile(self, path):
         return not await self._isdir(path)
     
@@ -419,11 +405,6 @@ class PelicanFileSystem(AsyncFileSystem):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         import re
-
-        #dirlist_path = await self.get_dirlist_url(path)
-        # Need to ensure the path with the any sort of special `glob` characters is added back in
-        #parsed_path = urllib.parse.urlparse(dirlist_path)
-        #updated_path = urllib.parse.urlunparse(parsed_path._replace(path=path))
 
         ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
         path = self._strip_protocol(path)
