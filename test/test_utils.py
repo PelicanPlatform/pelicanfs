@@ -39,3 +39,31 @@ def test_remove_hostname():
     # Test a a non-list | string | dict
     assert PelicanFileSystem._remove_host_from_paths(22) == 22
 
+
+def test_fspath():
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        "pelican://test-discovery-url.org",
+        skip_instance_cache=True,
+    )
+    path = "/aboslute/path"
+    assert pelfs._check_fspath(path) == path
+
+    assert pelfs._check_fspath("pelican://test-discovery-url.org/p2/") == '/p2/'
+    
+    assert pelfs._check_fspath("test-discovery-url.org/p3") == '/p3'    
+
+    with pytest.raises(pelicanfs.core.InvalidMetadata):
+        pelfs._check_fspath("pelican://diff-disc/path")
+
+    with pytest.raises(pelicanfs.core.InvalidMetadata):
+        pelfs._check_fspath("not-the-discovery-url.org/p3")
+
+    pelfs_disc = pelicanfs.core.PelicanFileSystem(
+        skip_instance_cache=True
+    )
+
+    assert pelfs_disc.discoveryUrl == ""
+
+    pelfs_disc._check_fspath("pelican://new-discovery-url.org/p/")
+    assert pelfs_disc.discoveryUrl == "pelican://new-discovery-url.org/"
