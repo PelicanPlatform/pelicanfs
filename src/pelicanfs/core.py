@@ -205,8 +205,11 @@ class PelicanFileSystem(AsyncFileSystem):
         # The internal filesystem
         self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
 
-        self.discovery_url = federation_discovery_url
-        self.director_url = ""
+
+        if federation_discovery_url and not federation_discovery_url.endswith('/'):
+            federation_discovery_url = federation_discovery_url + '/'
+        self.discoveryUrl = federation_discovery_url
+        self.directorUrl = ""
 
         self.direct_reads = direct_reads
         self.preferred_caches = preferred_caches
@@ -591,7 +594,10 @@ class PelicanFileSystem(AsyncFileSystem):
         filesystem object and return the path.
         """
         if not path.startswith("/"):
-            pelican_url = urllib.parse.urlparse("pelican://" + path)
+            if path.startswith("pelican://"):
+                pelican_url = urllib.parse.urlparse(path)
+            else:
+                pelican_url = urllib.parse.urlparse("pelican://" + path)
             discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
             discovery_str = discovery_url.geturl()
             if not self.discovery_url:
