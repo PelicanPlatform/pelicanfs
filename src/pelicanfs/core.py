@@ -318,7 +318,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Timeout response in seconds - the default response is 5 minutes
         timeout = aiohttp.ClientTimeout(total=5)
         session = await self.httpFileSystem.set_session()
-        async with session.request('PROPFIND', url, timeout=timeout) as resp:
+        async with session.request('PROPFIND', url, timeout=timeout, allow_redirects = False) as resp:
             if 'Link' not in resp.headers:
                 raise BadDirectorResponse()
             dirlist_url = parse_metalink(resp.headers)[0][0][0]
