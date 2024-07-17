@@ -476,7 +476,12 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
         return await self.httpFileSystem._du(path, total, maxdepth, **kwargs)
-
+    
+    @_dirlist_dec
+    async def _get(self, rpath, lpath, **kwargs):
+        results = await self.httpFileSystem._get(rpath, lpath, **kwargs)
+        return self._remove_host_from_paths(results)
+    
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
