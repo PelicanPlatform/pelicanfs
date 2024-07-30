@@ -155,6 +155,7 @@ def test_info(httpserver: HTTPServer, get_client):
                  "X-Pelican-Namespace": "namespace=/foo"
                 },
         )
+    httpserver.expect_oneshot_request("/foo/bar", method="HEAD").respond_with_data(listing_response)
     httpserver.expect_request("/foo/bar", method="GET").respond_with_data(listing_response)
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),

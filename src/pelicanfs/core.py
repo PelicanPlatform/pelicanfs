@@ -467,12 +467,6 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             return list(out)
 
-
-    @_dirlist_dec
-    async def _info(self, path, **kwargs):
-        results =  await self.httpFileSystem._info(path, **kwargs)
-        return self._remove_host_from_paths(results)
-
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
         return await self.httpFileSystem._du(path, total, maxdepth, **kwargs)
@@ -628,6 +622,10 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _get_file(self, rpath, lpath, **kwargs):
         return await self.httpFileSystem._get_file(rpath, lpath, **kwargs)
     
+    @_cache_dec
+    async def _info(self, path, **kwargs):
+        results =  await self.httpFileSystem._info(path, **kwargs)
+        return self._remove_host_from_paths(results)
 
     @_cache_multi_dec
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
