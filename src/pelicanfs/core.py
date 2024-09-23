@@ -24,6 +24,7 @@ import urllib.parse
 import asyncio
 import threading
 import logging
+from typing import Optional, List, Tuple, Dict
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -46,6 +47,50 @@ class InvalidMetadata(PelicanException):
     """
     No Pelican metadata was found for the federation
     """
+
+class _AccessResp:
+    def __init__(self, path: str, success: bool, error: Optional[str] = None):
+        self.access_path = path
+        self.success = success
+        self.error = error
+    
+    def __repr__(self) -> str:
+        if self.error:
+            return f"{{NamespacePath: {self.access_path}, Success: {self.success}, Error: {self.error}}}"
+        return f"{{NamespacePath: {self.access_path}, Success: {self.success}}}"
+    
+class _AccessStats:
+    def __init__(self):
+        """
+        Manage the cache access stats
+
+        For each namespace path, keep a list of the last three cache responses, including the
+        cache path, a boolean which is try if successful, and an error string if not
+        """
+        self.data: Dict[str, List[_AccessResp]] = {}
+
+    def add_response(self, namespace_path: str, response: _AccessResp) -> None:
+        """
+        Add the most recent _CacheResp to for the namespace path, removing the oldest response if
+        there are more than three responses already
+        """
+        if namespace_path not in self.data:
+            self.data[namespace_path] = []
+        
+        if len(self.data[namespace_path]) >= 3:
+            self.data[namespace_path].pop(0)
+        
+        self.data[namespace_path].append(response)
+
+    def get_responses(self, namespace_path: str) -> Tuple[List[_AccessResp], bool]:
+        if namespace_path in self.data:
+            return self.data[namespace_path], True
+        return [], False
+
+    def print(self) -> None:
+        for key, value in self.data.items():
+            print(f"{key}: {' '.join(map(str, value))}")
+
 
 class _CacheManager(object):
     """
@@ -126,6 +171,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15*60)
         self._namespace_lock = threading.Lock()
+        self._access_stats = _AccessStats()
 
         self.token = kwargs.get('headers', {}).get('Authorization')
 
@@ -189,6 +235,9 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return paths
 
+    def get_access_data(self,):
+        return self._access_stats
+    
     async def _discover_federation_metadata(self, discUrl):
         """
         Returns the json response from a GET call to the metadata discovery url of the federation
@@ -301,7 +350,6 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns a dirlist host url for the given namespace locations
         """
-
         if not self.directorUrl:
             metadata_json = await self._discover_federation_metadata(self.discoveryUrl)
             # Ensure the director url has a '/' at the end
@@ -328,7 +376,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _get_prefix_info(self, path: str) -> _CacheManager:
         """
-        Given a path into the filesystem, return the information inthe
+        Given a path into the filesystem, return the information in the
         namespace cache (if any)
         """
         namespace_info = None
@@ -348,7 +396,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return namespace_info.get_url(fileloc)
     
-    def _bad_cache(self, url: str):
+    def _bad_cache(self, url: str, e: Exception):
         """
         Given a URL of a cache transfer that failed, record
         the corresponding cache as a "bad cache" in the namespace
@@ -358,6 +406,10 @@ class PelicanFileSystem(AsyncFileSystem):
         path = cache_url.path
         cache_url = cache_url._replace(query="", path="", fragment="")
         bad_cache = cache_url.geturl()
+
+        ar = _AccessResp(url, False, str(e))
+        self._access_stats.add_response(path, ar)
+
 
         namespace_info = self._get_prefix_info(path)
         if not namespace_info:
@@ -486,8 +538,8 @@ class PelicanFileSystem(AsyncFileSystem):
         def io_wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except:
-                self._bad_cache(self.path)
+            except Exception as e:
+                self._bad_cache(self.path, e)
                 raise
         return io_wrapper
 
@@ -499,8 +551,8 @@ class PelicanFileSystem(AsyncFileSystem):
         async def io_wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except:
-                self._bad_cache(self.path)
+            except Exception as e:
+                self._bad_cache(self.path, e)
                 raise
 
         return io_wrapper
@@ -527,6 +579,8 @@ class PelicanFileSystem(AsyncFileSystem):
         data_url = sync(self.loop, self.get_origin_url if self.directReads else self.get_working_cache, path)
         fp = self.httpFileSystem.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
+        ar = _AccessResp(data_url, True)
+        self._access_stats.add_response(path, ar)
         return fp
     
     async def open_async(self, path, **kwargs):
@@ -537,6 +591,8 @@ class PelicanFileSystem(AsyncFileSystem):
             data_url = self.get_working_cache(path)
         fp = await self.httpFileSystem.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
+        ar = _AccessResp(data_url, True)
+        self._access_stats.add_response(path, ar)
         return fp
 
     def _cache_dec(func):
@@ -557,9 +613,11 @@ class PelicanFileSystem(AsyncFileSystem):
                 dataUrl = await self.get_working_cache(path)
             try:
                 result = await func(self, dataUrl, *args[1:], **kwargs)
-            except:
-                self._bad_cache(dataUrl)
+            except Exception as e:
+                self._bad_cache(dataUrl, e)
                 raise
+            ar = _AccessResp(dataUrl, True)
+            self._access_stats.add_response(path, ar)
             return result
         return wrapper
     
@@ -591,13 +649,21 @@ class PelicanFileSystem(AsyncFileSystem):
                     dataUrl.append(dUrl)
             try:
                 result = await func(self, dataUrl, *args[1:], **kwargs)
-            except:
+            except Exception as e:
                 if isinstance(dataUrl, list):
                     for dUrl in dataUrl:
-                        self._bad_cache(dUrl)
+                        self._bad_cache(dUrl, e)
                 else:
-                    self._bad_cache(dataUrl)
+                    self._bad_cache(dataUrl, e)
                 raise
+            if isinstance(dataUrl, list):
+                for dUrl in dataUrl:
+                    ar = _AccessResp(dUrl, True)
+                    ns_path = self._remove_host_from_path(dUrl)
+                    self._access_stats.add_response(ns_path, ar)
+            else:
+                ar = _AccessResp(dataUrl, True)
+                self._access_stats.add_response(path, ar)
             return result
         return wrapper
 
