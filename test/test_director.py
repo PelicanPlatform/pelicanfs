@@ -363,6 +363,11 @@ def test_open_fallback(httpserver: HTTPServer, httpserver2: HTTPServer, get_clie
     with pytest.raises(NoAvailableSource):
         assert pelfs.cat("/foo/bar")
 
+    response, e = pelfs.get_access_data().get_responses("/foo/bar")
+    assert e
+    assert len(response) == 3
+    assert response[2].success == False
+
 def test_open_preferred(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
     foo_bar_url = httpserver.url_for("/foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
