@@ -529,7 +529,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
-        data_url = sync(self.loop, self.get_origin_cache if self.directReads else self.get_working_cache, path)
+        data_url = sync(self.loop, self.get_origin_url if self.directReads else self.get_working_cache, path)
         fp = self.httpFileSystem.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
         return fp
@@ -537,7 +537,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def open_async(self, path, **kwargs):
         path = self._check_fspath(path)
         if self.directReads:
-            data_url = await self.get_origin_cache(path)
+            data_url = await self.get_origin_url(path)
         else:
             data_url = self.get_working_cache(path)
         fp = await self.httpFileSystem.open_async(data_url, **kwargs)
