@@ -52,9 +52,9 @@ Sometimes various systems that interact with an fsspec want a key-value mapper r
 ```python
 from pelicanfs.core import PelicanFileSystem, PelicanMap
 
-pelfs = PelicanFileSystem(“some-director-url”)
-file1 = PelicanMap(“/namespace/file/1”, pelfs=pelfs)
-file2 = PelicanMap(“/namespace/file/2”, pelfs=pelfs)
+pelfs = PelicanFileSystem("some-director-url")
+file1 = PelicanMap("/namespace/file/1", pelfs=pelfs)
+file2 = PelicanMap("/namespace/file/2", pelfs=pelfs)
 ds = xarray.open_mfdataset([file1,file2], engine='zarr')
 ```
 
