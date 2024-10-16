@@ -9,16 +9,19 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.12"]
-
+        python-version:
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.x'
+        python-version: ${{ matrix.python-version }}
     - name: Install Dependencies
       run: |
-        python3 -m pip install '.[testing]'
+        python -m pip install '.[testing]'
     - name: Test with pytest
       run: pytest
