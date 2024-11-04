@@ -397,7 +397,6 @@ class PelicanFileSystem(AsyncFileSystem):
             return
         namespace_info.bad_cache(bad_cache)
 
-    @staticmethod
     def _dirlist_dec(func):
         """
         Decorator function which, when given a namespace location, gets the url for the dirlist
@@ -585,7 +584,6 @@ class PelicanFileSystem(AsyncFileSystem):
         fp.read = self._async_io_wrapper(fp.read)
         return fp
 
-    @staticmethod
     def _cache_dec(func):
         """
         Decorator function which, when given a namespace location, finds the best working cache
@@ -612,7 +610,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return wrapper
 
-    @staticmethod
     def _cache_multi_dec(func):
         """
         Decorator function which, when given a list of namespace location, finds the best
