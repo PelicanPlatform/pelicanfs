@@ -21,12 +21,12 @@ def test_remove_hostname():
     """
     # Test a single string
     paths = "https://test-url.org/namespace/path"
-    assert PelicanFileSystem._remove_host_from_paths(paths) == "/namespace/path"
+    assert PelicanFileSystem._remove_host_from_paths(paths) == "/namespace/path" # pylint: disable=protected-access
 
     # Test a list
     paths = ["https://test-url.org/namespace/path", "osdf://test-url.org/namespace/path2"]
     assert PelicanFileSystem._remove_host_from_paths(paths) == \
-        ["/namespace/path", "/namespace/path2"]
+        ["/namespace/path", "/namespace/path2"] # pylint: disable=protected-access
 
     # Test an info-return
     paths = [{"name": "https://test-url.org/namespace/path",
@@ -35,7 +35,7 @@ def test_remove_hostname():
     expected_result = [{"name": "/namespace/path",
                         "other": "https://body-remains.test"},
                         {"name": "/namespace/path2", "size": "42"}]
-    assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result
+    assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result # pylint: disable=protected-access
 
     # Test a find-return
     paths = {"https://test-url.org/namespace/path":
@@ -43,7 +43,7 @@ def test_remove_hostname():
              "https://test-url.org/namespace/path2":
              "/namespace/path3"}
     expected_result = {"/namespace/path": "/namespace/path", "/namespace/path2": "/namespace/path3"}
-    assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result
+    assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result # pylint: disable=protected-access
 
     # Test a a non-list | string | dict
-    assert PelicanFileSystem._remove_host_from_paths(22) == 22
+    assert PelicanFileSystem._remove_host_from_paths(22) == 22 # pylint: disable=protected-access
