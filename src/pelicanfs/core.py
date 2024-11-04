@@ -95,6 +95,82 @@ class _CacheManager(object):
         with self._lock:
             self._cache_list.remove(cache_url_parsed.geturl())
 
+def _dirlist_dec(func):
+    """
+    Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
+    and uses that url for the given function. It then normalizes the paths or list of paths returned by the function
+
+    This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
+    """
+    async def wrapper(self, *args, **kwargs):
+        path = self._check_fspath(args[0])
+        dataUrl = await self.get_dirlist_url(path)
+        return await func(self, dataUrl, *args[1:], **kwargs)
+    return wrapper
+
+def _cache_dec(func):
+    """
+    Decorator function which, when given a namespace location, finds the best working cache that serves the namespace,
+    then calls the sub function with that namespace
+
+
+    Note: This will find the nearest cache even if provided with a valid url. The reason being that if that url was found
+    via an "ls" call, then that url points to an origin, not the cache. So it cannot be assumed that a valid url points to
+    a cache
+    """
+    async def wrapper(self, *args, **kwargs):
+        path = self._check_fspath(args[0])
+        if self.directReads:
+            dataUrl = await self.get_origin_url(path)
+        else:
+            dataUrl = await self.get_working_cache(path)
+        try:
+            result = await func(self, dataUrl, *args[1:], **kwargs)
+        except:
+            self._bad_cache(dataUrl)
+            raise
+        return result
+    return wrapper
+
+
+def _cache_multi_dec(func):
+    """
+    Decorator function which, when given a list of namespace location, finds the best working cache that serves the namespace,
+    then calls the sub function with that namespace
+
+
+    Note: If a valid url is provided, it will not call the director to get a cache. This does mean that if a url was created/retrieved via
+    ls and then used for another function, the url will be an origin url and not a cache url. This should be fixed in the future.
+    """
+    async def wrapper(self, *args, **kwargs):
+        path = args[0]
+        if isinstance(path, str):
+            path = self._check_fspath(args[0])
+            if self.directReads:
+                dataUrl = await self.get_origin_url(path)
+            else:
+                dataUrl = await self.get_working_cache(path)
+        else:
+            dataUrl = []
+            for p in path:
+                p = self._check_fspath(p)
+                if self.directReads:
+                    dUrl = await self.get_origin_url(p)
+                else:
+                    dUrl =  await self.get_working_cache(p)
+                dataUrl.append(dUrl)
+        try:
+            result = await func(self, dataUrl, *args[1:], **kwargs)
+        except:
+            if isinstance(dataUrl, list):
+                for dUrl in dataUrl:
+                    self._bad_cache(dUrl)
+            else:
+                self._bad_cache(dataUrl)
+            raise
+        return result
+    return wrapper
+
 class PelicanFileSystem(AsyncFileSystem):
     """
     Access a pelican namespace as if it were a file system.
@@ -234,9 +310,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
-        cacheUrl = self._match_namespace(fparsed.path)
-        if cacheUrl:
-            return cacheUrl
+        cache_url = self._match_namespace(fparsed.path)
+        if cache_url:
+            return cache_url
 
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
@@ -363,19 +439,6 @@ class PelicanFileSystem(AsyncFileSystem):
         if not namespace_info:
             return
         namespace_info.bad_cache(bad_cache)
-
-    def _dirlist_dec(func):
-        """
-        Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
-        and uses that url for the given function. It then normalizes the paths or list of paths returned by the function
-
-        This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
-        """
-        async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
-            dataUrl = await self.get_dirlist_url(path)
-            return await func(self, dataUrl, *args[1:], **kwargs)
-        return wrapper
 
     @_dirlist_dec
     async def _ls(self, path, detail=True, **kwargs):
@@ -538,72 +601,6 @@ class PelicanFileSystem(AsyncFileSystem):
         fp = await self.httpFileSystem.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
         return fp
-
-    def _cache_dec(func):
-        """
-        Decorator function which, when given a namespace location, finds the best working cache that serves the namespace,
-        then calls the sub function with that namespace
-
-
-        Note: This will find the nearest cache even if provided with a valid url. The reason being that if that url was found
-        via an "ls" call, then that url points to an origin, not the cache. So it cannot be assumed that a valid url points to
-        a cache
-        """
-        async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
-            if self.directReads:
-                dataUrl = await self.get_origin_url(path)
-            else:
-                dataUrl = await self.get_working_cache(path)
-            try:
-                result = await func(self, dataUrl, *args[1:], **kwargs)
-            except:
-                self._bad_cache(dataUrl)
-                raise
-            return result
-        return wrapper
-    
-    def _cache_multi_dec(func):
-        """
-        Decorator function which, when given a list of namespace location, finds the best working cache that serves the namespace,
-        then calls the sub function with that namespace
-
-
-        Note: If a valid url is provided, it will not call the director to get a cache. This does mean that if a url was created/retrieved via
-        ls and then used for another function, the url will be an origin url and not a cache url. This should be fixed in the future.
-        """
-        async def wrapper(self, *args, **kwargs):
-            path = args[0]
-            if isinstance(path, str):
-                path = self._check_fspath(args[0])
-                if self.directReads:
-                    dataUrl = await self.get_origin_url(path)
-                else:
-                    dataUrl = await self.get_working_cache(path)
-            else:
-                dataUrl = []
-                for p in path:
-                    p = self._check_fspath(p)
-                    if self.directReads:
-                        dUrl = await self.get_origin_url(p)
-                    else:
-                        dUrl =  await self.get_working_cache(p)
-                    dataUrl.append(dUrl)
-            try:
-                result = await func(self, dataUrl, *args[1:], **kwargs)
-            except:
-                if isinstance(dataUrl, list):
-                    for dUrl in dataUrl:
-                        self._bad_cache(dUrl)
-                else:
-                    self._bad_cache(dataUrl)
-                raise
-            return result
-        return wrapper
-
-    @_cache_dec
-    async def open_async(self, path, mode="rb", size=None, **kwargs):
-        return await self.httpFileSystem.open_async(path, mode, size, **kwargs)
     
     @_cache_dec
     async def _cat_file(self, path, start=None, end=None, **kwargs):
