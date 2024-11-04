@@ -49,6 +49,13 @@ class InvalidMetadata(PelicanException):
     """
 
 class _AccessResp:
+    """
+    A class representing a cache response.
+
+    Include's the full html request path, called access_path, which is a the cache's url 
+    and the namespace prefix. It also includes whether the access was successful and 
+    an error string if it exists
+    """
     def __init__(self, path: str, success: bool, error: Optional[str] = None):
         self.access_path = path
         self.success = success
@@ -65,7 +72,8 @@ class _AccessStats:
         Manage the cache access stats
 
         For each namespace path, keep a list of the last three cache responses, including the
-        cache path, a boolean which is try if successful, and an error string if not
+        full cache url plus the object path, a boolean which is true if the access was 
+        successful and false otherwise, and an optional error string if the access returned an error
         """
         self.data: Dict[str, List[_AccessResp]] = {}
 

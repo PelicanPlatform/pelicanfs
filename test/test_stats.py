@@ -64,3 +64,4 @@ def test_response_management():
     # Test no responses for path
     k, e = aStats.get_responses("no_path")
     assert e == False
+    
