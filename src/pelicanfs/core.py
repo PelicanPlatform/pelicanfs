@@ -308,6 +308,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns the highest priority cache for the namespace that appears to be working
         """
+        namespace = None
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
         cache_url = self._match_namespace(fparsed.path)
@@ -550,7 +551,7 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 return func(*args, **kwargs)
             except:
-                self._bad_cache(self.path)
+                self._bad_cache(args[0])
                 raise
         return io_wrapper
 
@@ -563,7 +564,7 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 return func(*args, **kwargs)
             except:
-                self._bad_cache(self.path)
+                self._bad_cache(args[0])
                 raise
 
         return io_wrapper
