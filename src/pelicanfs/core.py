@@ -1,55 +1,59 @@
 """
 Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
- 
+
 Licensed under the Apache License, Version 2.0 (the "License"); you
 may not use this file except in compliance with the License.  You may
 obtain a copy of the License at
- 
+
     http://www.apache.org/licenses/LICENSE-2.0
- 
+
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
-limitations under the License. 
+limitations under the License.
 """
 
 import asyncio
 import logging
+import re
 import threading
 import urllib.parse
-import re
 
-
-import cachetools
 import aiohttp
-from fsspec.utils import glob_translate
-from fsspec.asyn import AsyncFileSystem, sync
+import cachetools
 import fsspec.implementations.http as fshttp
+from fsspec.asyn import AsyncFileSystem, sync
+from fsspec.utils import glob_translate
 
 from .dir_header_parser import parse_metalink
 
 logger = logging.getLogger("fsspec.pelican")
+
 
 class PelicanException(RuntimeError):
     """
     Base class for all Pelican-related failures
     """
 
+
 class BadDirectorResponse(PelicanException):
     """
     The director response did not include Link Headers
     """
+
 
 class NoAvailableSource(PelicanException):
     """
     No source endpoint is currently available for the requested object
     """
 
+
 class InvalidMetadata(PelicanException):
     """
     No Pelican metadata was found for the federation
     """
+
 
 class _CacheManager(object):
     """
@@ -111,7 +115,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     It works by composing with an http fsspec. Whenever a function call
     is made to the PelicanFileSystem, it will call out to the director to get
-    an appropriate url for the given call. This url is then passed on to the 
+    an appropriate url for the given call. This url is then passed on to the
     http fsspec which will handle the actual logic of the function.
 
     NOTE: Once a url is passed onto the http fsspec, that url will be the one
@@ -120,27 +124,26 @@ class PelicanFileSystem(AsyncFileSystem):
 
     protocol = "pelican"
 
-
-    def __init__ (
-            self,
-            federationDiscoveryUrl="",
-            direct_reads = False,
-            preferred_caches = None,
-            asynchronous = False,
-            loop = None,
-            **kwargs
+    def __init__(
+        self,
+        federationDiscoveryUrl="",
+        direct_reads=False,
+        preferred_caches=None,
+        asynchronous=False,
+        loop=None,
+        **kwargs
     ):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
 
-        self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15*60)
+        self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15 * 60)
         self._namespace_lock = threading.Lock()
 
-        self.token = kwargs.get('headers', {}).get('Authorization')
+        self.token = kwargs.get("headers", {}).get("Authorization")
 
         # The internal filesystem
-        self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous,
-                                                      loop=loop,
-                                                      **kwargs)
+        self.http_file_system = fshttp.HTTPFileSystem(
+            asynchronous=asynchronous, loop=loop, **kwargs
+        )
 
         self.discovery_url = federationDiscoveryUrl
         self.director_url = ""
@@ -178,14 +181,13 @@ class PelicanFileSystem(AsyncFileSystem):
         if isinstance(paths, list):
             return [PelicanFileSystem._remove_host_from_paths(path) for path in paths]
 
-
         if isinstance(paths, dict):
-            if 'name' in paths:
-                path = paths['name']
-                paths['name'] = PelicanFileSystem._remove_host_from_path(path)
-                if 'url' in paths:
-                    url = paths['url']
-                    paths['url'] = PelicanFileSystem._remove_host_from_path(url)
+            if "name" in paths:
+                path = paths["name"]
+                paths["name"] = PelicanFileSystem._remove_host_from_path(path)
+                if "url" in paths:
+                    url = paths["url"]
+                    paths["url"] = PelicanFileSystem._remove_host_from_path(url)
                     return paths
             else:
                 new_dict = {}
@@ -206,8 +208,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         # Parse the url for federation discovery
         discovery_url = urllib.parse.urlparse(disc_url)
-        discovery_url = discovery_url._replace(scheme="https",
-                                               path="/.well-known/pelican-configuration")
+        discovery_url = discovery_url._replace(
+            scheme="https", path="/.well-known/pelican-configuration"
+        )
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
@@ -224,7 +227,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not self.director_url:
             metadata_json = await self._discover_federation_metadata(self.discovery_url)
             # Ensure the director url has a '/' at the end
-            director_url = metadata_json.get('director_endpoint')
+            director_url = metadata_json.get("director_endpoint")
             if not director_url:
                 raise InvalidMetadata()
 
@@ -252,13 +255,20 @@ class PelicanFileSystem(AsyncFileSystem):
             return cache_url
 
         # Calculate the list of applicable caches; this takes into account the
-        # preferredCaches for the filesystem.  If '+' is a preferred cache, we
+        # preferred_caches for the filesystem.  If '+' is a preferred cache, we
         # add all the director-provided caches to the list (doing a round of de-dup)
         cache_list = []
         if self.preferred_caches:
-            cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))\
-                          ._replace(query=fparsed.query).geturl()
-                          if cache != "+" else "+" for cache in self.preferred_caches]
+            cache_list = [
+                (
+                    urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))
+                    ._replace(query=fparsed.query)
+                    .geturl()
+                    if cache != "+"
+                    else "+"
+                )
+                for cache in self.preferred_caches
+            ]
             namespace = "/"
         if not self.preferred_caches or ("+" in self.preferred_caches):
             headers = await self.get_director_headers(fileloc)
@@ -266,8 +276,10 @@ class PelicanFileSystem(AsyncFileSystem):
             old_cache_list = cache_list
             cache_list = []
             cache_set = set()
-            new_caches = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for
-                          entry in metalist]
+            new_caches = [
+                urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl()
+                for entry in metalist
+            ]
             for cache in old_cache_list:
                 if cache == "+":
                     for cache2 in new_caches:
@@ -290,10 +302,12 @@ class PelicanFileSystem(AsyncFileSystem):
                 async with session.head(updated_url, timeout=timeout) as resp:
                     if resp.status >= 200 and resp.status < 400:
                         break
-            except (aiohttp.client_exceptions.ClientConnectorError,
-                    FileNotFoundError,
-                    asyncio.TimeoutError,
-                    asyncio.exceptions.TimeoutError):
+            except (
+                aiohttp.client_exceptions.ClientConnectorError,
+                FileNotFoundError,
+                asyncio.TimeoutError,
+                asyncio.exceptions.TimeoutError,
+            ):
                 pass
             cache_list = cache_list[1:]
 
@@ -324,7 +338,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not self.director_url:
             metadata_json = await self._discover_federation_metadata(self.discovery_url)
             # Ensure the director url has a '/' at the end
-            director_url = metadata_json.get('director_endpoint')
+            director_url = metadata_json.get("director_endpoint")
             if not director_url:
                 raise InvalidMetadata()
 
@@ -337,11 +351,8 @@ class PelicanFileSystem(AsyncFileSystem):
         # Timeout response in seconds - the default response is 5 minutes
         timeout = aiohttp.ClientTimeout(total=5)
         session = await self.http_file_system.set_session()
-        async with session.request('PROPFIND',
-                                   url,
-                                   timeout=timeout,
-                                   allow_redirects = False) as resp:
-            if 'Link' not in resp.headers:
+        async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
+            if "Link" not in resp.headers:
                 raise BadDirectorResponse()
             dirlist_url = parse_metalink(resp.headers)[0][0][0]
         if not dirlist_url:
@@ -396,24 +407,30 @@ class PelicanFileSystem(AsyncFileSystem):
         This is for functions which need to retrieve information from origin directories
         such as "find", "ls", "info", etc.
         """
+
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0]) # pylint: disable=protected-access
+            path = self._check_fspath(args[0])  # pylint: disable=protected-access
             data_url = await self.get_dirlist_url(path)
             return await func(self, data_url, *args[1:], **kwargs)
+
         return wrapper
 
     @_dirlist_dec
     async def _ls(self, path, detail=True, **kwargs):
-        results = await self.http_file_system._ls(path, detail, **kwargs) # pylint: disable=protected-access
+        results = await self.http_file_system._ls(
+            path, detail, **kwargs
+        )  # pylint: disable=protected-access
         return self._remove_host_from_paths(results)
 
     @_dirlist_dec
     async def _isdir(self, path):
-        return await self.http_file_system._isdir(path) # pylint: disable=protected-access
+        return await self.http_file_system._isdir(path)  # pylint: disable=protected-access
 
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
-        results = await self.http_file_system._find(path, maxdepth, withdirs, **kwargs) # pylint: disable=protected-access
+        results = await self.http_file_system._find(
+            path, maxdepth, withdirs, **kwargs
+        )  # pylint: disable=protected-access
         return self._remove_host_from_paths(results)
 
     async def _isfile(self, path):
@@ -467,9 +484,7 @@ class PelicanFileSystem(AsyncFileSystem):
             else:
                 depth = None
 
-        allpaths = await self._find(
-            root, maxdepth=depth, withdirs=True, detail=True, **kwargs
-        )
+        allpaths = await self._find(root, maxdepth=depth, withdirs=True, detail=True, **kwargs)
 
         pattern = glob_translate(path + ("/" if ends_with_slash else ""))
         pattern = re.compile(pattern)
@@ -477,9 +492,7 @@ class PelicanFileSystem(AsyncFileSystem):
         out = {
             (
                 p.rstrip("/")
-                if not append_slash_to_dirname
-                and info["type"] == "directory"
-                and p.endswith("/")
+                if not append_slash_to_dirname and info["type"] == "directory" and p.endswith("/")
                 else p
             ): info
             for p, info in sorted(allpaths.items())
@@ -493,13 +506,17 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
-        return await self.http_file_system._du(path, total, maxdepth, **kwargs) # pylint: disable=protected-access
+        return await self.http_file_system._du(
+            path, total, maxdepth, **kwargs
+        )  # pylint: disable=protected-access
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
         list_url = await self.get_dirlist_url(path)
-        async for _ in self.http_file_system._walk(list_url, maxdepth, on_error, **kwargs): # pylint: disable=protected-access
+        async for _ in self.http_file_system._walk(
+            list_url, maxdepth, on_error, **kwargs
+        ):  # pylint: disable=protected-access
             yield self._remove_host_from_path(_)
 
     def _io_wrapper(self, func):
@@ -507,12 +524,14 @@ class PelicanFileSystem(AsyncFileSystem):
         A wrapper around calls to the file which intercepts
         failures and marks the corresponding cache as bad
         """
+
         def io_wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except:
+            except BaseException:
                 self._bad_cache(args[0])
                 raise
+
         return io_wrapper
 
     def _async_io_wrapper(self, func):
@@ -520,10 +539,11 @@ class PelicanFileSystem(AsyncFileSystem):
         An async wrapper around calls to the file which intercepts
         failures and marks the corresponding cache as bad
         """
+
         async def io_wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except:
+            except BaseException:
                 self._bad_cache(args[0])
                 raise
 
@@ -548,9 +568,9 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
-        data_url = sync(self.loop, self.get_origin_url if
-                        self.direct_reads else
-                        self.get_working_cache, path)
+        data_url = sync(
+            self.loop, self.get_origin_url if self.direct_reads else self.get_working_cache, path
+        )
         fp = self.http_file_system.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
         return fp
@@ -572,22 +592,24 @@ class PelicanFileSystem(AsyncFileSystem):
         that serves the namespace, then calls the sub function with that namespace
 
 
-        Note: This will find the nearest cache even if provided with a valid url. The reason being 
+        Note: This will find the nearest cache even if provided with a valid url. The reason being
         that if that url was found via an "ls" call, then that url points to an origin, not the
         cache. So it cannot be assumed that a valid url points to a cache
         """
+
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0]) # pylint: disable=protected-access
-            if self.directReads:
+            path = self._check_fspath(args[0])  # pylint: disable=protected-access
+            if self.direct_reads:
                 data_url = await self.get_origin_url(path)
             else:
                 data_url = await self.get_working_cache(path)
             try:
                 result = await func(self, data_url, *args[1:], **kwargs)
-            except:
-                self._bad_cache(data_url) # pylint: disable=protected-access
+            except BaseException:
+                self._bad_cache(data_url)  # pylint: disable=protected-access
                 raise
             return result
+
         return wrapper
 
     @staticmethod
@@ -597,72 +619,88 @@ class PelicanFileSystem(AsyncFileSystem):
         working cache that serves the namespace, then calls the sub function with that namespace
 
 
-        Note: If a valid url is provided, it will not call the director to get a cache. 
-        This does mean that if a url was created/retrieved via ls and then used for another 
+        Note: If a valid url is provided, it will not call the director to get a cache.
+        This does mean that if a url was created/retrieved via ls and then used for another
         function, the url will be an origin url and not a cache url.
-        
+
         TODO: Fix the above
         """
+
         async def wrapper(self, *args, **kwargs):
             path = args[0]
             if isinstance(path, str):
-                path = self._check_fspath(args[0]) # pylint: disable=protected-access
-                if self.directReads:
+                path = self._check_fspath(args[0])  # pylint: disable=protected-access
+                if self.direct_reads:
                     data_url = await self.get_origin_url(path)
                 else:
                     data_url = await self.get_working_cache(path)
             else:
                 data_url = []
                 for p in path:
-                    p = self._check_fspath(p) # pylint: disable=protected-access
-                    if self.directReads:
+                    p = self._check_fspath(p)  # pylint: disable=protected-access
+                    if self.direct_reads:
                         d_url = await self.get_origin_url(p)
                     else:
-                        d_url =  await self.get_working_cache(p)
+                        d_url = await self.get_working_cache(p)
                     data_url.append(d_url)
             try:
                 result = await func(self, data_url, *args[1:], **kwargs)
-            except:
+            except BaseException:
                 if isinstance(data_url, list):
                     for d_url in data_url:
-                        self._bad_cache(d_url) # pylint: disable=protected-access
+                        self._bad_cache(d_url)  # pylint: disable=protected-access
                 else:
-                    self._bad_cache(data_url) # pylint: disable=protected-access
+                    self._bad_cache(data_url)  # pylint: disable=protected-access
                 raise
             return result
-        return wrapper
 
+        return wrapper
 
     @_cache_dec
     async def _cat_file(self, path, start=None, end=None, **kwargs):
-        return await self.http_file_system._cat_file(path, start, end, **kwargs) # pylint: disable=protected-access
+        return await self.http_file_system._cat_file(
+            path, start, end, **kwargs
+        )  # pylint: disable=protected-access
 
     @_cache_dec
     async def _exists(self, path, **kwargs):
-        return await self.http_file_system._exists(path, **kwargs) # pylint: disable=protected-access
+        return await self.http_file_system._exists(
+            path, **kwargs
+        )  # pylint: disable=protected-access
 
     @_cache_dec
     async def _get_file(self, rpath, lpath, **kwargs):
-        return await self.http_file_system._get_file(rpath, lpath, **kwargs) # pylint: disable=protected-access
+        return await self.http_file_system._get_file(
+            rpath, lpath, **kwargs
+        )  # pylint: disable=protected-access
 
     @_cache_dec
     async def _info(self, path, **kwargs):
-        results =  await self.http_file_system._info(path, **kwargs) # pylint: disable=protected-access
+        results = await self.http_file_system._info(
+            path, **kwargs
+        )  # pylint: disable=protected-access
         return self._remove_host_from_paths(results)
 
     @_cache_dec
     async def _get(self, rpath, lpath, **kwargs):
-        results = await self.http_file_system._get(rpath, lpath, **kwargs) # pylint: disable=protected-access
+        results = await self.http_file_system._get(
+            rpath, lpath, **kwargs
+        )  # pylint: disable=protected-access
         return self._remove_host_from_paths(results)
 
     @_cache_multi_dec
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
-        results = await self.http_file_system._cat(path, recursive, on_error, batch_size, **kwargs) # pylint: disable=protected-access
+        results = await self.http_file_system._cat(
+            path, recursive, on_error, batch_size, **kwargs
+        )  # pylint: disable=protected-access
         return self._remove_host_from_paths(results)
 
     @_cache_multi_dec
     async def _expand_path(self, path, recursive=False, maxdepth=None):
-        return await self.http_file_system._expand_path(path, recursive, maxdepth) # pylint: disable=protected-access
+        return await self.http_file_system._expand_path(
+            path, recursive, maxdepth
+        )  # pylint: disable=protected-access
+
 
 class OSDFFileSystem(PelicanFileSystem):
     """
@@ -674,7 +712,10 @@ class OSDFFileSystem(PelicanFileSystem):
     def __init__(self, **kwargs):
         super().__init__("pelican://osg-htc.org", **kwargs)
 
-def PelicanMap(root, pelfs: PelicanFileSystem, check=False, create=False): # pylint: disable=invalid-name
+
+def PelicanMap(
+    root, pelfs: PelicanFileSystem, check=False, create=False
+):  # pylint: disable=invalid-name
     """
     Returns and FSMap object assigning creating a mutable mapper at the root location
     """
