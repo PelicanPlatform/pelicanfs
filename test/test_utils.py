@@ -13,29 +13,37 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License. 
 """
-import pytest
-import pelicanfs.core
 from pelicanfs.core import PelicanFileSystem
 
 def test_remove_hostname():
+    """
+    Test removing the hostname from various paths
+    """
     # Test a single string
     paths = "https://test-url.org/namespace/path"
     assert PelicanFileSystem._remove_host_from_paths(paths) == "/namespace/path"
 
     # Test a list
     paths = ["https://test-url.org/namespace/path", "osdf://test-url.org/namespace/path2"]
-    PelicanFileSystem._remove_host_from_paths(paths) == ["/namespace/path", "namespace/pathe2"]
+    assert PelicanFileSystem._remove_host_from_paths(paths) == \
+        ["/namespace/path", "/namespace/path2"]
 
     # Test an info-return
-    paths = [{"name": "https://test-url.org/namespace/path", "other": "https://body-remains.test"}, {"name": "pelican://test-url.org/namespace/path2", "size": "42"}]
-    expected_result = [{"name": "/namespace/path", "other": "https://body-remains.test"},{"name": "/namespace/path2", "size": "42"}]
+    paths = [{"name": "https://test-url.org/namespace/path",
+              "other": "https://body-remains.test"},
+              {"name": "pelican://test-url.org/namespace/path2", "size": "42"}]
+    expected_result = [{"name": "/namespace/path",
+                        "other": "https://body-remains.test"},
+                        {"name": "/namespace/path2", "size": "42"}]
     assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result
 
     # Test a find-return
-    paths = {"https://test-url.org/namespace/path": "https://test-url2.org/namespace/path", "https://test-url.org/namespace/path2": "/namespace/path3"}
+    paths = {"https://test-url.org/namespace/path":
+             "https://test-url2.org/namespace/path",
+             "https://test-url.org/namespace/path2":
+             "/namespace/path3"}
     expected_result = {"/namespace/path": "/namespace/path", "/namespace/path2": "/namespace/path3"}
     assert PelicanFileSystem._remove_host_from_paths(paths) == expected_result
 
     # Test a a non-list | string | dict
     assert PelicanFileSystem._remove_host_from_paths(22) == 22
-
