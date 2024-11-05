@@ -60,7 +60,7 @@ ds = xarray.open_mfdataset([file1,file2], engine='zarr')
 
 ### Specifying Endpoints
 
-The following describes how to specify endpoints to get data from, rather than letting PelicanFS and the director determine the best cache. PelicanFS allows you to specify whether to read directly from the origin (bypassing data staging altogether) or to name a specific cache to stage data into. 
+The following describes how to specify endpoints to get data from, rather than letting PelicanFS and the director determine the best cache. PelicanFS allows you to specify whether to read directly from the origin (bypassing data staging altogether) or to name a specific cache to stage data into.
 
 **Note**
 > If both direct reads and a specific cache are set, PelicanFS will use the specified cache and ignore the direct reads setting.
