@@ -323,8 +323,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # add all the director-provided caches to the list (doing a round of de-dup)
         cache_list = []
         if self.preferred_caches:
-            cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))._replace(query=fparsed.query).geturl()
-                          if cache != "+" else "+" for cache in self.preferred_caches]
+            cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))._replace(query=fparsed.query).geturl() if cache != "+" else "+" for cache in self.preferred_caches]
             namespace = "/"
         if not self.preferred_caches or ("+" in self.preferred_caches):
             headers = await self.get_director_headers(fileloc)
@@ -537,17 +536,7 @@ class PelicanFileSystem(AsyncFileSystem):
         pattern = glob_translate(path + ("/" if ends_with_slash else ""))
         pattern = re.compile(pattern)
 
-        out = {
-            (
-                p.rstrip("/")
-                if not append_slash_to_dirname
-                and info["type"] == "directory"
-                and p.endswith("/") else p
-            ):
-            info for p,
-            info in sorted(allpaths.items())
-            if pattern.match(p.rstrip("/"))
-        }
+        out = {(p.rstrip("/") if not append_slash_to_dirname and info["type"] == "directory" and p.endswith("/") else p): info for p, info in sorted(allpaths.items()) if pattern.match(p.rstrip("/"))}
 
         if detail:
             return out

@@ -30,6 +30,12 @@ repos:
         args:
           - --max-line-length=200
           - --ignore=E203,W503
+-   repo: https://github.com/psf/black
+    rev: 22.3.0
+    hooks:
+    -   id: black
+        language_version: python3.9
+        args: ["--line-length=200"]
 
 # Global exclusion for all hooks
 exclude: ^examples/
