@@ -13,8 +13,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from pelicanfs.core import PelicanFileSystem, InvalidMetadata
 import pytest
+
+from pelicanfs.core import InvalidMetadata, PelicanFileSystem
 
 
 def test_remove_hostname():
@@ -57,9 +58,9 @@ def test_fspath():
     path = "/aboslute/path"
     assert pelfs._check_fspath(path) == path
 
-    assert pelfs._check_fspath("pelican://test-discovery-url.org/p2/") == '/p2/'
-    
-    assert pelfs._check_fspath("test-discovery-url.org/p3") == '/p3'    
+    assert pelfs._check_fspath("pelican://test-discovery-url.org/p2/") == "/p2/"
+
+    assert pelfs._check_fspath("test-discovery-url.org/p3") == "/p3"
 
     with pytest.raises(InvalidMetadata):
         pelfs._check_fspath("pelican://diff-disc/path")
@@ -67,11 +68,10 @@ def test_fspath():
     with pytest.raises(InvalidMetadata):
         pelfs._check_fspath("not-the-discovery-url.org/p3")
 
-    pelfs_disc = PelicanFileSystem(
-        skip_instance_cache=True
-    )
+    pelfs_disc = PelicanFileSystem(skip_instance_cache=True)
 
     assert pelfs_disc.discovery_url == ""
 
     pelfs_disc._check_fspath("pelican://new-discovery-url.org/p/")
+
     assert pelfs_disc.discovery_url == "pelican://new-discovery-url.org/"
