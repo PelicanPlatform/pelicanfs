@@ -207,8 +207,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if federation_discovery_url and not federation_discovery_url.endswith("/"):
             federation_discovery_url = federation_discovery_url + "/"
-        self.discoveryUrl = federation_discovery_url
-        self.directorUrl = ""
+        self.discovery_url = federation_discovery_url
+        self.director_url = ""
 
         self.direct_reads = direct_reads
         self.preferred_caches = preferred_caches
