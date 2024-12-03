@@ -205,9 +205,8 @@ class PelicanFileSystem(AsyncFileSystem):
         # The internal filesystem
         self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
 
-
-        if federation_discovery_url and not federation_discovery_url.endswith('/'):
-            federation_discovery_url = federation_discovery_url + '/'
+        if federation_discovery_url and not federation_discovery_url.endswith("/"):
+            federation_discovery_url = federation_discovery_url + "/"
         self.discoveryUrl = federation_discovery_url
         self.directorUrl = ""
 
