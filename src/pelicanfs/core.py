@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
+from aiowebdav.client import Client
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -473,8 +474,53 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_dirlist_dec
     async def _ls(self, path, detail=True, **kwargs):
-        results = await self.http_file_system._ls(path, detail, **kwargs)
-        return self._remove_host_from_paths(results)
+        """
+        This _ls call will mimic the httpfs _ls call and call our version of _ls_real
+        """
+        # TODO: Add the optional listings cache for pelicanfs - removed for now in order to keep things simple for
+        # the re-implementation of ls
+        # if self.use_listings_cache and path in self.dircache:
+        #    out = self.dircache[path]
+        # else:
+        out = await self._ls_real(path, detail=detail, **kwargs)
+        # self.dircache[path] = out
+        return self._remove_host_from_paths(out)
+
+    async def _ls_real(self, url, detail=True, **kwargs):
+        """
+        This _ls_real uses a webdavclient listing rather than an https call. This lets pelicanfs identify whether an object
+        is a file or a collection. This is important for functions which are expected to recurse or walk the collection url
+        such as find/glob/walk
+        """
+        # ignoring URL-encoded arguments
+        logger.debug(url)
+        parts = urllib.parse.urlparse(url)
+        base_url = f"{parts.scheme}://{parts.netloc}"
+
+        # Create the options for the webdavclient
+
+        options = {
+            "hostname": base_url,
+        }
+
+        async with Client(options) as client:
+            remote_dir = parts.path
+            try:
+                items = await client.list(remote_dir, get_info=True)
+                if detail:
+                    return [
+                        {
+                            "name": f"{base_url}{item['path']}",  # use the base url in order for httpfs find/walk to be able to call its info
+                            "size": None,
+                            "type": "directory" if item["isdir"] else "file",
+                        }
+                        for item in items
+                    ]
+                else:
+                    return sorted([item["path"] for item in items])  # TODO: Check to see if this needs to match the name scheme
+            except Exception:
+                # TODO: Check for if the top level is a file and not a directory and handle accordingly
+                raise
 
     @_dirlist_dec
     async def _isdir(self, path):
