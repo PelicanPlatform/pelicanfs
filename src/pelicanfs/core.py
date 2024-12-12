@@ -384,10 +384,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raise NoAvailableSource()
         return origin
 
-    async def get_dirlist_url(self, fileloc: str) -> str:
-        """
-        Returns a dirlist host url for the given namespace locations
-        """
+    async def _set_director_url(self) -> str:
         if not self.director_url:
             metadata_json = await self._discover_federation_metadata(self.discovery_url)
             # Ensure the director url has a '/' at the end
@@ -398,6 +395,12 @@ class PelicanFileSystem(AsyncFileSystem):
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
             self.director_url = director_url
+
+    async def get_dirlist_url(self, fileloc: str) -> str:
+        """
+        Returns a dirlist host url for the given namespace locations
+        """
+        await self._set_director_url()
 
         url = urllib.parse.urljoin(self.director_url, fileloc)
 
