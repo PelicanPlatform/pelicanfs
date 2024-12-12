@@ -35,6 +35,7 @@ setup(
     install_requires=[
         "aiohttp~=3.9.4",
         "aiosignal~=1.3.1",
+        "aiowebdav~=0.1.0rc5",
         "async-timeout~=4.0.3",
         "attrs~=23.2.0",
         "frozenlist~=1.4.1",
