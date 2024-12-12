@@ -222,6 +222,9 @@ class PelicanFileSystem(AsyncFileSystem):
         self._mkdir = self.http_file_system._mkdir
         self._makedirs = self.http_file_system._makedirs
 
+        # Overwrite the httpsfs _ls_real call with ours with ours
+        self.http_file_system._ls_real = self._ls_real
+
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @classmethod
     def _strip_protocol(cls, path):
