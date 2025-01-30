@@ -36,6 +36,7 @@ setup(
         "aiohttp>=3.9.4,<4",
         "cachetools>=5.3,<6",
         "fsspec>=2024.3.1",
+        "aiowebdav>=0.1.0rc5",
     ],
     extras_require={
         "testing": ["pytest", "pytest-httpserver", "trustme"],
