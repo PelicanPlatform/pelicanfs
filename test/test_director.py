@@ -14,33 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os
 import ssl
 
 import aiohttp
 import pytest
 import trustme
+from aiowebdav.client import Client
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
 from pelicanfs.core import NoAvailableSource, PelicanFileSystem
-
-LISTING_RESPONSE = (
-    '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">\n'
-    '<html xmlns="http://www.w3.org/1999/xhtml">\n<head>\n<meta http-equiv="content-type" content="text/html;charset=utf-8"/>\n'
-    '<link rel="stylesheet" type="text/css" href="/static/css/xrdhttp.css"/>\n<link rel="icon" type="image/png" href="/static/icons/xrdhttp.ico"/>\n'
-    "<title>/foo/bar</title>\n</head>\n<body>\n<h1>"
-    "Listing of: /foo/bar</h1>\n"
-    '<div id="header"><table id="ft">\n<thead><tr>\n<th class="mode">Mode</th><th class="flags">Flags</th><th class="size">Size</th>'
-    '<th class="datetime">Modified</th><th class="name">Name</th></tr></thead>\n<tr><td class="mode">---r--</td><td class="mode">16</td>'
-    '<td class="size">24</td><td class="datetime">Wed, 20 Mar 2024 15:50:39 GMT</td>'
-    '<td class="name"><a href="/foo/bar/file1">file1</a></td></tr>'
-    '<tr><td class="mode">---r--</td><td class="mode">16</td><td class="size">1116</td><td class="datetime">Wed, 20 Mar 2024 15:50:40 GMT</td>'
-    '<td class="name"><a href="/foo/bar/file2">file2/a></td></tr>'
-    '<tr><td class="mode">d--r-x</td><td class="mode">19</td><td class="size">4096</td><td class="datetime">Wed, 20 Mar 2024 15:50:40 GMT</td>'
-    '<td class="name"><a href="/foo/bar/file3">file3</a></td></tr>'
-    '</table></div><br><br><hr size=1><p><span id="requestby">Request by unknown.189071:38@[::ffff:128.104.153.58]\
-          ( [::ffff:128.104.153.58] )</span></p>\n<p>Powered by XrdHTTP v5.6.8 (CERN IT-SDC)</p>\n'
-)
 
 
 @pytest.fixture(scope="session", name="ca")
@@ -92,8 +76,31 @@ def fixture_get_client(httpclient_ssl_context):
     return client_factory
 
 
-def test_ls(httpserver: HTTPServer, get_client):
+@pytest.fixture(scope="session", name="get_webdav_client")
+def fixture_get_webdav_client(httpclient_ssl_context):
+    def client_factory(options, **kwargs):
+        connector = aiohttp.TCPConnector(ssl=httpclient_ssl_context)
+        client = Client(options)
+        session = aiohttp.ClientSession(connector=connector, **kwargs)
+        client.session = session
+        return client
+
+    return client_factory
+
+
+@pytest.fixture
+def listing_response():
+    file_path = os.path.join(os.path.dirname(__file__), "resources", "xml_response.xml")
+    with open(file_path, "r") as f:
+        return f.read()
+
+
+def test_ls(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
+
+    # Register the log_request and log_response functions
+
+    httpserver.expect_request("/").respond_with_data("", status=200)
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
         "",
@@ -103,11 +110,14 @@ def test_ls(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_oneshot_request("/foo/bar/", method="HEAD").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
+
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
         get_client=get_client,
         skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
     )
 
     assert pelfs.ls("/foo/bar", detail=False) == [
@@ -117,7 +127,7 @@ def test_ls(httpserver: HTTPServer, get_client):
     ]
 
 
-def test_glob(httpserver: HTTPServer, get_client):
+def test_glob(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar/*").respond_with_data(
@@ -136,17 +146,18 @@ def test_glob(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
-    pelfs = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-    )
+
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data(listing_response)
+
+    pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
     assert pelfs.glob("/foo/bar/*") == ["/foo/bar/file1", "/foo/bar/file2", "/foo/bar/file3"]
 
 
-def test_find(httpserver: HTTPServer, get_client):
+def test_find(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -157,17 +168,21 @@ def test_find(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data()
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
+
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
         get_client=get_client,
         skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
     )
 
     assert pelfs.find("/foo/bar") == ["/foo/bar/file1", "/foo/bar/file2", "/foo/bar/file3"]
 
 
-def test_info(httpserver: HTTPServer, get_client):
+def test_info(httpserver: HTTPServer, get_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -178,8 +193,8 @@ def test_info(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_oneshot_request("/foo/bar", method="HEAD").respond_with_data(LISTING_RESPONSE)
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello, world!")
+    # httpserver.expect_request("/foo/bar", method="GET").respond_with_data(listing_response)
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
         get_client=get_client,
@@ -188,14 +203,14 @@ def test_info(httpserver: HTTPServer, get_client):
 
     assert pelfs.info("/foo/bar") == {
         "name": "/foo/bar",
-        "size": 1434,
+        "size": 13,
         "mimetype": "text/plain",
         "url": "/foo/bar",
         "type": "file",
     }
 
 
-def test_du(httpserver: HTTPServer, get_client):
+def test_du(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -206,7 +221,8 @@ def test_du(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data("")
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
     httpserver.expect_request("/foo/bar/file1", method="HEAD").respond_with_data(
         "file1",
         status=307,
@@ -224,12 +240,13 @@ def test_du(httpserver: HTTPServer, get_client):
         httpserver.url_for("/"),
         get_client=get_client,
         skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
     )
 
     assert pelfs.du("/foo/bar") == 58
 
 
-def test_isdir(httpserver: HTTPServer, get_client):
+def test_isdir(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     foo_bar_file_url = httpserver.url_for("foo/bar/file1")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
@@ -241,7 +258,8 @@ def test_isdir(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data("")
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
     httpserver.expect_oneshot_request("/foo/bar/file1").respond_with_data(
         "",
         status=307,
@@ -255,17 +273,13 @@ def test_isdir(httpserver: HTTPServer, get_client):
         status=307,
     )
 
-    pelfs = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-    )
+    pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
     assert pelfs.isdir("/foo/bar") is True
     assert pelfs.isdir("/foo/bar/file1") is False
 
 
-def test_isfile(httpserver: HTTPServer, get_client):
+def test_isfile(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     foo_bar_file_url = httpserver.url_for("foo/bar/file1")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
@@ -277,7 +291,6 @@ def test_isfile(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
     httpserver.expect_oneshot_request("/foo/bar/file1").respond_with_data(
         "",
         status=307,
@@ -286,22 +299,22 @@ def test_isfile(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar/file1", method="GET").respond_with_data(
-        "file1",
-        status=307,
-    )
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data("")
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar/file1", method="HEAD").respond_with_data("file1")
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
         get_client=get_client,
         skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
     )
 
-    assert pelfs.isfile("/foo/bar") is False
-    assert pelfs.isfile("/foo/bar/file1") is True
+    assert not pelfs.isfile("/foo/bar")
+    assert pelfs.isfile("/foo/bar/file1")
 
 
-def test_walk(httpserver: HTTPServer, get_client):
+def test_walk(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -312,12 +325,14 @@ def test_walk(httpserver: HTTPServer, get_client):
             "X-Pelican-Namespace": "namespace=/foo",
         },
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(LISTING_RESPONSE)
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing_response)
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data("")
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
         get_client=get_client,
         skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
     )
 
     for root, dirnames, filenames in pelfs.walk("/foo/bar"):

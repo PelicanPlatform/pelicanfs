@@ -169,6 +169,11 @@ class _CacheManager(object):
             self._cache_list.remove(cache_url_parsed.geturl())
 
 
+def get_webdav_client(options):
+    client = Client(options)
+    return client
+
+
 class PelicanFileSystem(AsyncFileSystem):
     """
     Access a pelican namespace as if it were a file system.
@@ -193,10 +198,12 @@ class PelicanFileSystem(AsyncFileSystem):
         preferred_caches=None,
         asynchronous=False,
         loop=None,
+        get_webdav_client=get_webdav_client,
         **kwargs,
     ):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
 
+        self.get_webdav_client = get_webdav_client
         self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15 * 60)
         self._namespace_lock = threading.Lock()
         self._access_stats = _AccessStats()
@@ -506,24 +513,24 @@ class PelicanFileSystem(AsyncFileSystem):
             "hostname": base_url,
         }
 
-        async with Client(options) as client:
-            remote_dir = parts.path
-            try:
-                items = await client.list(remote_dir, get_info=True)
-                if detail:
-                    return [
-                        {
-                            "name": f"{base_url}{item['path']}",  # use the base url in order for httpfs find/walk to be able to call its info
-                            "size": None,
-                            "type": "directory" if item["isdir"] else "file",
-                        }
-                        for item in items
-                    ]
-                else:
-                    return sorted([item["path"] for item in items])  # TODO: Check to see if this needs to match the name scheme
-            except Exception:
-                # TODO: Check for if the top level is a file and not a directory and handle accordingly
-                raise
+        client = self.get_webdav_client(options)
+        remote_dir = parts.path
+        try:
+            items = await client.list(remote_dir, get_info=True)
+            if detail:
+                return [
+                    {
+                        "name": f"{base_url}{item['path']}",  # use the base url in order for httpfs find/walk to be able to call its info
+                        "size": None,
+                        "type": "directory" if item["isdir"] else "file",
+                    }
+                    for item in items
+                ]
+            else:
+                return sorted([item["path"] for item in items])  # TODO: Check to see if this needs to match the name scheme
+        except Exception:
+            # TODO: Check for if the top level is a file and not a directory and handle accordingly
+            raise FileNotFoundError
 
     @_dirlist_dec
     async def _isdir(self, path):
