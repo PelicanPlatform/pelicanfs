@@ -25,6 +25,7 @@ import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav.client import Client
+from aiowebdav.exceptions import RemoteResourceNotFound
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -527,10 +528,15 @@ class PelicanFileSystem(AsyncFileSystem):
                     for item in items
                 ]
             else:
-                return sorted([item["path"] for item in items])  # TODO: Check to see if this needs to match the name scheme
-        except Exception:
-            # TODO: Check for if the top level is a file and not a directory and handle accordingly
-            raise FileNotFoundError
+                return sorted(set([item["path"] for item in items]))
+        except RemoteResourceNotFound:
+            # Check to see if the top level is a file and not a directory, if so, return an empty set
+            # to mimic httpsfs behavior
+            exists = await client.check(remote_dir)
+            if exists:
+                return set()
+            else:
+                raise FileNotFoundError
 
     @_dirlist_dec
     async def _isdir(self, path):
