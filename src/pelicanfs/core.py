@@ -19,6 +19,7 @@ import logging
 import re
 import threading
 import urllib.parse
+from copy import copy
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -192,6 +193,9 @@ class PelicanFileSystem(AsyncFileSystem):
         self._access_stats = _AccessStats()
 
         self.token = kwargs.get("headers", {}).get("Authorization")
+
+        request_options = copy(kwargs)
+        self.use_listings_cache = request_options.pop("use_listings_cache", False)
 
         # The internal filesystem
         self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
@@ -471,16 +475,14 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         This _ls call will mimic the httpfs _ls call and call our version of _ls_real
         """
-        # TODO: Add the optional listings cache for pelicanfs - removed for now in order to keep things simple for
-        # the re-implementation of ls
-        # if self.use_listings_cache and path in self.dircache:
-        #    out = self.dircache[path]
-        # else:
-        out = await self._ls_real(path, detail=detail, **kwargs)
-        # self.dircache[path] = out
+        if self.use_listings_cache and path in self.dircache:
+            out = self.dircache[path]
+        else:
+            out = await self._ls_real(path, detail=detail)
+            self.dircache[path] = out
         return self._remove_host_from_paths(out)
 
-    async def _ls_real(self, url, detail=True, **kwargs):
+    async def _ls_real(self, url, detail=True):
         """
         This _ls_real uses a webdavclient listing rather than an https call. This lets pelicanfs identify whether an object
         is a file or a collection. This is important for functions which are expected to recurse or walk the collection url
@@ -529,9 +531,6 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
         results = await self.http_file_system._find(path, maxdepth, withdirs, **kwargs)
         return self._remove_host_from_paths(results)
-
-    async def _isfile(self, path):
-        return not await self._isdir(path)
 
     async def _glob(self, path, maxdepth=None, **kwargs):
         """
@@ -596,6 +595,13 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
         return await self.http_file_system._du(path, total, maxdepth, **kwargs)
+
+    @_dirlist_dec
+    async def _isfile(self, path):
+        try:
+            return not bool(await self._ls_real(path, detail=False))
+        except (FileNotFoundError, ValueError):
+            return False
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
