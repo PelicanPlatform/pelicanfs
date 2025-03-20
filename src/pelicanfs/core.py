@@ -29,8 +29,13 @@ from aiowebdav.exceptions import RemoteResourceNotFound
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
-from .dir_header_parser import parse_metalink
-from .exceptions import BadDirectorResponse, InvalidMetadata, NoAvailableSource
+from .dir_header_parser import get_collections_url, parse_metalink
+from .exceptions import (
+    BadDirectorResponse,
+    InvalidMetadata,
+    NoAvailableSource,
+    NoCollectionsUrl,
+)
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -399,9 +404,10 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
             if "Link" not in resp.headers:
                 raise BadDirectorResponse()
-            dirlist_url = parse_metalink(resp.headers)[0][0][0]
-        if not dirlist_url:
-            raise NoAvailableSource()
+            collections_url = get_collections_url(resp.headers)
+            dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
+        if not collections_url:
+            raise NoCollectionsUrl()
         return dirlist_url
 
     def _get_prefix_info(self, path: str) -> _CacheManager:
