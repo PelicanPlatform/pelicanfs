@@ -30,32 +30,9 @@ from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
 from .dir_header_parser import parse_metalink
+from .exceptions import BadDirectorResponse, InvalidMetadata, NoAvailableSource
 
 logger = logging.getLogger("fsspec.pelican")
-
-
-class PelicanException(RuntimeError):
-    """
-    Base class for all Pelican-related failures
-    """
-
-
-class BadDirectorResponse(PelicanException):
-    """
-    The director response did not include Link Headers
-    """
-
-
-class NoAvailableSource(PelicanException):
-    """
-    No source endpoint is currently available for the requested object
-    """
-
-
-class InvalidMetadata(PelicanException):
-    """
-    No Pelican metadata was found for the federation
-    """
 
 
 class _AccessResp:
