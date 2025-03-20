@@ -13,7 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-from pelicanfs.core import PelicanException, _AccessResp, _AccessStats
+from pelicanfs.core import _AccessResp, _AccessStats
+from pelicanfs.exceptions import PelicanException
 
 
 def test_response_management():
