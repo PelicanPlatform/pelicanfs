@@ -496,10 +496,14 @@ class PelicanFileSystem(AsyncFileSystem):
         base_url = f"{parts.scheme}://{parts.netloc}"
 
         # Create the options for the webdavclient
+        if self.token:
+            webdav_token = self.token.removeprefix("Bearer ")
+        else:
+            webdav_token = None
 
         options = {
             "hostname": base_url,
-            "token": self.token.removeprefix("Bearer "),
+            "token": webdav_token,
         }
 
         client = self.get_webdav_client(options)
