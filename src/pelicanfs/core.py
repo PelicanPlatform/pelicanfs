@@ -405,6 +405,8 @@ class PelicanFileSystem(AsyncFileSystem):
         # Timeout response in seconds - the default response is 5 minutes
         timeout = aiohttp.ClientTimeout(total=5)
         session = await self.http_file_system.set_session()
+        if self.token:
+            session.headers["Authorization"] = self.token
         async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
             if "Link" not in resp.headers:
                 raise BadDirectorResponse()
@@ -497,6 +499,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         options = {
             "hostname": base_url,
+            "token": self.token.removeprefix("Bearer "),
         }
 
         client = self.get_webdav_client(options)
