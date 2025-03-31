@@ -510,6 +510,7 @@ class PelicanFileSystem(AsyncFileSystem):
         remote_dir = parts.path
         try:
             items = await client.list(remote_dir, get_info=True)
+            await client.close()
             if detail:
                 return [
                     {
@@ -525,6 +526,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Check to see if the top level is a file and not a directory, if so, return an empty set
             # to mimic httpsfs behavior
             exists = await client.check(remote_dir)
+            await client.close()
             if exists:
                 return set()
             else:
