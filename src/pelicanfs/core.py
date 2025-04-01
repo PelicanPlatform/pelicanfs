@@ -273,12 +273,13 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns the json response from a GET call to the metadata discovery url of the federation
         """
         # Parse the url for federation discovery
-        logger.debug("Running federation discovery")
+        logger.debug("Running federation discovery...")
         discovery_url = urllib.parse.urlparse(disc_url)
         discovery_url = discovery_url._replace(scheme="https", path="/.well-known/pelican-configuration")
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
+                logger.error(f"Failed to get metadata from {discovery_url.geturl()}")
                 raise InvalidMetadata()
             return await resp.json(content_type="")
 
@@ -286,16 +287,16 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns the header response from a GET call to the director
         """
-        logger.debug("Getting the director headers")
         if fileloc[0] == "/":
             fileloc = fileloc[1:]
 
         if not self.director_url:
-            logger.debug("Director URL not set, geting from disocyr url")
+            logger.debug("Director URL not set, geting from discovery url")
             metadata_json = await self._discover_federation_metadata(self.discovery_url)
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
+                logger.error("No director endpoint found in metadata")
                 raise InvalidMetadata()
 
             if not director_url.endswith("/"):
@@ -316,7 +317,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns the highest priority cache for the namespace that appears to be working
         """
         namespace = None
-        logger.debug(f"Get a working cache for {fileloc}")
+        logger.debug(f"Choosing a cache for {fileloc}...")
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
         cache_url = self._match_namespace(fparsed.path)
@@ -327,7 +328,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
         # add all the director-provided caches to the list (doing a round of de-dup)
-        logger.debug("Getting a cache from the director")
+        logger.debug("No previous working cache found, finding a new one")
         cache_list = []
         if self.preferred_caches:
             cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))._replace(query=fparsed.query).geturl() if cache != "+" else "+" for cache in self.preferred_caches]
@@ -354,13 +355,13 @@ class PelicanFileSystem(AsyncFileSystem):
             updated_url = cache_list[0]
             # Timeout response in seconds - the default response is 5 minutes
             timeout = aiohttp.ClientTimeout(total=5)
-            logger.debug("Setting cache session")
+            logger.debug("Finding a working cache...")
             session = await self.http_file_system.set_session()
             if self.token:
                 logger.debug("Adding Authorization to session header")
                 session.headers["Authorization"] = self.token
             try:
-                logger.debug(f"Testing cacheurl {updated_url}")
+                logger.debug(f"Checking to see if the cache at {updated_url} is working and returns a valid response code")
                 async with session.head(updated_url, timeout=timeout) as resp:
                     if resp.status >= 200 and resp.status < 400:
                         logger.debug("Cache found")
@@ -375,7 +376,7 @@ class PelicanFileSystem(AsyncFileSystem):
             cache_list = cache_list[1:]
 
         if not cache_list:
-            # No working cache was found
+            logger.error("No working cache found")
             raise NoAvailableSource()
 
         with self._namespace_lock:
@@ -409,7 +410,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Returns a dirlist host url for the given namespace locations
         """
-        logger.debug(f"Finding the dirlist url for {fileloc}")
+        logger.debug(f"Finding the collections endpoint for {fileloc}...")
         await self._set_director_url()
 
         url = urllib.parse.urljoin(self.director_url, fileloc)
@@ -425,6 +426,7 @@ class PelicanFileSystem(AsyncFileSystem):
             collections_url = get_collections_url(resp.headers)
             dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
         if not collections_url:
+            logger.error("No collections endpoint found for {fileloc}")
             raise NoCollectionsUrl()
         return dirlist_url
 
@@ -444,12 +446,12 @@ class PelicanFileSystem(AsyncFileSystem):
         return namespace_info
 
     def _match_namespace(self, fileloc: str):
-        logger.debug(f"Matching namespace for {fileloc}")
+        logger.debug(f"Searching memory for matching namespace for {fileloc}...")
         namespace_info = self._get_prefix_info(fileloc)
         if not namespace_info:
             return
 
-        logger.debug("Match found")
+        logger.debug(f"Matching namespace found, using cache at {namespace_info.get_url(fileloc)}")
         return namespace_info.get_url(fileloc)
 
     def _bad_cache(self, url: str, e: Exception):
@@ -458,7 +460,7 @@ class PelicanFileSystem(AsyncFileSystem):
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
-        logger.debug(f"Bad cache found: {url}")
+        logger.debug(f"Marking cache at {url} as bad")
         cache_url = urllib.parse.urlparse(url)
         path = cache_url.path
         cache_url = cache_url._replace(query="", path="", fragment="")
@@ -673,7 +675,7 @@ class PelicanFileSystem(AsyncFileSystem):
         check that the pelican://-style URL is compatible with the current
         filesystem object and return the path.
         """
-        logger.debug(f"Checking path: {path}")
+        logger.debug(f"Ensuring that {path} is a pelican compatible path...")
         if not path.startswith("/"):
             if path.startswith("pelican://"):
                 pelican_url = urllib.parse.urlparse(path)
@@ -684,6 +686,7 @@ class PelicanFileSystem(AsyncFileSystem):
             if not self.discovery_url:
                 self.discovery_url = discovery_str
             elif self.discovery_url != discovery_str:
+                logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
                 raise InvalidMetadata()
             path = pelican_url.path
         logger.debug(f"Compatible path: {path}")
@@ -692,7 +695,7 @@ class PelicanFileSystem(AsyncFileSystem):
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
         data_url = sync(self.loop, self.get_origin_url if self.direct_reads else self.get_working_cache, path)
-        logger.debug(f"Running open on {data_url}")
+        logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
         ar = _AccessResp(data_url, True)
@@ -705,7 +708,7 @@ class PelicanFileSystem(AsyncFileSystem):
             data_url = await self.get_origin_url(path)
         else:
             data_url = self.get_working_cache(path)
-        logger.debug(f"Running open_aync on {data_url}")
+        logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
         ar = _AccessResp(data_url, True)
