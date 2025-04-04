@@ -426,7 +426,7 @@ class PelicanFileSystem(AsyncFileSystem):
             collections_url = get_collections_url(resp.headers)
             dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
         if not collections_url:
-            logger.error("No collections endpoint found for {fileloc}")
+            logger.error(f"No collections endpoint found for {fileloc}")
             raise NoCollectionsUrl()
         return dirlist_url
 
