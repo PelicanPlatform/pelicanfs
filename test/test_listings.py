@@ -24,8 +24,6 @@ def test_no_collections_url(httpserver: HTTPServer, get_client):
     foo_bar_url = httpserver.url_for("foo/bar")
 
     # Register the log_request and log_response functions
-
-    httpserver.expect_request("/").respond_with_data("", status=200)
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
         "",
@@ -46,7 +44,6 @@ def test_no_collections_url(httpserver: HTTPServer, get_client):
 def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
 
-    httpserver.expect_request("/").respond_with_data("", status=200)
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
         "",
@@ -56,8 +53,8 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
             "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
         },
     )
-    httpserver.expect_oneshot_request("/foo/bar/", method="HEAD").respond_with_data(top_listing_response)
-    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
+
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -70,8 +67,8 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
         "/foo/bar/file1.txt",
         "/foo/bar/file2.md",
         "/foo/bar/file3.txt",
-        "/foo/bar/folder1",
-        "/foo/bar/folder2",
+        "/foo/bar/folder1/",
+        "/foo/bar/folder2/",
     ]
 
 
@@ -88,8 +85,9 @@ def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client):
             "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
         },
     )
-    httpserver.expect_oneshot_request("/foo/bar/", method="HEAD").respond_with_data(status=500)
-    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("")
+
+    httpserver.expect_oneshot_request("/foo/bar/", method="PROPFIND").respond_with_data("not a directory", status=500)
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("I'm a file!", status=200)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -104,7 +102,6 @@ def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client):
 def test_ls_nonexist(httpserver: HTTPServer, get_client, get_webdav_client):
     foo_bar_url = httpserver.url_for("foo/bar")
 
-    httpserver.expect_request("/").respond_with_data("", status=200)
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
         "",
@@ -114,8 +111,8 @@ def test_ls_nonexist(httpserver: HTTPServer, get_client, get_webdav_client):
             "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
         },
     )
-    httpserver.expect_oneshot_request("/foo/bar/", method="HEAD").respond_with_data(status=404)
-    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data(status=404)
+    httpserver.expect_oneshot_request("/foo/bar/", method="PROPFIND").respond_with_data(status=404)
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(status=404)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -128,7 +125,9 @@ def test_ls_nonexist(httpserver: HTTPServer, get_client, get_webdav_client):
         pelfs.ls("/foo/bar")
 
 
-def test_glob_one_level(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+def test_glob_one_level(
+    httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, file1_listing_response, file2_listing_response, file3_listing_response, f1_listing_response, f2_listing_response
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar/").respond_with_data(
@@ -136,16 +135,23 @@ def test_glob_one_level(httpserver: HTTPServer, get_client, get_webdav_client, t
         status=307,
         headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
     )
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response, status=207)
 
     httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
-    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
-    assert pelfs.glob("/foo/bar/*") == ["/foo/bar/file1.txt", "/foo/bar/file2.md", "/foo/bar/file3.txt", "/foo/bar/folder1", "/foo/bar/folder2"]
+    assert pelfs.glob("/foo/bar/*") == ["/foo/bar/file1.txt", "/foo/bar/file2.md", "/foo/bar/file3.txt", "/foo/bar/folder1/", "/foo/bar/folder2/"]
 
 
-def test_glob_match_ext(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+def test_glob_match_ext(
+    httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, file1_listing_response, file2_listing_response, file3_listing_response, f1_listing_response, f2_listing_response
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar/").respond_with_data(
@@ -156,13 +162,32 @@ def test_glob_match_ext(httpserver: HTTPServer, get_client, get_webdav_client, t
 
     httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
     assert pelfs.glob("/foo/bar/file*.txt") == ["/foo/bar/file1.txt", "/foo/bar/file3.txt"]
 
 
-def test_glob_match_one_level(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, f1_listing_response, f2_listing_response):
+def test_glob_match_one_level(
+    httpserver: HTTPServer,
+    get_client,
+    get_webdav_client,
+    top_listing_response,
+    f1_listing_response,
+    f2_listing_response,
+    file1_listing_response,
+    file2_listing_response,
+    file3_listing_response,
+    sf_listing_response,
+    f1_file1_listing_response,
+    f2_file2_listing_response,
+    f2_file1_listing_response,
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar/").respond_with_data(
@@ -173,19 +198,37 @@ def test_glob_match_one_level(httpserver: HTTPServer, get_client, get_webdav_cli
 
     httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder2/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="PROPFIND").respond_with_data(sf_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/file1.txt", method="PROPFIND").respond_with_data(f1_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file2.md", method="PROPFIND").respond_with_data(f2_file2_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file1.md", method="PROPFIND").respond_with_data(f2_file1_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
     assert pelfs.glob("/foo/bar/*/file1.txt") == ["/foo/bar/folder1/file1.txt"]
 
 
-def test_glob_match_multi_level(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, f1_listing_response, f2_listing_response, sf_listing_response):
+def test_glob_match_multi_level(
+    httpserver: HTTPServer,
+    get_client,
+    get_webdav_client,
+    top_listing_response,
+    f1_listing_response,
+    f2_listing_response,
+    sf_listing_response,
+    file1_listing_response,
+    file2_listing_response,
+    file3_listing_response,
+    f1_file1_listing_response,
+    f2_file1_listing_response,
+    f2_file2_listing_response,
+    sf_file_listing_response,
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar/").respond_with_data(
@@ -196,25 +239,37 @@ def test_glob_match_multi_level(httpserver: HTTPServer, get_client, get_webdav_c
 
     httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder2/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="PROPFIND").respond_with_data(sf_listing_response)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/file1.txt", method="PROPFIND").respond_with_data(f1_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file1.md", method="PROPFIND").respond_with_data(f2_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file2.md", method="PROPFIND").respond_with_data(f2_file2_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/subfolder1/file1.txt", method="PROPFIND").respond_with_data(sf_file_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
     assert pelfs.glob("/foo/bar/**/file1.*") == ["/foo/bar/file1.txt", "/foo/bar/folder1/file1.txt", "/foo/bar/folder1/subfolder1/file1.txt", "/foo/bar/folder2/file1.md"]
 
 
-# def test_glob_multi_level(httpserver: HTTPServer, get_client, get_webdav_client, listing_response):
-
-
-def test_find(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, f1_listing_response, f2_listing_response, sf_listing_response):
+def test_find(
+    httpserver: HTTPServer,
+    get_client,
+    get_webdav_client,
+    top_listing_response,
+    f1_listing_response,
+    f2_listing_response,
+    file1_listing_response,
+    file2_listing_response,
+    file3_listing_response,
+    sf_listing_response,
+    f1_file1_listing_response,
+    f2_file2_listing_response,
+    f2_file1_listing_response,
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -222,21 +277,18 @@ def test_find(httpserver: HTTPServer, get_client, get_webdav_client, top_listing
         status=307,
         headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
     )
-    httpserver.expect_request("/foo/bar", method="GET").respond_with_data(top_listing_response)
-    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data()
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
-
-    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder2/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response)
-
-    httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="PROPFIND").respond_with_data(sf_listing_response)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/file1.txt", method="PROPFIND").respond_with_data(f1_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file1.md", method="PROPFIND").respond_with_data(f2_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file2.md", method="PROPFIND").respond_with_data(f2_file2_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/subfolder1/file1.txt", method="PROPFIND").respond_with_data(sf_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -256,7 +308,22 @@ def test_find(httpserver: HTTPServer, get_client, get_webdav_client, top_listing
     ]
 
 
-def test_walk(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, f1_listing_response, f2_listing_response, sf_listing_response):
+def test_walk(
+    httpserver: HTTPServer,
+    get_client,
+    get_webdav_client,
+    top_listing_response,
+    f1_listing_response,
+    f2_listing_response,
+    sf_listing_response,
+    file1_listing_response,
+    file2_listing_response,
+    file3_listing_response,
+    f1_file1_listing_response,
+    f2_file2_listing_response,
+    f2_file1_listing_response,
+    sf_file_listing_response,
+):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
@@ -276,23 +343,26 @@ def test_walk(httpserver: HTTPServer, get_client, get_webdav_client, top_listing
         status=307,
         headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
     )
-
     httpserver.expect_oneshot_request("/foo/bar/folder1/subfolder1").respond_with_data(
         "",
         status=307,
         headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
     )
+
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response)
-    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data("")
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response)
 
-    httpserver.expect_request("/foo/bar/folder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/file1.txt", method="PROPFIND").respond_with_data(f1_file1_listing_response)
 
-    httpserver.expect_request("/foo/bar/folder2/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file1.md", method="PROPFIND").respond_with_data(f2_file1_listing_response)
+    httpserver.expect_request("/foo/bar/folder2/file2.md", method="PROPFIND").respond_with_data(f2_file2_listing_response)
 
-    httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="HEAD").respond_with_data(status=200)
     httpserver.expect_request("/foo/bar/folder1/subfolder1/", method="PROPFIND").respond_with_data(sf_listing_response)
+    httpserver.expect_request("/foo/bar/folder1/subfolder1/file1.txt", method="PROPFIND").respond_with_data(sf_file_listing_response)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),

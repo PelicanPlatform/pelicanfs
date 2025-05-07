@@ -19,14 +19,19 @@ import logging
 import re
 import threading
 import urllib.parse
+from contextlib import asynccontextmanager
 from copy import copy
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav.client import Client
-from aiowebdav.exceptions import RemoteResourceNotFound
+from aiowebdav2.client import Client
+from aiowebdav2.exceptions import (
+    MethodNotSupportedError,
+    RemoteResourceNotFoundError,
+    ResponseErrorCodeError,
+)
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -153,9 +158,29 @@ class _CacheManager(object):
             self._cache_list.remove(cache_url_parsed.geturl())
 
 
-def get_webdav_client(options):
-    client = Client(options)
-    return client
+@asynccontextmanager
+async def get_webdav_client(options):
+    base_url = options["hostname"]
+    token = options["token"]
+
+    # Step 1: Create a temporary client to trigger and then close its internal session
+    client = Client(url=base_url, username="", password="")
+    original_session = client._session  # Triggers internal lazy session creation
+    if not original_session.closed:
+        logger.debug("Closing original internal session")
+        await original_session.close()
+
+    # Step 2: Create your own aiohttp session with auth
+    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"})
+
+    # Step 3: Create real client and inject your custom session
+    client._session = session  # Overwrite internal session
+
+    try:
+        yield client
+    finally:
+        logger.debug("Closing custom injected session")
+        await session.close()
 
 
 class PelicanFileSystem(AsyncFileSystem):
@@ -524,31 +549,48 @@ class PelicanFileSystem(AsyncFileSystem):
             "token": webdav_token,
         }
 
-        client = self.get_webdav_client(options)
-        remote_dir = parts.path
-        try:
-            items = await client.list(remote_dir, get_info=True)
-            await client.close()
+        async with self.get_webdav_client(options) as client:
+            remote_dir = parts.path
+            try:
+                items = await client.list_files(remote_dir)
+            except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
+                if isinstance(e, ResponseErrorCodeError):
+                    if e.code == 500:
+                        if "not a directory" not in e.message:
+                            raise
+                    elif e.code != 500:
+                        raise
+
+                if remote_dir.endswith("/"):
+                    remote_dir = remote_dir[:-1]
+                exists = await client.check(remote_dir)
+                if exists:
+                    return set()
+                else:
+                    raise FileNotFoundError
+
+            # Now that we’ve passed the risky list_files part, continue safely
             if detail:
-                return [
-                    {
-                        "name": f"{base_url}{item['path']}",  # use the base url in order for httpfs find/walk to be able to call its info
+
+                async def get_item_detail(item):
+                    full_path = f"{base_url}{item}"
+                    try:
+                        is_directory = await client.is_dir(item)
+                        type_ = "directory" if is_directory else "file"
+                    except MethodNotSupportedError as e:
+                        if getattr(e, "name", "") == "is_dir":
+                            type_ = "file"
+                        else:
+                            raise
+                    return {
+                        "name": full_path,
                         "size": None,
-                        "type": "directory" if item["isdir"] else "file",
+                        "type": type_,
                     }
-                    for item in items
-                ]
+
+                return await asyncio.gather(*(get_item_detail(item) for item in items))
             else:
-                return sorted(set([item["path"] for item in items]))
-        except RemoteResourceNotFound:
-            # Check to see if the top level is a file and not a directory, if so, return an empty set
-            # to mimic httpsfs behavior
-            exists = await client.check(remote_dir)
-            await client.close()
-            if exists:
-                return set()
-            else:
-                raise FileNotFoundError
+                return sorted(set(items))
 
     @_dirlist_dec
     async def _isdir(self, path):
