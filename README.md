@@ -11,7 +11,7 @@ PelicanFS is a file system interface (fsspec) for the Pelican Platform.  For mor
 
 PelicanFS is built on top of the http fsspec implementation. As such, any functionality that isn’t available in the http implementation is also *not* available in PelicanFS.
 
-### Installation
+## Installation
 
 To install pelican, run:
 
@@ -28,7 +28,7 @@ pip install -e .
 ```
 
 
-### Using PelicanFS
+## Using PelicanFS
 
 To use pelicanfs, first create a `PelicanFileSystem` and provide it with the pelican federation url. As an example using the OSDF federation
 
