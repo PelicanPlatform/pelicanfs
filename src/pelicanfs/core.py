@@ -554,12 +554,8 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 items = await client.list_files(remote_dir)
             except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
-                if isinstance(e, ResponseErrorCodeError):
-                    if e.code == 500:
-                        if "not a directory" not in e.message:
-                            raise
-                    elif e.code != 500:
-                        raise
+                if isinstance(e, ResponseErrorCodeError) and e.code != 500:
+                    raise
 
                 if remote_dir.endswith("/"):
                     remote_dir = remote_dir[:-1]
