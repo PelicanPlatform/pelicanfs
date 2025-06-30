@@ -174,19 +174,6 @@ def test_isdir(
         file2_listing_response,
         status=207,
     )
-    """
-    httpserver.expect_oneshot_request("/foo/bar/file1.txt").respond_with_data(
-        "",
-        status=307,
-        headers={"Link": f'<{foo_bar_file_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_file_url}"},
-    )
-
-
-    httpserver.expect_request("/foo/bar/file1.txt/", method="PROPFIND").respond_with_data(
-        "file1",
-        status=200,
-    )
-    """
 
     pelfs = pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
