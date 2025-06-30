@@ -32,7 +32,7 @@ setup(
     long_description_content_type="text/markdown",
     package_dir={"": "src"},
     python_requires=">=3.12, <4",
-    install_requires=["aiohttp>=3.9.4,<4", "cachetools>=5.3,<6", "fsspec>=2024.3.1", "aiowebdav2"],
+    install_requires=["aiohttp>=3.9.4,<4", "cachetools>=5.3,<6", "fsspec>=2024.3.1", "aiowebdav2", "igwn-auth-utils"],
     extras_require={
         "testing": ["pytest", "pytest-httpserver", "trustme"],
     },
