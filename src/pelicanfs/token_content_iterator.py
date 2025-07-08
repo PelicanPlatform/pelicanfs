@@ -17,9 +17,10 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from enum import Enum, auto
+from typing import List
 
-from igwn_auth_utils.scitokens import (  # adjust import paths
+from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
     default_bearer_token_file,
 )
@@ -55,6 +56,16 @@ def get_token_from_file(token_location: str) -> str:
         return token_str
 
 
+class TokenDiscoveryMethod(Enum):
+    LOCATION = auto()
+    ENV_BEARER_TOKEN = auto()
+    ENV_BEARER_TOKEN_FILE = auto()
+    DEFAULT_BEARER_TOKEN = auto()
+    ENV_TOKEN_PATH = auto()
+    HTCONDOR_DISCOVERY = auto()
+    HTCONDOR_FALLBACK = auto()
+
+
 @dataclass
 class TokenContentIterator:
     """
@@ -71,14 +82,96 @@ class TokenContentIterator:
     Attributes:
         location (str): Specific token file path (optional).
         name (str): Logical name of the token (used by HTCondor discovery).
-        method (int): Internal index of the current discovery method.
+        method_index (int): Internal index of the current discovery method.
         cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
+        index (int): Internal index of the current fallback cred_location
     """
 
     location: str
     name: str
-    method: int = 0
+    method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
+    fallback_index: int = 0
+
+    def __post_init__(self):
+        self.methods = list(TokenDiscoveryMethod)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        while self.method_index < len(self.methods):
+            method = self.methods[self.method_index]
+            self.method_index += 1
+
+            match method:
+                case TokenDiscoveryMethod.LOCATION:
+                    if self.location:
+                        log.debug(f"Using API-specified token location: {self.location}")
+                        try:
+                            if os.path.exists(self.location) and os.access(self.location, os.R_OK):
+                                return get_token_from_file(self.location)
+                            else:
+                                raise OSError(f"File {self.location} is not readable")
+                        except Exception as err:
+                            log.warning(f"Token file at {self.location} is not readable: {err}")
+
+                case TokenDiscoveryMethod.ENV_BEARER_TOKEN:
+                    token = os.getenv("BEARER_TOKEN")
+                    if token:
+                        log.debug("Using token from BEARER_TOKEN env var")
+                        return token
+
+                case TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE:
+                    token_file = os.getenv("BEARER_TOKEN_FILE")
+                    if token_file:
+                        log.debug("Using token from BEARER_TOKEN_FILE env var")
+                        try:
+                            if os.path.exists(token_file) and os.access(token_file, os.R_OK):
+                                return get_token_from_file(token_file)
+                            else:
+                                raise OSError(f"File {token_file} is not readable")
+                        except Exception as err:
+                            log.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
+
+                case TokenDiscoveryMethod.DEFAULT_BEARER_TOKEN:
+                    token_file = default_bearer_token_file()
+                    if os.path.exists(token_file):
+                        log.debug(f"Using token from default bearer token file: {token_file}")
+                        try:
+                            return get_token_from_file(token_file)
+                        except Exception as err:
+                            log.warning(f"Could not read default bearer token: {err}")
+
+                case TokenDiscoveryMethod.ENV_TOKEN_PATH:
+                    token_path = os.getenv("TOKEN")
+                    if token_path:
+                        if not os.path.exists(token_path):
+                            log.warning(f"Environment variable TOKEN is set, but file does not exist: {token_path}")
+                        else:
+                            try:
+                                log.debug("Using token from TOKEN environment variable")
+                                return get_token_from_file(token_path)
+                            except Exception as err:
+                                log.warning(f"Error reading token from {token_path}: {err}")
+
+                case TokenDiscoveryMethod.HTCONDOR_DISCOVERY:
+                    self.cred_locations = self.discoverHTCondorTokenLocations(self.name)
+                    # Ensure fallback runs after this
+                    self.methods.append(TokenDiscoveryMethod.HTCONDOR_FALLBACK)
+
+                case TokenDiscoveryMethod.HTCONDOR_FALLBACK:
+                    while self.fallback_index < len(self.cred_locations):
+                        token_path = self.cred_locations[self.fallback_index]
+                        self.fallback_index += 1
+                        try:
+                            return get_token_from_file(token_path)
+                        except Exception as err:
+                            log.warning(f"Failed to read fallback token at {token_path}: {err}")
+                    # No fallback tokens left to try
+
+        log.debug("No more token sources to try")
+        raise StopIteration
 
     def discoverHTCondorTokenLocations(self, tokenName: str) -> List[str]:
         """
@@ -130,89 +223,3 @@ class TokenContentIterator:
             log.warning(f"Failure when iterating through directory to look through tokens: {err}")
 
         return tokenLocations
-
-    def next(self) -> Tuple[str, bool]:
-        """
-        Return the next valid token from the configured discovery sources.
-
-        Returns:
-            Tuple[str, bool]: A tuple where the first element is the token string (empty if not found),
-                              and the second element is a boolean indicating success.
-        """
-        while True:
-            match self.method:
-                case 0:
-                    self.method += 1
-                    if self.location:
-                        log.debug(f"Using API-specified token location: {self.location}")
-                        try:
-                            if os.path.exists(self.location) and os.access(self.location, os.R_OK):
-                                jwt_serialized = get_token_from_file(self.location)
-                                return jwt_serialized, True
-                            else:
-                                raise OSError(f"File {self.location} is not readable")
-                        except Exception as err:
-                            log.warning(f"Client was asked to read token from location {self.location} but it is not readable: {err}")
-
-                case 1:
-                    self.method += 1
-                    bearer_token = os.getenv("BEARER_TOKEN")
-                    if bearer_token is not None:
-                        log.debug("Using token from BEARER_TOKEN environment variable")
-                        return bearer_token, True
-
-                case 2:
-                    self.method += 1
-                    bearer_token_file = os.getenv("BEARER_TOKEN_FILE")
-                    if bearer_token_file:
-                        log.debug("Using token from BEARER_TOKEN_FILE environment variable")
-                        try:
-                            if os.path.exists(bearer_token_file) and os.access(bearer_token_file, os.R_OK):
-                                jwt_serialized = get_token_from_file(bearer_token_file)
-                                return jwt_serialized, True
-                            else:
-                                raise OSError(f"File {bearer_token_file} is not readable")
-                        except Exception as err:
-                            log.warning(f"Environment variable BEARER_TOKEN_FILE is set, but file does not exist or is not readable: {err}")
-
-                case 3:
-                    self.method += 1
-                    # Use the first_module's default token file location
-                    token_path = default_bearer_token_file()
-                    if os.path.exists(token_path):
-                        log.debug(f"Using token from default bearer token file location: {token_path}")
-                        try:
-                            jwt_serialized = get_token_from_file(token_path)
-                            return jwt_serialized, True
-                        except Exception as err:
-                            log.warning(f"Error reading token from {token_path}: {err}")
-
-                case 4:
-                    self.method += 1
-                    token_file = os.getenv("TOKEN")
-                    if token_file:
-                        if not os.path.exists(token_file):
-                            log.warning(f"Environment variable TOKEN is set, but file does not exist: {token_file}")
-                        else:
-                            try:
-                                jwt_serialized = get_token_from_file(token_file)
-                                log.debug("Using token from TOKEN environment variable")
-                                return jwt_serialized, True
-                            except Exception as err:
-                                log.warning(f"Error reading token from {token_file}: {err}")
-
-                case 5:
-                    self.method += 1
-                    self.cred_locations = self.discoverHTCondorTokenLocations(self.name)
-
-                case _:
-                    idx = self.method - 6
-                    self.method += 1
-                    if idx < 0 or idx >= len(self.cred_locations):
-                        log.debug("Out of token locations to search")
-                        return "", False
-                    try:
-                        jwt_serialized = get_token_from_file(self.cred_locations[idx])
-                        return jwt_serialized, True
-                    except Exception:
-                        continue
