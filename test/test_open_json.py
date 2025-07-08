@@ -59,3 +59,10 @@ def test_get_token_from_file_io_error(monkeypatch):
     monkeypatch.setattr("builtins.open", raise_io)
     with pytest.raises(OSError):
         get_token_from_file("/fake/path")
+
+
+def test_get_token_from_file_empty_file(monkeypatch):
+    # Simulate an empty file by returning an empty string
+    monkeypatch.setattr("builtins.open", mock_open(read_data=""))
+    token = get_token_from_file("/fake/path")
+    assert token == ""  # Expect empty string for empty file
