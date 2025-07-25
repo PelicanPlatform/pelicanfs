@@ -24,7 +24,7 @@ from scitokens import SciToken
 from scitokens.utils.keycache import KeyCache
 
 from pelicanfs.token_generator import (
-    TokenGenerationOpts,
+    TokenOperation,
     is_valid_token,
     token_is_valid_and_acceptable,
 )
@@ -180,8 +180,7 @@ def mock_dir_resp(ns, issuers):
 def test_token_is_acceptable_read_scope(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.read")
 
-    opts = TokenGenerationOpts(Operation="TokenRead")
-    valid, expiry = token_is_valid_and_acceptable(token, object_name="namespace/file.txt", dir_resp=mock_dir_resp("namespace", [issuer]), opts=opts)
+    valid, expiry = token_is_valid_and_acceptable(token, object_name="namespace/file.txt", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
     assert expiry > datetime.now(timezone.utc)
 
@@ -189,14 +188,30 @@ def test_token_is_acceptable_read_scope(ec_keys, issuer):
 def test_token_scope_mismatch_for_write(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.read")
 
-    opts = TokenGenerationOpts(Operation="TokenWrite")
-    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/data", dir_resp=mock_dir_resp("namespace", [issuer]), opts=opts)
+    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/data", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenWrite)
     assert not valid
 
 
 def test_token_valid_shared_write(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.modify storage.create")
 
-    opts = TokenGenerationOpts(Operation="TokenSharedWrite")
-    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/upload", dir_resp=mock_dir_resp("namespace", [issuer]), opts=opts)
+    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/upload", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenSharedWrite)
     assert valid
+
+
+def test_path_prefix_matching(ec_keys, issuer):
+    """Test that path prefix matching works correctly for directory boundaries."""
+    # Create tokens with different resource scopes
+    token1 = create_token(ec_keys, issuer, 3600, "storage.read:/foo/bar")
+    token2 = create_token(ec_keys, issuer, 3600, "storage.read:/foo/bartest")
+
+    # Test that /foo/bar scope matches /foo/bar/file.txt but not /foo/barz/file.txt
+    valid1, _ = token_is_valid_and_acceptable(token1, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    assert valid1
+
+    valid2, _ = token_is_valid_and_acceptable(token1, object_name="/foo/barz/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    assert not valid2
+
+    # Test that /foo/bartest scope doesn't match /foo/bar/file.txt
+    valid3, _ = token_is_valid_and_acceptable(token2, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    assert not valid3
