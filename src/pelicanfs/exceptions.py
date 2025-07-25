@@ -43,3 +43,27 @@ class NoCollectionsUrl(PelicanException):
     """
     No collections URL was found in the director response
     """
+
+
+class TokenLocationNotSet(PelicanException):
+    """
+    TokenLocation must be set before fetching token
+    """
+
+
+class InvalidDestinationURL(PelicanException):
+    """
+    The destination URL is invalid or has an empty path
+    """
+
+
+class TokenIteratorException(PelicanException):
+    """
+    Failed to fetch tokens due to iterator error
+    """
+
+
+class NoCredentialsException(PelicanException):
+    """
+    Credential is required but was not discovered
+    """
