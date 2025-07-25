@@ -23,10 +23,15 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from jwt.exceptions import ExpiredSignatureError
 from scitokens import SciToken
 
+from pelicanfs.exceptions import (
+    InvalidDestinationURL,
+    TokenIteratorException,
+    TokenLocationNotSet,
+)
 from pelicanfs.token_generator import (
-    TokenGenerationOpts,
     TokenGenerator,
     TokenInfo,
+    TokenOperation,
     is_valid_token,
     token_is_valid_and_acceptable,
 )
@@ -49,7 +54,7 @@ def dummy_dir_resp():
 
 @pytest.fixture
 def token_generator_factory(dummy_dir_resp):
-    def factory(url="https://example.com/namespace/prefix/file.txt", token_name="mytoken", operation="TokenRead"):
+    def factory(url="https://example.com/namespace/prefix/file.txt", token_name="mytoken", operation=TokenOperation.TokenRead):
         return TokenGenerator(destination_url=url, token_name=token_name, dir_resp=dummy_dir_resp, operation=operation)
 
     return factory
@@ -99,7 +104,7 @@ def test_get_token_without_token_location(token_generator_factory):
     tg = token_generator_factory()
     tg.set_token_location(None)
 
-    with pytest.raises(Exception) as e:
+    with pytest.raises(TokenLocationNotSet) as e:
         tg.get_token()
     assert "TokenLocation must be set" in str(e.value)
 
@@ -108,7 +113,7 @@ def test_get_token_with_empty_token_location(token_generator_factory):
     tg = token_generator_factory()
     tg.set_token_location("")
 
-    with pytest.raises(Exception) as e:
+    with pytest.raises(TokenLocationNotSet) as e:
         tg.get_token()
     assert "TokenLocation must be set" in str(e.value)
 
@@ -117,7 +122,7 @@ def test_get_token_with_url_no_path(token_generator_factory):
     tg = token_generator_factory(url="https://example.com")
     tg.set_token_location("/valid/location")
 
-    with pytest.raises(Exception) as e:
+    with pytest.raises(InvalidDestinationURL) as e:
         tg.get_token()
     assert "Invalid DestinationURL" in str(e.value)
 
@@ -128,7 +133,7 @@ def test_get_token_iterator_raises_unexpected(token_generator_factory):
 
     tg.Iterator = TokenIterator([], raise_on_next=RuntimeError("Iterator failure"))
 
-    with pytest.raises(Exception) as e:
+    with pytest.raises(TokenIteratorException) as e:
         tg.get_token()
     assert "Failed to fetch tokens due to iterator error" in str(e.value)
 
@@ -138,7 +143,7 @@ def test_get_token_returns_first_valid_token(token_generator_factory, monkeypatc
     tg.TokenLocation = "/some/valid/location"
     tg.DestinationURL = "https://example.com/namespace/prefix/file.txt"
     tg.DirResp = dummy_dir_resp
-    tg.Operation = "TokenRead"
+    tg.Operation = TokenOperation.TokenRead
 
     token1, public_key1 = create_es256_scitoken_with_public_key(exp_offset_seconds=3600, scopes=["storage.read"])
     token2, public_key2 = create_es256_scitoken_with_public_key(exp_offset_seconds=7200, scopes=["storage.read"])
@@ -208,7 +213,6 @@ def test_get_token_thread_safety(token_generator_factory, monkeypatch):
 
 def test_token_is_valid_and_acceptable_with_real_token(dummy_dir_resp, monkeypatch):
     web_token, public_key = create_es256_scitoken_with_public_key(exp_offset_seconds=3600, aud="/namespace/prefix", issuer="https://trusted-issuer.example.com", scopes=["storage.read"])
-    opts = TokenGenerationOpts(Operation="TokenRead")
     original_deserialize = SciToken.deserialize
 
     def deserialize_with_insecure(*args, **kwargs):
@@ -218,7 +222,7 @@ def test_token_is_valid_and_acceptable_with_real_token(dummy_dir_resp, monkeypat
 
     monkeypatch.setattr("pelicanfs.token_generator.SciToken.deserialize", deserialize_with_insecure)
 
-    valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, opts)
+    valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, TokenOperation.TokenRead)
 
     assert valid
     assert expiry > datetime.now(timezone.utc)
@@ -226,7 +230,6 @@ def test_token_is_valid_and_acceptable_with_real_token(dummy_dir_resp, monkeypat
 
 def test_token_is_valid_and_acceptable_expired_token(dummy_dir_resp, monkeypatch):
     web_token, public_key = create_es256_scitoken_with_public_key(exp_offset_seconds=-10, issuer="https://trusted-issuer.example.com")
-    opts = TokenGenerationOpts(Operation="TokenRead")
     original_deserialize = SciToken.deserialize
 
     def deserialize_with_insecure(*args, **kwargs):
@@ -236,7 +239,7 @@ def test_token_is_valid_and_acceptable_expired_token(dummy_dir_resp, monkeypatch
 
     monkeypatch.setattr("pelicanfs.token_generator.SciToken.deserialize", deserialize_with_insecure)
 
-    valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, opts)
+    valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, TokenOperation.TokenRead)
     assert not valid
     assert expiry <= datetime.now(timezone.utc)
 
@@ -247,7 +250,7 @@ def test_token_generator_get_token_returns_valid_token(token_generator_factory, 
     web_token, public_key = create_es256_scitoken_with_public_key(exp_offset_seconds=3600, aud="/namespace/prefix", issuer="https://trusted-issuer.example.com", scopes=["storage.read"])
 
     tg.Iterator = TokenIterator([web_token])
-    tg.Operation = "TokenRead"
+    tg.Operation = TokenOperation.TokenRead
     tg.DirResp = dummy_dir_resp
 
     original_deserialize = SciToken.deserialize
@@ -272,7 +275,7 @@ def test_token_generator_get_token_fallback(token_generator_factory, dummy_dir_r
     tg.DestinationURL = "https://example.com/namespace/prefix/file.txt"
 
     tg.DirResp = dummy_dir_resp
-    tg.Operation = "TokenRead"
+    tg.Operation = TokenOperation.TokenRead
 
     expired = datetime.now(timezone.utc) - timedelta(seconds=10)
     tg.token = TokenInfo("expired", expired)
@@ -308,7 +311,7 @@ def test_token_generator_get_token_raises_when_no_valid_token(token_generator_fa
 
     tg.Iterator = TokenIterator(tokens)
 
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(TokenLocationNotSet) as excinfo:
         tg.get_token()
     assert "TokenLocation must be set" in str(excinfo.value)
 
