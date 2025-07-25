@@ -21,17 +21,22 @@ import threading
 import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import Client
+from aiowebdav2.client import (
+    Client,
+    Urn,
+)
 from aiowebdav2.exceptions import (
     MethodNotSupportedError,
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
 )
+from aiowebdav2.parser import WebDavXmlUtils
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -570,18 +575,44 @@ class PelicanFileSystem(AsyncFileSystem):
 
                 async def get_item_detail(item):
                     full_path = f"{base_url}{item}"
+                    urn = Urn(item)
+                    path = client.get_full_path(urn)
+                    response = await client.execute_request(
+                        action="info",
+                        path=urn.path(),
+                        headers_ext=["Depth: 0"],
+                    )
+                    content = await response.read()
+
+                    # determine directory status
                     try:
-                        is_directory = await client.is_dir(item)
-                        type_ = "directory" if is_directory else "file"
-                    except MethodNotSupportedError as e:
-                        if getattr(e, "name", "") == "is_dir":
-                            type_ = "file"
-                        else:
-                            raise
+                        is_directory = WebDavXmlUtils.parse_is_dir_response(
+                            content=content,
+                            path=path,
+                            hostname=client._url,
+                        )
+                    except MethodNotSupportedError:
+                        # If the server does not support the is_dir method, we assume it is a file
+                        is_directory = False
+
+                    # get other info
+                    info = WebDavXmlUtils.parse_info_response(
+                        content=content,
+                        path=path,
+                        hostname=client._url,
+                    )
+                    if (modtimestr := info.get("modified")) == "None":
+                        modtime = None
+                    else:
+                        modtime = datetime.strptime(
+                            info["modified"],
+                            "%a, %d %b %Y %H:%M:%S %Z",
+                        )
                     return {
                         "name": full_path,
-                        "size": None,
-                        "type": type_,
+                        "size": int(info["size"]),
+                        "type": "directory" if is_directory else "file",
+                        "modified": modtime,
                     }
 
                 return await asyncio.gather(*(get_item_detail(item) for item in items))
