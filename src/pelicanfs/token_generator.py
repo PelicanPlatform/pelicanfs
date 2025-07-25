@@ -15,35 +15,45 @@ limitations under the License.
 """
 import logging
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum, auto
 from typing import List, Optional, Tuple
 from urllib.parse import ParseResult, urlparse
 
 from scitokens import SciToken
 
+from pelicanfs.exceptions import (
+    InvalidDestinationURL,
+    NoCredentialsException,
+    TokenIteratorException,
+    TokenLocationNotSet,
+)
 from pelicanfs.token_content_iterator import TokenContentIterator
 
 
+@dataclass
 class TokenInfo:
     """Token information including contents and expiration time"""
 
-    def __init__(self, contents: str, expiry: datetime) -> None:
-        self.Contents: str = contents
-        self.Expiry: datetime = expiry
+    Contents: str
+    Expiry: datetime
 
 
-class TokenGenerationOpts:
+class TokenOperation(Enum):
     """
-    Holds operation type for token generation
-    Operation: str
+    Enumeration of token operation types.
+
     - TokenRead: Read-only access
     - TokenWrite: Read/write access
     - TokenSharedRead: Read-only access with shared token
     - TokenSharedWrite: Read/write access with shared token
     """
 
-    def __init__(self, Operation: str) -> None:
-        self.Operation: str = Operation
+    TokenRead = auto()
+    TokenWrite = auto()
+    TokenSharedRead = auto()
+    TokenSharedWrite = auto()
 
 
 class TokenGenerator:
@@ -56,14 +66,14 @@ class TokenGenerator:
         self,
         destination_url: str,
         dir_resp: object,
-        operation: str,
+        operation: TokenOperation,
         token_name: Optional[str] = None,
     ) -> None:
         self.DirResp: object = dir_resp
         self.DestinationURL: str = destination_url
         self.TokenName: Optional[str] = token_name
         self.TokenLocation: Optional[str] = None
-        self.Operation: str = operation
+        self.Operation: TokenOperation = operation
         self.token: Optional[TokenInfo] = None
         self.Iterator: Optional[TokenContentIterator] = None
         self._lock: threading.Lock = threading.Lock()
@@ -98,20 +108,20 @@ class TokenGenerator:
                 return self.token.Contents
 
             potential_tokens: List[TokenInfo] = []
-            opts = TokenGenerationOpts(Operation=self.Operation)
+            operation = self.Operation
 
             if not self.TokenLocation:
                 logging.error("TokenLocation not set or empty")
-                raise Exception("TokenLocation must be set before fetching token")
+                raise TokenLocationNotSet("TokenLocation must be set before fetching token")
 
             try:
                 parsed_url: ParseResult = urlparse(self.DestinationURL)
                 object_path: str = parsed_url.path
                 if not object_path:
-                    raise ValueError("URL path is empty")
+                    raise InvalidDestinationURL("URL path is empty")
             except Exception as e:
                 logging.error(f"Invalid DestinationURL: {self.DestinationURL} ({e})")
-                raise Exception(f"Invalid DestinationURL: {self.DestinationURL}") from e
+                raise InvalidDestinationURL(f"Invalid DestinationURL: {self.DestinationURL}") from e
 
             # Initialize iterator if not already set
             # The iterator will iterate and yield all potential tokens in the token location
@@ -121,10 +131,9 @@ class TokenGenerator:
             try:
                 for contents in self.Iterator:
                     # Check if the token is valid and acceptable
-                    valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, opts)
+                    valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, operation)
                     if valid:
                         self.token = TokenInfo(contents, expiry)
-                        logging.info(f"Using token: {contents}")
                         return contents
                     elif contents and expiry > datetime.now(timezone.utc):
                         potential_tokens.append(TokenInfo(contents, expiry))
@@ -132,7 +141,7 @@ class TokenGenerator:
                 self.Iterator = None
             except Exception as e:
                 logging.error(f"Error iterating tokens: {e}")
-                raise Exception("Failed to fetch tokens due to iterator error") from e
+                raise TokenIteratorException("Failed to fetch tokens due to iterator error") from e
 
             if potential_tokens:
                 logging.warning("Using fallback token even though it may not be fully acceptable")
@@ -140,18 +149,43 @@ class TokenGenerator:
                 return potential_tokens[0].Contents
 
             logging.error("Credential is required, but currently missing")
-            raise Exception(f"Credential is required for {self.DestinationURL} but was not discovered")
+            raise NoCredentialsException(f"Credential is required for {self.DestinationURL} but was not discovered")
 
     def get(self) -> str:
         """Alias for get_token()."""
         return self.get_token()
 
 
+def _is_path_prefix(object_name: str, resource: str) -> bool:
+    """
+    Check if object_name is a proper path prefix of resource.
+
+    This ensures that resource is a proper directory prefix, not just a string prefix.
+    Examples:
+    - _is_path_prefix("/foo/bar/file.txt", "/foo/bar") -> True
+    - _is_path_prefix("/foo/barz/file.txt", "/foo/bar") -> False
+    - _is_path_prefix("/foo/bar", "/foo/bar") -> True
+    """
+    if not object_name.startswith(resource):
+        return False
+
+    # If object_name is exactly the resource, it's a match
+    if object_name == resource:
+        return True
+
+    # For proper path prefix, the next character after the resource must be '/'
+    # This ensures we're matching directory boundaries, not just string prefixes
+    if len(object_name) > len(resource):
+        return object_name[len(resource)] == "/"
+
+    return False
+
+
 def token_is_valid_and_acceptable(
     jwt_serialized: str,
     object_name: str,
     dir_resp: object,
-    opts: TokenGenerationOpts,
+    operation: TokenOperation,
 ) -> Tuple[bool, datetime]:
     """
     Validates a SciToken for expiration, issuer, namespace,
@@ -185,11 +219,10 @@ def token_is_valid_and_acceptable(
     logging.debug(f"Allowed issuers: {issuers}")
     logging.debug(f"Token issuer: {dict(token._verified_claims).get('iss')}")
 
-    # Get the operation type from the options and set the required scopes
-    operation: Optional[str] = getattr(opts, "Operation", None)
-    if operation in ["TokenWrite", "TokenSharedWrite"]:
+    # Get the operation type and set the required scopes
+    if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
         ok_scopes = ["storage.modify", "storage.create"]
-    elif operation in ["TokenRead", "TokenSharedRead"]:
+    elif operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
         ok_scopes = ["storage.read"]
     else:
         ok_scopes = []
@@ -223,9 +256,9 @@ def token_is_valid_and_acceptable(
             acceptable_scope = True
             break
 
-        is_shared = operation in ["TokenSharedRead", "TokenSharedWrite"]
+        is_shared = operation in [TokenOperation.TokenSharedRead, TokenOperation.TokenSharedWrite]
 
-        if (is_shared and object_name == resource) or object_name.startswith(resource):
+        if (is_shared and object_name == resource) or _is_path_prefix(object_name, resource):
             acceptable_scope = True
             break
 
