@@ -21,6 +21,7 @@ import threading
 import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -44,6 +45,14 @@ from .exceptions import (
 )
 
 logger = logging.getLogger("fsspec.pelican")
+
+
+@dataclass
+class NamespaceInfo:
+    """Information about a namespace including cache manager and token requirements"""
+
+    cache_manager: "_CacheManager"
+    requires_token: bool
 
 
 class _AccessResp:
@@ -115,22 +124,27 @@ class _CacheManager(object):
     or otherwise cause errors, they should be skipped for future operations.
     """
 
-    def __init__(self, cache_list):
+    def __init__(self, cache_list, requires_token=False):
         """
-        Construct a new cache manager from an ordered list of cache URL strings.
+        Construct a new cache manager from an ordered list of cache URLs.
         The cache URL is assumed to have the form of:
             scheme://hostname[:port]
         e.g., https://cache.example.com:8443 or http://cache2.example.com
 
         The list ordering is assumed to be the order of preference; the first cache
         in the list will be used until it's explicitly noted as bad.
+
+        Args:
+            cache_list: List of cache URL strings
+            requires_token: Boolean indicating if this namespace requires authentication
         """
         self._lock = threading.Lock()
         self._cache_list = []
+        self.requires_token = requires_token
         # Work around any bugs where the director may return the same cache twice
         cache_set = set()
-        for cache in cache_list:
-            parsed_url = urllib.parse.urlparse(cache)
+        for cache_url in cache_list:
+            parsed_url = urllib.parse.urlparse(cache_url)
             parsed_url = parsed_url._replace(path="", query="", fragment="")
             cache_str = parsed_url.geturl()
             if cache_str in cache_set:
@@ -154,8 +168,9 @@ class _CacheManager(object):
         """
         cache_url_parsed = urllib.parse.urlparse(cache_url)
         cache_url_parsed = cache_url_parsed._replace(path="", query="", fragment="")
+        bad_cache_url = cache_url_parsed.geturl()
         with self._lock:
-            self._cache_list.remove(cache_url_parsed.geturl())
+            self._cache_list.remove(bad_cache_url)
 
 
 @asynccontextmanager
@@ -345,7 +360,7 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Choosing a cache for {fileloc}...")
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
-        cache_url = self._match_namespace(fparsed.path)
+        cache_url, requires_token = self._match_namespace(fparsed.path)
         if cache_url:
             logger.debug(f"Found previously working cache: {cache_url}")
             return cache_url
@@ -355,26 +370,34 @@ class PelicanFileSystem(AsyncFileSystem):
         # add all the director-provided caches to the list (doing a round of de-dup)
         logger.debug("No previous working cache found, finding a new one")
         cache_list = []
+        requires_token = False
+
+        # Always check with director to get namespace information and require-token
+        headers = await self.get_director_headers(fileloc)
+        metalist, namespace, requires_token = parse_metalink(headers)
+
         if self.preferred_caches:
+            # Use preferred caches if specified
             cache_list = [urllib.parse.urlparse(urllib.parse.urljoin(cache, fileloc))._replace(query=fparsed.query).geturl() if cache != "+" else "+" for cache in self.preferred_caches]
-            namespace = "/"
-        if not self.preferred_caches or ("+" in self.preferred_caches):
-            headers = await self.get_director_headers(fileloc)
-            metalist, namespace = parse_metalink(headers)
-            old_cache_list = cache_list
-            cache_list = []
-            cache_set = set()
-            new_caches = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
-            for cache in old_cache_list:
-                if cache == "+":
-                    for cache2 in new_caches:
-                        if cache2 not in cache_set:
-                            cache_set.add(cache2)
-                            cache_list.append(cache2)
-                else:
-                    cache_list.append(cache)
-            if not cache_list:
-                cache_list = new_caches
+            # If '+' is in preferred caches, merge with director-provided caches
+            if "+" in self.preferred_caches:
+                old_cache_list = cache_list
+                cache_list = []
+                cache_set = set()
+                new_caches = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
+                for cache in old_cache_list:
+                    if cache == "+":
+                        for cache_url in new_caches:
+                            if cache_url not in cache_set:
+                                cache_set.add(cache_url)
+                                cache_list.append(cache_url)
+                    else:
+                        cache_list.append(cache)
+                if not cache_list:
+                    cache_list = new_caches
+        else:
+            # Use director-provided caches
+            cache_list = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
 
         while cache_list:
             updated_url = cache_list[0]
@@ -405,7 +428,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raise NoAvailableSource()
 
         with self._namespace_lock:
-            self._namespace_cache[namespace] = _CacheManager(cache_list)
+            self._namespace_cache[namespace] = _CacheManager(cache_list, requires_token)
 
         return updated_url
 
@@ -417,6 +440,10 @@ class PelicanFileSystem(AsyncFileSystem):
         origin = headers.get("Location")
         if not origin:
             raise NoAvailableSource()
+
+        # Parse the headers to get token requirements for the namespace
+        _, _, requires_token = parse_metalink(headers)
+
         return origin
 
     async def _set_director_url(self) -> str:
@@ -448,14 +475,19 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
             if "Link" not in resp.headers:
                 raise BadDirectorResponse()
+            print(resp)
             collections_url = get_collections_url(resp.headers)
             dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
+
+            # Parse the headers to get token requirements for the namespace
+            _, _, requires_token = parse_metalink(resp.headers)
+
         if not collections_url:
             logger.error(f"No collections endpoint found for {fileloc}")
             raise NoCollectionsUrl()
         return dirlist_url
 
-    def _get_prefix_info(self, path: str) -> _CacheManager:
+    def _get_prefix_info(self, path: str) -> Optional[NamespaceInfo]:
         """
         Given a path into the filesystem, return the information in the
         namespace cache (if any)
@@ -466,18 +498,24 @@ class PelicanFileSystem(AsyncFileSystem):
             prefixes.sort(reverse=True)
             for prefix in prefixes:
                 if path.startswith(prefix):
-                    namespace_info = self._namespace_cache.get(prefix)
+                    cache_manager = self._namespace_cache.get(prefix)
+                    if cache_manager:
+                        namespace_info = NamespaceInfo(cache_manager, cache_manager.requires_token)
                     break
         return namespace_info
 
-    def _match_namespace(self, fileloc: str):
+    def _match_namespace(self, fileloc: str) -> Tuple[Optional[str], Optional[bool]]:
+        """
+        Search for a matching namespace and return both the cache URL and requires_token status
+        """
         logger.debug(f"Searching memory for matching namespace for {fileloc}...")
         namespace_info = self._get_prefix_info(fileloc)
         if not namespace_info:
-            return
+            return None, None
 
-        logger.debug(f"Matching namespace found, using cache at {namespace_info.get_url(fileloc)}")
-        return namespace_info.get_url(fileloc)
+        cache_url = namespace_info.cache_manager.get_url(fileloc)
+        logger.debug(f"Matching namespace found, using cache at {cache_url}")
+        return cache_url, namespace_info.requires_token
 
     def _bad_cache(self, url: str, e: Exception):
         """
@@ -497,7 +535,7 @@ class PelicanFileSystem(AsyncFileSystem):
         namespace_info = self._get_prefix_info(path)
         if not namespace_info:
             return
-        namespace_info.bad_cache(bad_cache)
+        namespace_info.cache_manager.bad_cache(bad_cache)
 
     def _dirlist_dec(func):
         """
