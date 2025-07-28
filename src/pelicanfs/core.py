@@ -297,9 +297,18 @@ class PelicanFileSystem(AsyncFileSystem):
         return urllib.parse.urlunparse(updated_url)
 
     @staticmethod
-    def _remove_host_from_paths(paths):
+    def _remove_host_from_paths(paths, inplace=False):
+        """Remove the host from a path, list, or dict of paths.
+
+        If `inplace` is True, modify the input paths in-place, mainly to support
+        `walk` operations where the caller needs to be able to modify the dirnames
+        object (second entry in walk tuple) before the iteration continues.
+        """
         if isinstance(paths, list):
-            return [PelicanFileSystem._remove_host_from_paths(path) for path in paths]
+            if not inplace:
+                paths = list(paths)
+            for i, path in enumerate(paths):
+                paths[i] = PelicanFileSystem._remove_host_from_paths(path)
 
         if isinstance(paths, dict):
             if "name" in paths:
@@ -310,12 +319,13 @@ class PelicanFileSystem(AsyncFileSystem):
                     paths["url"] = PelicanFileSystem._remove_host_from_path(url)
                     return paths
             else:
-                new_dict = {}
-                for key, item in paths.items():
+                if not inplace:
+                    paths = paths.copy()
+                for key in list(paths):
                     new_key = PelicanFileSystem._remove_host_from_path(key)
-                    new_item = PelicanFileSystem._remove_host_from_paths(item)
-                    new_dict[new_key] = new_item
-                return new_dict
+                    new_item = PelicanFileSystem._remove_host_from_paths(paths.pop(key))
+                    paths[new_key] = new_item
+                return paths
 
         if isinstance(paths, str):
             return PelicanFileSystem._remove_host_from_path(paths)
@@ -865,14 +875,18 @@ class PelicanFileSystem(AsyncFileSystem):
             "token": self.token.removeprefix("Bearer ") if self.token else None,
         }
         async with self.get_webdav_client(options) as client:
-            async for item in self.http_file_system._walk(
+            async for url, dirs, files in self.http_file_system._walk(
                 list_url,
                 maxdepth=maxdepth,
                 on_error=on_error,
                 client=client,
                 **kwargs,
             ):
-                yield tuple(map(self._remove_host_from_paths, item))
+                yield (
+                    self._remove_host_from_path(url),
+                    self._remove_host_from_paths(dirs, inplace=True),
+                    self._remove_host_from_paths(files, inplace=True),
+                )
 
     fastwalk = sync_generator(_walk)
 
