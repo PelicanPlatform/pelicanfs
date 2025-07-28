@@ -36,7 +36,11 @@ from aiowebdav2.exceptions import (
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
-from .dir_header_parser import get_collections_url, parse_metalink
+from .dir_header_parser import (
+    DirectorResponse,
+    get_collections_url,
+    parse_director_response,
+)
 from .exceptions import (
     BadDirectorResponse,
     InvalidMetadata,
@@ -49,10 +53,10 @@ logger = logging.getLogger("fsspec.pelican")
 
 @dataclass
 class NamespaceInfo:
-    """Information about a namespace including cache manager and token requirements"""
+    """Information about a namespace including cache manager and director response"""
 
     cache_manager: "_CacheManager"
-    requires_token: bool
+    director_response: Optional[DirectorResponse] = None
 
 
 class _AccessResp:
@@ -124,7 +128,7 @@ class _CacheManager(object):
     or otherwise cause errors, they should be skipped for future operations.
     """
 
-    def __init__(self, cache_list, requires_token=False):
+    def __init__(self, cache_list, director_response=None):
         """
         Construct a new cache manager from an ordered list of cache URLs.
         The cache URL is assumed to have the form of:
@@ -136,11 +140,11 @@ class _CacheManager(object):
 
         Args:
             cache_list: List of cache URL strings
-            requires_token: Boolean indicating if this namespace requires authentication
+            director_response: DirectorResponse object containing namespace information
         """
         self._lock = threading.Lock()
         self._cache_list = []
-        self.requires_token = requires_token
+        self.director_response = director_response
         # Work around any bugs where the director may return the same cache twice
         cache_set = set()
         for cache_url in cache_list:
@@ -301,6 +305,15 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return paths
 
+    def _get_token(self):
+        """
+        Returns the token for the given namespace location
+        """
+        if self.token:
+            return self.token.removeprefix("Bearer ")
+        else:
+            return None
+
     def get_access_data(self):
         """
         Return the access stats represeting all the recent accesses of each namespace path
@@ -352,29 +365,31 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.get(url, allow_redirects=False) as resp:
             return resp.headers
 
-    async def get_working_cache(self, fileloc: str) -> str:
+    async def get_working_cache(self, fileloc: str) -> Tuple[str, DirectorResponse]:
         """
-        Returns the highest priority cache for the namespace that appears to be working
+        Returns a tuple of (cache url, director_response) for the given namespace location
         """
         namespace = None
         logger.debug(f"Choosing a cache for {fileloc}...")
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
-        cache_url, requires_token = self._match_namespace(fparsed.path)
+        cache_url, director_response = self._match_namespace(fparsed.path)
         if cache_url:
             logger.debug(f"Found previously working cache: {cache_url}")
-            return cache_url
+            return cache_url, director_response
 
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
         # add all the director-provided caches to the list (doing a round of de-dup)
         logger.debug("No previous working cache found, finding a new one")
         cache_list = []
-        requires_token = False
 
         # Always check with director to get namespace information and require-token
         headers = await self.get_director_headers(fileloc)
-        metalist, namespace, requires_token = parse_metalink(headers)
+        director_response = parse_director_response(headers)
+
+        # Extract data directly from director_response
+        namespace = director_response.x_pel_ns_hdr.namespace if director_response.x_pel_ns_hdr else ""
 
         if self.preferred_caches:
             # Use preferred caches if specified
@@ -384,7 +399,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 old_cache_list = cache_list
                 cache_list = []
                 cache_set = set()
-                new_caches = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
+                new_caches = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
                 for cache in old_cache_list:
                     if cache == "+":
                         for cache_url in new_caches:
@@ -397,7 +412,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     cache_list = new_caches
         else:
             # Use director-provided caches
-            cache_list = [urllib.parse.urlparse(entry[0])._replace(query=fparsed.query).geturl() for entry in metalist]
+            cache_list = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
 
         while cache_list:
             updated_url = cache_list[0]
@@ -428,23 +443,23 @@ class PelicanFileSystem(AsyncFileSystem):
             raise NoAvailableSource()
 
         with self._namespace_lock:
-            self._namespace_cache[namespace] = _CacheManager(cache_list, requires_token)
+            self._namespace_cache[namespace] = _CacheManager(cache_list, director_response)
 
-        return updated_url
+        return updated_url, director_response
 
-    async def get_origin_url(self, fileloc: str) -> str:
+    async def get_origin_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
         """
-        Returns an origin url for the given namespace location
+        Returns a tuple of (origin url, director_response) for the given namespace location
         """
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
             raise NoAvailableSource()
 
-        # Parse the headers to get token requirements for the namespace
-        _, _, requires_token = parse_metalink(headers)
+        # Parse the headers to get the full director response
+        director_response = parse_director_response(headers)
 
-        return origin
+        return origin, director_response
 
     async def _set_director_url(self) -> str:
         if not self.director_url:
@@ -458,9 +473,9 @@ class PelicanFileSystem(AsyncFileSystem):
                 director_url = director_url + "/"
             self.director_url = director_url
 
-    async def get_dirlist_url(self, fileloc: str) -> str:
+    async def get_dirlist_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
         """
-        Returns a dirlist host url for the given namespace locations
+        Returns a tuple of (dirlist url, director_response) for the given namespace location
         """
         logger.debug(f"Finding the collections endpoint for {fileloc}...")
         await self._set_director_url()
@@ -475,36 +490,37 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
             if "Link" not in resp.headers:
                 raise BadDirectorResponse()
-            print(resp)
             collections_url = get_collections_url(resp.headers)
+
+            if not collections_url:
+                logger.error(f"No collections endpoint found for {fileloc}")
+                raise NoCollectionsUrl()
+
             dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
 
-            # Parse the headers to get token requirements for the namespace
-            _, _, requires_token = parse_metalink(resp.headers)
+            # Parse the headers to get the full director response
+            director_response = parse_director_response(resp.headers)
+            director_response.location = dirlist_url
 
-        if not collections_url:
-            logger.error(f"No collections endpoint found for {fileloc}")
-            raise NoCollectionsUrl()
-        return dirlist_url
+            return dirlist_url, director_response
 
     def _get_prefix_info(self, path: str) -> Optional[NamespaceInfo]:
         """
-        Given a path into the filesystem, return the information in the
-        namespace cache (if any)
+        Get information about the namespace for a given path.
+        Returns None if no namespace information is available.
         """
-        namespace_info = None
         with self._namespace_lock:
-            prefixes = list(self._namespace_cache.keys())
-            prefixes.sort(reverse=True)
-            for prefix in prefixes:
+            # Find the longest matching prefix
+            for prefix in sorted(self._namespace_cache.keys(), key=len, reverse=True):
                 if path.startswith(prefix):
                     cache_manager = self._namespace_cache.get(prefix)
                     if cache_manager:
-                        namespace_info = NamespaceInfo(cache_manager, cache_manager.requires_token)
+                        namespace_info = NamespaceInfo(cache_manager, cache_manager.director_response)
+                        return namespace_info
                     break
-        return namespace_info
+        return None
 
-    def _match_namespace(self, fileloc: str) -> Tuple[Optional[str], Optional[bool]]:
+    def _match_namespace(self, fileloc: str) -> Tuple[Optional[str], Optional[DirectorResponse]]:
         """
         Search for a matching namespace and return both the cache URL and requires_token status
         """
@@ -515,7 +531,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         cache_url = namespace_info.cache_manager.get_url(fileloc)
         logger.debug(f"Matching namespace found, using cache at {cache_url}")
-        return cache_url, namespace_info.requires_token
+        return cache_url, namespace_info.cache_manager.director_response
 
     def _bad_cache(self, url: str, e: Exception):
         """
@@ -547,7 +563,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         async def wrapper(self, *args, **kwargs):
             path = self._check_fspath(args[0])
-            data_url = await self.get_dirlist_url(path)
+            data_url, director_response = await self.get_dirlist_url(path)
             logger.debug(f"Running {func} with url: {data_url}")
             return await func(self, data_url, *args[1:], **kwargs)
 
@@ -711,7 +727,7 @@ class PelicanFileSystem(AsyncFileSystem):
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
-        list_url = await self.get_dirlist_url(path)
+        list_url, director_response = await self.get_dirlist_url(path)
         async for _ in self.http_file_system._walk(list_url, maxdepth, on_error, **kwargs):
             yield self._remove_host_from_path(_)
 
@@ -770,7 +786,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
-        data_url = sync(self.loop, self.get_origin_url if self.direct_reads else self.get_working_cache, path)
+        if self.direct_reads:
+            data_url, director_response = sync(self.loop, self.get_origin_url, path)
+        else:
+            data_url, director_response = sync(self.loop, self.get_working_cache, path)
         logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
@@ -781,9 +800,9 @@ class PelicanFileSystem(AsyncFileSystem):
     async def open_async(self, path, **kwargs):
         path = self._check_fspath(path)
         if self.direct_reads:
-            data_url = await self.get_origin_url(path)
+            data_url, director_response = await self.get_origin_url(path)
         else:
-            data_url = self.get_working_cache(path)
+            data_url, director_response = await self.get_working_cache(path)
         logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
@@ -805,9 +824,9 @@ class PelicanFileSystem(AsyncFileSystem):
         async def wrapper(self, *args, **kwargs):
             path = self._check_fspath(args[0])
             if self.direct_reads:
-                data_url = await self.get_origin_url(path)
+                data_url, director_response = await self.get_origin_url(path)
             else:
-                data_url = await self.get_working_cache(path)
+                data_url, director_response = await self.get_working_cache(path)
             try:
                 logger.debug(f"Calling {func} using the following url: {data_url}")
                 result = await func(self, data_url, *args[1:], **kwargs)
@@ -835,17 +854,17 @@ class PelicanFileSystem(AsyncFileSystem):
             if isinstance(path, str):
                 path = self._check_fspath(args[0])
                 if self.direct_reads:
-                    data_url = await self.get_origin_url(path)
+                    data_url, director_response = await self.get_origin_url(path)
                 else:
-                    data_url = await self.get_working_cache(path)
+                    data_url, director_response = await self.get_working_cache(path)
             else:
                 data_url = []
                 for p in path:
                     p = self._check_fspath(p)
                     if self.direct_reads:
-                        d_url = await self.get_origin_url(p)
+                        d_url, director_response = await self.get_origin_url(p)
                     else:
-                        d_url = await self.get_working_cache(p)
+                        d_url, director_response = await self.get_working_cache(p)
                     data_url.append(d_url)
             try:
                 logger.debug(f"Calling {func} using the following urls: {data_url}")
