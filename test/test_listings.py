@@ -308,6 +308,7 @@ def test_find(
     ]
 
 
+@pytest.mark.parametrize("walk_impl", ["walk", "fastwalk"])
 def test_walk(
     httpserver: HTTPServer,
     get_client,
@@ -323,6 +324,7 @@ def test_walk(
     f2_file2_listing_response,
     f2_file1_listing_response,
     sf_file_listing_response,
+    walk_impl,
 ):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
@@ -372,7 +374,7 @@ def test_walk(
     )
 
     sentinel = 0
-    for root, dirnames, filenames in pelfs.walk("/foo/bar"):
+    for root, dirnames, filenames in getattr(pelfs, walk_impl)("/foo/bar"):
         if sentinel == 0:
             assert root == "/foo/bar"
             assert dirnames == ["folder1", "folder2"]
