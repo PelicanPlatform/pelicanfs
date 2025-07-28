@@ -29,7 +29,10 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import Client
+from aiowebdav2.client import (
+    Client,
+    ClientOptions,
+)
 from aiowebdav2.exceptions import (
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
@@ -184,24 +187,16 @@ async def get_webdav_client(options):
     base_url = options["hostname"]
     token = options["token"]
 
-    # Step 1: Create a temporary client to trigger and then close its internal session
-    client = Client(url=base_url, username="", password="")
-    original_session = client._session  # Triggers internal lazy session creation
-    if not original_session.closed:
-        logger.debug("Closing original internal session")
-        await original_session.close()
-
-    # Step 2: Create your own aiohttp session with auth
     session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"})
-
-    # Step 3: Create real client and inject your custom session
-    client._session = session  # Overwrite internal session
+    clientopts = ClientOptions(session=session)
+    client = Client(url=base_url, username="", password="", options=clientopts)
+    client._close_session = True
 
     try:
         yield client
     finally:
-        logger.debug("Closing custom injected session")
-        await session.close()
+        await client.close()
+        logger.debug("WebDAV client closed")
 
 
 def sync_generator(async_gen_func, obj=None):
