@@ -213,9 +213,8 @@ def token_is_valid_and_acceptable(
 
     # Get the allowed issuers from the director response and check if the token issuer is in the list
     issuers: List[str] = []
-    if dir_resp and hasattr(dir_resp, "XPelTokGen") and hasattr(dir_resp.XPelTokGen, "Issuers"):
-        issuers = [str(u) for u in dir_resp.XPelTokGen.Issuers or [] if u is not None]
-
+    if dir_resp and hasattr(dir_resp, "x_pel_tok_gen_hdr") and dir_resp.x_pel_tok_gen_hdr:
+        issuers = dir_resp.x_pel_tok_gen_hdr.issuers or []
     logging.debug(f"Allowed issuers: {issuers}")
     logging.debug(f"Token issuer: {dict(token._verified_claims).get('iss')}")
 
