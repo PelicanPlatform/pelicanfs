@@ -1,8 +1,60 @@
+# -- project metadata
+
+[build-system]
+requires = [
+    "setuptools >=61.0",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pelicanfs"
+version = "1.1.2"
+description = "An FSSpec Implementation using the Pelican System"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Pelican Platform Developers", email = "info@pelicanplatform.org" }
+]
+keywords = ["pelican", "fsspec"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+requires-python = ">=3.12, <4"
+dependencies = [
+    "aiohttp >=3.9.4,<4",
+    "aiowebdav2",
+    "cachetools >=5.3,<6",
+    "fsspec >=2024.3.1",
+    "igwn-auth-utils",
+]
+
+[project.entry-points."fsspec.specs"]
+pelican = "pelicanfs.core:PelicanFileSystem"
+osdf = "pelicanfs.core:OSDFFileSystem"
+
+[project.urls]
+Source = "https://github.com/PelicanPlatform/pelicanfs"
+Pelican-Source = "https://github.com/PelicanPlatform/pelican"
+Bug-Reports = "https://github.com/PelicanPlatform/pelicanfs/issues"
+
+[dependency-groups]
+testing = [
+    "pytest",
+    "pytest-httpserver",
+    "trustme",
+]
+
+# -- tools
+
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",
 ]
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
