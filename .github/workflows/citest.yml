@@ -20,6 +20,6 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install Dependencies
       run: |
-        python -m pip install '.[testing]'
+        python -m pip install . --group testing
     - name: Test with pytest
       run: pytest
