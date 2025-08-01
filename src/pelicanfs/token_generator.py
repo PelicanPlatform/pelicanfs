@@ -15,6 +15,7 @@ limitations under the License.
 """
 import logging
 import threading
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
@@ -27,9 +28,10 @@ from pelicanfs.exceptions import (
     InvalidDestinationURL,
     NoCredentialsException,
     TokenIteratorException,
-    TokenLocationNotSet,
 )
 from pelicanfs.token_content_iterator import TokenContentIterator
+
+logger = logging.getLogger("fsspec.pelican")
 
 
 @dataclass
@@ -110,17 +112,13 @@ class TokenGenerator:
             potential_tokens: List[TokenInfo] = []
             operation = self.Operation
 
-            if not self.TokenLocation:
-                logging.error("TokenLocation not set or empty")
-                raise TokenLocationNotSet("TokenLocation must be set before fetching token")
-
             try:
                 parsed_url: ParseResult = urlparse(self.DestinationURL)
                 object_path: str = parsed_url.path
                 if not object_path:
                     raise InvalidDestinationURL("URL path is empty")
             except Exception as e:
-                logging.error(f"Invalid DestinationURL: {self.DestinationURL} ({e})")
+                logger.error(f"Invalid DestinationURL: {self.DestinationURL} ({e})")
                 raise InvalidDestinationURL(f"Invalid DestinationURL: {self.DestinationURL}") from e
 
             # Initialize iterator if not already set
@@ -128,27 +126,39 @@ class TokenGenerator:
             if self.Iterator is None:
                 self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName)
 
+            logger.debug("About to enter token validation loop")
+            logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
             try:
-                for contents in self.Iterator:
-                    # Check if the token is valid and acceptable
-                    valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, operation)
-                    if valid:
-                        self.token = TokenInfo(contents, expiry)
-                        return contents
-                    elif contents and expiry > datetime.now(timezone.utc):
-                        potential_tokens.append(TokenInfo(contents, expiry))
-            except StopIteration:
-                self.Iterator = None
+                if self.Iterator is None:
+                    logger.error("Iterator is None")
+                    raise TokenIteratorException("Token iterator is None")
+
+                # Use next() to get tokens one at a time from the iterator
+                while True:
+                    try:
+                        contents = next(self.Iterator)
+                        # Check if the token is valid and acceptable
+                        logger.debug(f"Validating token for operation: {operation}")
+                        valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, operation)
+                        logger.debug(f"Token validation result: valid={valid}, expiry={expiry}")
+                        if valid:
+                            self.token = TokenInfo(contents, expiry)
+                            return contents
+                        elif contents and expiry > datetime.now(timezone.utc):
+                            potential_tokens.append(TokenInfo(contents, expiry))
+                    except StopIteration:
+                        logger.debug("Token iterator reached StopIteration")
+                        break
             except Exception as e:
-                logging.error(f"Error iterating tokens: {e}")
+                logger.error(f"Error iterating tokens: {e}\n{traceback.format_exc()}")
                 raise TokenIteratorException("Failed to fetch tokens due to iterator error") from e
 
             if potential_tokens:
-                logging.warning("Using fallback token even though it may not be fully acceptable")
+                logger.warning("Using fallback token even though it may not be fully acceptable")
                 self.token = potential_tokens[0]
                 return potential_tokens[0].Contents
 
-            logging.error("Credential is required, but currently missing")
+            logger.error("Credential is required, but currently missing")
             raise NoCredentialsException(f"Credential is required for {self.DestinationURL} but was not discovered")
 
     def get(self) -> str:
@@ -194,29 +204,35 @@ def token_is_valid_and_acceptable(
     Returns:
         Tuple (is_valid, expiry_datetime)
     """
+    logger.debug(f"token_is_valid_and_acceptable called with operation: {operation}")
+
     try:
+        # Try to deserialize the token without SSL verification
+        # The SSL issue is likely happening when SciToken tries to fetch the public key
         token: SciToken = SciToken.deserialize(jwt_serialized)
+        logger.debug("Successfully deserialized token")
     except (ValueError, Exception) as e:
-        logging.debug(f"Failed to deserialize token: {jwt_serialized[:30]}... Error: {e}")
+        logger.debug(f"Failed to deserialize token: {jwt_serialized[:30]}... Error: {e}")
         return False, datetime.fromtimestamp(0, tz=timezone.utc)
 
     # Check if the token is expired
     exp = token.get("exp")
     if exp is None:
-        logging.debug("Token missing exp claim")
+        logger.debug("Token missing exp claim")
         return False, datetime.fromtimestamp(0, tz=timezone.utc)
 
     expiry_dt: datetime = datetime.fromtimestamp(exp, tz=timezone.utc)
+    logger.debug(f"Token expiry: {expiry_dt}")
     if expiry_dt <= datetime.now(timezone.utc):
-        logging.debug(f"Token expired at {expiry_dt}")
+        logger.debug(f"Token expired at {expiry_dt}")
         return False, expiry_dt
 
     # Get the allowed issuers from the director response and check if the token issuer is in the list
     issuers: List[str] = []
     if dir_resp and hasattr(dir_resp, "x_pel_tok_gen_hdr") and dir_resp.x_pel_tok_gen_hdr:
         issuers = dir_resp.x_pel_tok_gen_hdr.issuers or []
-    logging.debug(f"Allowed issuers: {issuers}")
-    logging.debug(f"Token issuer: {dict(token._verified_claims).get('iss')}")
+    logger.debug(f"Allowed issuers: {issuers}")
+    logger.debug(f"Token issuer: {dict(token._verified_claims).get('iss')}")
 
     # Get the operation type and set the required scopes
     if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
@@ -226,8 +242,8 @@ def token_is_valid_and_acceptable(
     else:
         ok_scopes = []
 
-    logging.debug(f"Required scopes for operation '{operation}': {ok_scopes}")
-    logging.debug(f"Token scopes: {token.get('scope')}")
+    logger.debug(f"Required scopes for operation '{operation}': {ok_scopes}")
+    logger.debug(f"Token scopes: {token.get('scope')}")
 
     token_scopes = token.get("scope", "")
     scope_list = token_scopes.split()
@@ -262,7 +278,7 @@ def token_is_valid_and_acceptable(
             break
 
     if not acceptable_scope:
-        logging.debug("No acceptable scope found in token")
+        logger.debug("No acceptable scope found in token")
         return False, expiry_dt
 
     return True, expiry_dt
@@ -290,21 +306,21 @@ def is_valid_token(
         exp_dt = datetime.fromtimestamp(exp, tz=timezone.utc)
         if exp_dt <= datetime.now(timezone.utc) + timedelta(seconds=timeleft):
             if warn:
-                logging.warning(f"Token expired or about to expire at {exp_dt}")
+                logger.warning(f"Token expired or about to expire at {exp_dt}")
             return False
 
     # Check if the token issuer is in the allowed list
     tok_issuer = dict(token._verified_claims).get("iss")
     if issuer and tok_issuer not in issuer:
         if warn:
-            logging.warning(f"Token issuer {tok_issuer} not in allowed list: {issuer}")
+            logger.warning(f"Token issuer {tok_issuer} not in allowed list: {issuer}")
         return False
 
     # Check if the token scope matches the required scope
     tok_scope = token.get("scope")
     if scope and (not tok_scope or scope not in tok_scope.split()):
         if warn:
-            logging.warning(f"Token missing required scope: {scope} in {tok_scope}")
+            logger.warning(f"Token missing required scope: {scope} in {tok_scope}")
         return False
 
     return True
