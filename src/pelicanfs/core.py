@@ -47,6 +47,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
+from .token_generator import TokenGenerator, TokenOperation
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -314,6 +315,96 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             return None
 
+    def _get_token_operation(self, func_name: str) -> TokenOperation:
+        """
+        Determine the token operation based on the function being called.
+
+        Args:
+            func_name: Name of the function being called
+
+        Returns:
+            TokenOperation: The appropriate token operation for the function
+        """
+        # Read operations
+        read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
+
+        # Write operations (if any are implemented)
+        write_operations = {
+            # Add write operations here when they are implemented
+        }
+
+        if func_name in read_operations:
+            return TokenOperation.TokenRead
+        elif func_name in write_operations:
+            return TokenOperation.TokenWrite
+        else:
+            # Default to read for unknown operations
+            return TokenOperation.TokenRead
+
+    def _set_http_filesystem_token(self, token: str, session=None) -> None:
+        """
+        Set the Authorization header in the HTTP filesystem's session.
+
+        Args:
+            token: The token to set (without "Bearer " prefix)
+            session: Optional specific session to set token in (in addition to HTTP filesystem session)
+        """
+        if not token:
+            return
+
+        # Set the token in the HTTP filesystem's session headers
+        if hasattr(self.http_file_system, "session") and self.http_file_system.session:
+            self.http_file_system.session.headers.update({"Authorization": f"Bearer {token}"})
+        else:
+            # If session doesn't exist yet, set it in the default headers
+            if not hasattr(self.http_file_system, "_default_headers"):
+                self.http_file_system._default_headers = {}
+            self.http_file_system._default_headers["Authorization"] = f"Bearer {token}"
+
+        # Also set token in the specific session if provided
+        if session:
+            session.headers["Authorization"] = f"Bearer {token}"
+
+    def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str:
+        """
+        Handle token generation if required by the director response.
+
+        Args:
+            url: The destination URL
+            director_response: The director response containing namespace information
+            operation: The token operation type
+
+        Returns:
+            str: The generated token or None if no token is required
+        """
+        if not director_response or not director_response.x_pel_ns_hdr:
+            return None
+
+        if not director_response.x_pel_ns_hdr.require_token:
+            return None
+
+        # Check if we already have a token from kwargs headers
+        existing_token = self._get_token()
+        if existing_token:
+            logger.debug(f"Using existing token from headers for {url}")
+            self._set_http_filesystem_token(existing_token)
+            return existing_token
+
+        try:
+            # Create token generator
+            token_generator = TokenGenerator(destination_url=url, dir_resp=director_response, operation=operation)
+
+            # Get token (TokenContentIterator will automatically discover token location)
+            token = token_generator.get_token()
+            if token:
+                self._set_http_filesystem_token(token)
+                # Also update self.token so _ls_real can use it
+                self.token = f"Bearer {token}"
+            return token
+        except Exception as e:
+            logger.warning(f"Failed to generate token for {url}: {e}")
+            return None
+
     def get_access_data(self):
         """
         Return the access stats represeting all the recent accesses of each namespace path
@@ -408,8 +499,8 @@ class PelicanFileSystem(AsyncFileSystem):
                                 cache_list.append(cache_url)
                     else:
                         cache_list.append(cache)
-                if not cache_list:
-                    cache_list = new_caches
+            if not cache_list:
+                cache_list = new_caches
         else:
             # Use director-provided caches
             cache_list = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
@@ -420,9 +511,20 @@ class PelicanFileSystem(AsyncFileSystem):
             timeout = aiohttp.ClientTimeout(total=5)
             logger.debug("Finding a working cache...")
             session = await self.http_file_system.set_session()
-            if self.token:
-                logger.debug("Adding Authorization to session header")
-                session.headers["Authorization"] = self.token
+
+            # Handle token generation for cache requests if required
+            if director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token:
+                operation = self._get_token_operation("get_working_cache")
+                self._handle_token_generation(updated_url, director_response, operation)
+
+                # Set token in session headers if we have one (either existing or newly generated)
+                token_to_use = self._get_token()
+                if token_to_use:
+                    self._set_http_filesystem_token(token_to_use, session)
+                else:
+                    pass
+            else:
+                pass
             try:
                 logger.debug(f"Checking to see if the cache at {updated_url} is working and returns a valid response code")
                 async with session.head(updated_url, timeout=timeout) as resp:
@@ -485,8 +587,6 @@ class PelicanFileSystem(AsyncFileSystem):
         # Timeout response in seconds - the default response is 5 minutes
         timeout = aiohttp.ClientTimeout(total=5)
         session = await self.http_file_system.set_session()
-        if self.token:
-            session.headers["Authorization"] = self.token
         async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
             if "Link" not in resp.headers:
                 raise BadDirectorResponse()
@@ -564,6 +664,11 @@ class PelicanFileSystem(AsyncFileSystem):
         async def wrapper(self, *args, **kwargs):
             path = self._check_fspath(args[0])
             data_url, director_response = await self.get_dirlist_url(path)
+
+            # Handle token generation if required
+            operation = self._get_token_operation(func.__name__)
+            self._handle_token_generation(data_url, director_response, operation)
+
             logger.debug(f"Running {func} with url: {data_url}")
             return await func(self, data_url, *args[1:], **kwargs)
 
@@ -790,6 +895,11 @@ class PelicanFileSystem(AsyncFileSystem):
             data_url, director_response = sync(self.loop, self.get_origin_url, path)
         else:
             data_url, director_response = sync(self.loop, self.get_working_cache, path)
+
+        # Handle token generation if required
+        operation = self._get_token_operation("open")
+        self._handle_token_generation(data_url, director_response, operation)
+
         logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
@@ -803,6 +913,11 @@ class PelicanFileSystem(AsyncFileSystem):
             data_url, director_response = await self.get_origin_url(path)
         else:
             data_url, director_response = await self.get_working_cache(path)
+
+        # Handle token generation if required
+        operation = self._get_token_operation("open_async")
+        self._handle_token_generation(data_url, director_response, operation)
+
         logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
@@ -827,6 +942,11 @@ class PelicanFileSystem(AsyncFileSystem):
                 data_url, director_response = await self.get_origin_url(path)
             else:
                 data_url, director_response = await self.get_working_cache(path)
+
+            # Handle token generation if required
+            operation = self._get_token_operation(func.__name__)
+            self._handle_token_generation(data_url, director_response, operation)
+
             try:
                 logger.debug(f"Calling {func} using the following url: {data_url}")
                 result = await func(self, data_url, *args[1:], **kwargs)
@@ -857,8 +977,15 @@ class PelicanFileSystem(AsyncFileSystem):
                     data_url, director_response = await self.get_origin_url(path)
                 else:
                     data_url, director_response = await self.get_working_cache(path)
+
+                # Handle token generation if required (single path)
+                operation = self._get_token_operation(func.__name__)
+                self._handle_token_generation(data_url, director_response, operation)
             else:
                 data_url = []
+                # For multiple paths, we'll use the first director_response for token generation
+                # This is a simplification - in practice, all paths should have the same token requirements
+                first_director_response = None
                 for p in path:
                     p = self._check_fspath(p)
                     if self.direct_reads:
@@ -866,6 +993,15 @@ class PelicanFileSystem(AsyncFileSystem):
                     else:
                         d_url, director_response = await self.get_working_cache(p)
                     data_url.append(d_url)
+                    if first_director_response is None:
+                        first_director_response = director_response
+
+                # Handle token generation if required (multiple paths)
+                if first_director_response:
+                    operation = self._get_token_operation(func.__name__)
+                    # Use the first URL for token generation (simplification)
+                    self._handle_token_generation(data_url[0] if data_url else "", first_director_response, operation)
+
             try:
                 logger.debug(f"Calling {func} using the following urls: {data_url}")
                 result = await func(self, data_url, *args[1:], **kwargs)
