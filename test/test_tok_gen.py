@@ -25,8 +25,8 @@ from scitokens import SciToken
 
 from pelicanfs.exceptions import (
     InvalidDestinationURL,
+    NoCredentialsException,
     TokenIteratorException,
-    TokenLocationNotSet,
 )
 from pelicanfs.token_generator import (
     TokenGenerator,
@@ -39,17 +39,12 @@ from pelicanfs.token_generator import (
 
 @pytest.fixture
 def dummy_dir_resp():
-    class XPelTokGen:
-        Issuers = ["https://trusted-issuer.example.com"]
+    from pelicanfs.dir_header_parser import DirectorResponse, XPelNs, XPelTokGen
 
-    class XPelNs:
-        Namespace = "/namespace/prefix"
+    x_pel_tok_gen = XPelTokGen(issuers=["https://trusted-issuer.example.com"])
+    x_pel_ns = XPelNs(namespace="/namespace/prefix")
 
-    class DirResp:
-        XPelTokGenHdr = XPelTokGen
-        XPelNsHdr = XPelNs
-
-    return DirResp()
+    return DirectorResponse(object_servers=["https://cache.example.com"], location=None, x_pel_tok_gen_hdr=x_pel_tok_gen, x_pel_ns_hdr=x_pel_ns)
 
 
 @pytest.fixture
@@ -104,18 +99,18 @@ def test_get_token_without_token_location(token_generator_factory):
     tg = token_generator_factory()
     tg.set_token_location(None)
 
-    with pytest.raises(TokenLocationNotSet) as e:
+    with pytest.raises(NoCredentialsException) as e:
         tg.get_token()
-    assert "TokenLocation must be set" in str(e.value)
+    assert "Credential is required" in str(e.value)
 
 
 def test_get_token_with_empty_token_location(token_generator_factory):
     tg = token_generator_factory()
     tg.set_token_location("")
 
-    with pytest.raises(TokenLocationNotSet) as e:
+    with pytest.raises(NoCredentialsException) as e:
         tg.get_token()
-    assert "TokenLocation must be set" in str(e.value)
+    assert "Credential is required" in str(e.value)
 
 
 def test_get_token_with_url_no_path(token_generator_factory):
@@ -311,9 +306,9 @@ def test_token_generator_get_token_raises_when_no_valid_token(token_generator_fa
 
     tg.Iterator = TokenIterator(tokens)
 
-    with pytest.raises(TokenLocationNotSet) as excinfo:
+    with pytest.raises(NoCredentialsException) as excinfo:
         tg.get_token()
-    assert "TokenLocation must be set" in str(excinfo.value)
+    assert "Credential is required" in str(excinfo.value)
 
 
 def test_token_generator_setters_and_copy(token_generator_factory):

@@ -13,14 +13,22 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+from datetime import datetime, timedelta, timezone
+
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
 
 
-def test_authorization_headers(httpserver: HTTPServer, get_client):
+def test_authorization_headers(httpserver: HTTPServer, get_client, monkeypatch):
     foo_bar_url = httpserver.url_for("/foo/bar")
     test_headers_with_bearer = {"Authorization": "Bearer test"}
+
+    # Mock token validation to accept the test token
+    def mock_token_validation(*args, **kwargs):
+        return True, datetime.now(timezone.utc) + timedelta(hours=1)
+
+    monkeypatch.setattr("pelicanfs.token_generator.token_is_valid_and_acceptable", mock_token_validation)
 
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
@@ -29,7 +37,7 @@ def test_authorization_headers(httpserver: HTTPServer, get_client):
         headers={
             "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
             "Location": foo_bar_url,
-            "X-Pelican-Namespace": "namespace=/foo",
+            "X-Pelican-Namespace": "namespace=/foo, require-token=true",
         },
     )
 
