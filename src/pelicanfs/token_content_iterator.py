@@ -25,20 +25,24 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
-log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+logger = logging.getLogger("fsspec.pelican")
 
 
 def get_token_from_file(token_location: str) -> str:
-    log.debug(f"Opening token file: {token_location}")
+    logger.debug(f"Opening token file: {token_location}")
     try:
         with open(token_location, "r") as f:
             token_contents = f.read()
     except Exception as err:
-        log.error(f"Error reading from token file: {err}")
+        logger.error(f"Error reading from token file: {err}")
         raise
 
     token_str = token_contents.strip()
+
+    # Check if the token is empty or whitespace only
+    if not token_str:
+        logger.warning(f"Token file {token_location} is empty or contains only whitespace")
+        raise ValueError(f"Token file {token_location} is empty")
 
     if token_str.startswith("{"):
         try:
@@ -47,10 +51,10 @@ def get_token_from_file(token_location: str) -> str:
             if access_key:
                 return access_key
             else:
-                log.debug("JSON token does not contain 'access_token' key, returning full token string")
+                logger.debug("JSON token does not contain 'access_token' key, returning full token string")
                 return token_str
         except json.JSONDecodeError as err:
-            log.debug(f"Unable to unmarshal file {token_location} as JSON (assuming it is a token instead): {err}")
+            logger.debug(f"Unable to unmarshal file {token_location} as JSON (assuming it is a token instead): {err}")
             return token_str
     else:
         return token_str
@@ -95,6 +99,11 @@ class TokenContentIterator:
 
     def __post_init__(self):
         self.methods = list(TokenDiscoveryMethod)
+        # Ensure HTCONDOR_FALLBACK is always available after HTCONDOR_DISCOVERY
+        if TokenDiscoveryMethod.HTCONDOR_DISCOVERY in self.methods and TokenDiscoveryMethod.HTCONDOR_FALLBACK not in self.methods:
+            # Find the index of HTCONDOR_DISCOVERY and insert HTCONDOR_FALLBACK after it
+            discovery_index = self.methods.index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
+            self.methods.insert(discovery_index + 1, TokenDiscoveryMethod.HTCONDOR_FALLBACK)
 
     def __iter__(self):
         return self
@@ -103,74 +112,79 @@ class TokenContentIterator:
         while self.method_index < len(self.methods):
             method = self.methods[self.method_index]
             self.method_index += 1
+            logger.debug(f"Trying token discovery method: {method}")
 
             match method:
                 case TokenDiscoveryMethod.LOCATION:
                     if self.location:
-                        log.debug(f"Using API-specified token location: {self.location}")
+                        logger.debug(f"Using API-specified token location: {self.location}")
                         try:
                             if os.path.exists(self.location) and os.access(self.location, os.R_OK):
                                 return get_token_from_file(self.location)
                             else:
                                 raise OSError(f"File {self.location} is not readable")
                         except Exception as err:
-                            log.warning(f"Token file at {self.location} is not readable: {err}")
+                            logger.warning(f"Token file at {self.location} is not readable: {err}")
 
                 case TokenDiscoveryMethod.ENV_BEARER_TOKEN:
                     token = os.getenv("BEARER_TOKEN")
                     if token:
-                        log.debug("Using token from BEARER_TOKEN env var")
+                        logger.debug("Using token from BEARER_TOKEN env var")
                         return token
 
                 case TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE:
                     token_file = os.getenv("BEARER_TOKEN_FILE")
                     if token_file:
-                        log.debug("Using token from BEARER_TOKEN_FILE env var")
+                        logger.debug("Using token from BEARER_TOKEN_FILE env var")
                         try:
                             if os.path.exists(token_file) and os.access(token_file, os.R_OK):
                                 return get_token_from_file(token_file)
                             else:
                                 raise OSError(f"File {token_file} is not readable")
                         except Exception as err:
-                            log.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
+                            logger.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
 
                 case TokenDiscoveryMethod.DEFAULT_BEARER_TOKEN:
                     token_file = default_bearer_token_file()
                     if os.path.exists(token_file):
-                        log.debug(f"Using token from default bearer token file: {token_file}")
+                        logger.debug(f"Using token from default bearer token file: {token_file}")
                         try:
-                            return get_token_from_file(token_file)
+                            token = get_token_from_file(token_file)
+                            logger.debug(f"Successfully read token from default file: {token[:30] if token else 'None'}...")
+                            return token
                         except Exception as err:
-                            log.warning(f"Could not read default bearer token: {err}")
+                            logger.warning(f"Could not read default bearer token: {err}")
 
                 case TokenDiscoveryMethod.ENV_TOKEN_PATH:
                     token_path = os.getenv("TOKEN")
                     if token_path:
                         if not os.path.exists(token_path):
-                            log.warning(f"Environment variable TOKEN is set, but file does not exist: {token_path}")
+                            logger.warning(f"Environment variable TOKEN is set, but file does not exist: {token_path}")
                         else:
                             try:
-                                log.debug("Using token from TOKEN environment variable")
+                                logger.debug("Using token from TOKEN environment variable")
                                 return get_token_from_file(token_path)
                             except Exception as err:
-                                log.warning(f"Error reading token from {token_path}: {err}")
+                                logger.warning(f"Error reading token from {token_path}: {err}")
 
                 case TokenDiscoveryMethod.HTCONDOR_DISCOVERY:
                     self.cred_locations = self.discoverHTCondorTokenLocations(self.name)
-                    # Ensure fallback runs after this
-                    self.methods.append(TokenDiscoveryMethod.HTCONDOR_FALLBACK)
+                    # HTCONDOR_FALLBACK will be handled in the next iteration
 
                 case TokenDiscoveryMethod.HTCONDOR_FALLBACK:
-                    while self.fallback_index < len(self.cred_locations):
-                        token_path = self.cred_locations[self.fallback_index]
-                        self.fallback_index += 1
-                        try:
-                            return get_token_from_file(token_path)
-                        except Exception as err:
-                            log.warning(f"Failed to read fallback token at {token_path}: {err}")
+                    if self.cred_locations:  # Only try fallback if we have locations
+                        while self.fallback_index < len(self.cred_locations):
+                            token_path = self.cred_locations[self.fallback_index]
+                            self.fallback_index += 1
+                            try:
+                                return get_token_from_file(token_path)
+                            except Exception as err:
+                                logger.warning(f"Failed to read fallback token at {token_path}: {err}")
+                    else:
+                        logger.debug("No cred_locations found for HTCONDOR_FALLBACK")
                     # No fallback tokens left to try
 
-        log.debug("No more token sources to try")
+        logger.debug("No more token sources to try")
         raise StopIteration
 
     def discoverHTCondorTokenLocations(self, tokenName: str) -> List[str]:
@@ -190,7 +204,7 @@ class TokenContentIterator:
         tokenLocations = []
 
         # Handle dot replacement recursively
-        if "." in tokenName:
+        if tokenName and "." in tokenName:
             underscoreTokenName = tokenName.replace(".", "_")
             tokenLocations = self.discoverHTCondorTokenLocations(underscoreTokenName)
             if tokenLocations:
@@ -202,7 +216,7 @@ class TokenContentIterator:
             tokenPath = os.path.join(credsDir, tokenName)
             tokenUsePath = os.path.join(credsDir, f"{tokenName}.use")
             if not os.path.exists(tokenPath):
-                log.warning(f"Environment variable _CONDOR_CREDS is set, but the credential file is not readable: {tokenPath}")
+                logger.warning(f"Environment variable _CONDOR_CREDS is set, but the credential file is not readable: {tokenPath}")
             else:
                 tokenLocations.append(tokenUsePath)
                 return tokenLocations
@@ -213,13 +227,15 @@ class TokenContentIterator:
 
         # Use _find_condor_creds_token_paths() generator to find *.use files
         try:
-            for token_path in _find_condor_creds_token_paths() or []:
-                baseName = os.path.basename(str(token_path))
-                # Skip special files
-                if baseName == "scitokens.use" or baseName.startswith("."):
-                    continue
-                tokenLocations.append(str(token_path))
+            condor_paths = _find_condor_creds_token_paths()
+            if condor_paths is not None:
+                for token_path in condor_paths:
+                    baseName = os.path.basename(str(token_path))
+                    # Skip special files
+                    if baseName == "scitokens.use" or baseName.startswith("."):
+                        continue
+                    tokenLocations.append(str(token_path))
         except Exception as err:
-            log.warning(f"Failure when iterating through directory to look through tokens: {err}")
+            logger.warning(f"Failure when iterating through directory to look through tokens: {err}")
 
         return tokenLocations
