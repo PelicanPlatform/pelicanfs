@@ -15,7 +15,6 @@ limitations under the License.
 """
 import logging
 import threading
-import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
@@ -129,10 +128,6 @@ class TokenGenerator:
             logger.debug("About to enter token validation loop")
             logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
             try:
-                if self.Iterator is None:
-                    logger.error("Iterator is None")
-                    raise TokenIteratorException("Token iterator is None")
-
                 # Use next() to get tokens one at a time from the iterator
                 while True:
                     try:
@@ -150,7 +145,7 @@ class TokenGenerator:
                         logger.debug("Token iterator reached StopIteration")
                         break
             except Exception as e:
-                logger.error(f"Error iterating tokens: {e}\n{traceback.format_exc()}")
+                logger.error(f"Error iterating tokens: {e}")
                 raise TokenIteratorException("Failed to fetch tokens due to iterator error") from e
 
             if potential_tokens:

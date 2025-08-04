@@ -45,12 +45,6 @@ class NoCollectionsUrl(PelicanException):
     """
 
 
-class TokenLocationNotSet(PelicanException):
-    """
-    TokenLocation must be set before fetching token
-    """
-
-
 class InvalidDestinationURL(PelicanException):
     """
     The destination URL is invalid or has an empty path
