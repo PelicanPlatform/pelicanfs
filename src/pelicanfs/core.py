@@ -326,7 +326,7 @@ class PelicanFileSystem(AsyncFileSystem):
             TokenOperation: The appropriate token operation for the function
         """
         # Read operations
-        read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
+        read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "get_working_cache", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
 
         # Write operations (if any are implemented)
         write_operations = {
@@ -498,6 +498,7 @@ class PelicanFileSystem(AsyncFileSystem):
                                 cache_set.add(cache_url)
                                 cache_list.append(cache_url)
                     else:
+                        cache_set.add(cache_url)
                         cache_list.append(cache)
             if not cache_list:
                 cache_list = new_caches

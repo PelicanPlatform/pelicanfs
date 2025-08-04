@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -42,23 +42,20 @@ class XPelNs:
 class XPelTokGen:
     """X-Pelican-Token-Generation header data"""
 
-    issuers: List[str] = None
+    issuers: List[str] = field(default_factory=list)
 
     def __post_init__(self):
-        if self.issuers is None:
-            self.issuers = []
-        else:
-            # Validate and filter issuers to ensure they are valid URLs
-            validated_issuers = []
-            for issuer in self.issuers:
-                try:
-                    parsed = urlparse(issuer)
-                    if parsed.scheme and parsed.netloc:
-                        validated_issuers.append(issuer)
-                except Exception:
-                    # ignore malformed URLs for now
-                    continue
-            self.issuers = validated_issuers
+        # Validate and filter issuers to ensure they are valid URLs
+        validated_issuers = []
+        for issuer in self.issuers:
+            try:
+                parsed = urlparse(issuer)
+                if parsed.scheme and parsed.netloc:
+                    validated_issuers.append(issuer)
+            except Exception:
+                # ignore malformed URLs for now
+                continue
+        self.issuers = validated_issuers
 
 
 @dataclass
@@ -95,7 +92,7 @@ def parse_director_response(headers: dict) -> DirectorResponse:
             # Extract URL from <url> format
             if url_part.startswith("<") and url_part.endswith(">"):
                 url = url_part[1:-1]
-                priority = len(headers)  # default priority (lowest)
+                priority = len(links)  # default priority (lowest)
 
                 # Parse attributes into a dictionary like the original parse_metalink
                 attributes = {}
@@ -165,7 +162,7 @@ def parse_director_response(headers: dict) -> DirectorResponse:
     return DirectorResponse(object_servers=object_servers, location=location, x_pel_auth_hdr=x_pel_auth_hdr, x_pel_ns_hdr=x_pel_ns_hdr, x_pel_tok_gen_hdr=x_pel_tok_gen_hdr)
 
 
-def get_collections_url(headers: dict[str, str]) -> str:
+def get_collections_url(headers: dict[str, str]) -> Optional[str]:
     """
     Get the collections URL from the director response headers
     """
