@@ -23,6 +23,10 @@ jobs:
         --user
     - name: Build a binary wheel and a source tarball
       run: python3 -m build
+    - name: List the files in the tarball
+      run: python3 -m tarfile --list dist/*.tar.*
+    - name: List the files in the wheel
+      run: python3 -m zipfile --list dist/*.whl
     - name: Store the distribution packages
       uses: actions/upload-artifact@v4
       with:
