@@ -22,6 +22,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
@@ -29,7 +30,6 @@ import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav2.client import Client
 from aiowebdav2.exceptions import (
-    MethodNotSupportedError,
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
 )
@@ -711,8 +711,12 @@ class PelicanFileSystem(AsyncFileSystem):
 
         async with self.get_webdav_client(options) as client:
             remote_dir = parts.path
+            if detail:
+                list_files = client.list_with_infos
+            else:
+                list_files = client.list_files
             try:
-                items = await client.list_files(remote_dir)
+                items = await list_files(remote_dir)
             except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
                 if isinstance(e, ResponseErrorCodeError) and e.code != 500:
                     raise
@@ -725,28 +729,28 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     raise FileNotFoundError
 
-            # Now that we’ve passed the risky list_files part, continue safely
             if detail:
-
-                async def get_item_detail(item):
-                    full_path = f"{base_url}{item}"
-                    try:
-                        is_directory = await client.is_dir(item)
-                        type_ = "directory" if is_directory else "file"
-                    except MethodNotSupportedError as e:
-                        if getattr(e, "name", "") == "is_dir":
-                            type_ = "file"
-                        else:
-                            raise
+                def get_item_detail(item):
+                    full_path = f"{base_url}{item['path']}"
+                    isdir = item.get("isdir") == "True"
+                    if isdir and not full_path.endswith("/"):
+                        full_path += "/"
+                    if (modtimestr := item.get("modified")) == "None":
+                        modtime = None
+                    else:
+                        modtime = datetime.strptime(
+                            modtimestr,
+                            "%a, %d %b %Y %H:%M:%S %Z",
+                        )
                     return {
                         "name": full_path,
-                        "size": None,
-                        "type": type_,
+                        "size": int(item["size"]),
+                        "type": "directory" if isdir else "file",
+                        "modified": modtime,
                     }
 
-                return await asyncio.gather(*(get_item_detail(item) for item in items))
-            else:
-                return sorted(set(items))
+                return [get_item_detail(item) for item in items]
+            return sorted(set(items))
 
     @_dirlist_dec
     async def _isdir(self, path):
