@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pelicanfs"
-version = "1.2.0"
+version = "1.2.1"
 description = "An FSSpec Implementation using the Pelican System"
 readme = "README.md"
 license = "Apache-2.0"
