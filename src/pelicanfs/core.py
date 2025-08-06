@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import asyncio
+import functools
 import logging
 import re
 import threading
@@ -27,7 +28,10 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import Client
+from aiowebdav2.client import (
+    Client,
+    ClientOptions,
+)
 from aiowebdav2.exceptions import (
     MethodNotSupportedError,
     RemoteResourceNotFoundError,
@@ -183,24 +187,36 @@ async def get_webdav_client(options):
     base_url = options["hostname"]
     token = options["token"]
 
-    # Step 1: Create a temporary client to trigger and then close its internal session
-    client = Client(url=base_url, username="", password="")
-    original_session = client._session  # Triggers internal lazy session creation
-    if not original_session.closed:
-        logger.debug("Closing original internal session")
-        await original_session.close()
-
-    # Step 2: Create your own aiohttp session with auth
     session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"})
-
-    # Step 3: Create real client and inject your custom session
-    client._session = session  # Overwrite internal session
+    clientopts = ClientOptions(session=session)
+    client = Client(url=base_url, username="", password="", options=clientopts)
+    client._close_session = True
 
     try:
         yield client
     finally:
-        logger.debug("Closing custom injected session")
-        await session.close()
+        await client.close()
+        logger.debug("WebDAV client closed")
+
+
+def sync_generator(async_gen_func, obj=None):
+    """Wrap an async generator method into a sync generator."""
+    @functools.wraps(async_gen_func)
+    def wrapper(*args, **kwargs):
+        if obj:
+            self = obj
+        else:
+            self = args[0]
+            args = args[1:]
+        agen = async_gen_func(self, *args, **kwargs)
+        while True:
+            try:
+                item = sync(self.loop, agen.__anext__)
+            except StopAsyncIteration:
+                break
+            yield item
+
+    return wrapper
 
 
 class PelicanFileSystem(AsyncFileSystem):
@@ -281,9 +297,18 @@ class PelicanFileSystem(AsyncFileSystem):
         return urllib.parse.urlunparse(updated_url)
 
     @staticmethod
-    def _remove_host_from_paths(paths):
+    def _remove_host_from_paths(paths, inplace=False):
+        """Remove the host from a path, list, or dict of paths.
+
+        If `inplace` is True, modify the input paths in-place, mainly to support
+        `walk` operations where the caller needs to be able to modify the dirnames
+        object (second entry in walk tuple) before the iteration continues.
+        """
         if isinstance(paths, list):
-            return [PelicanFileSystem._remove_host_from_paths(path) for path in paths]
+            if not inplace:
+                paths = list(paths)
+            for i, path in enumerate(paths):
+                paths[i] = PelicanFileSystem._remove_host_from_paths(path)
 
         if isinstance(paths, dict):
             if "name" in paths:
@@ -294,12 +319,13 @@ class PelicanFileSystem(AsyncFileSystem):
                     paths["url"] = PelicanFileSystem._remove_host_from_path(url)
                     return paths
             else:
-                new_dict = {}
-                for key, item in paths.items():
+                if not inplace:
+                    paths = paths.copy()
+                for key in list(paths):
                     new_key = PelicanFileSystem._remove_host_from_path(key)
-                    new_item = PelicanFileSystem._remove_host_from_paths(item)
-                    new_dict[new_key] = new_item
-                return new_dict
+                    new_item = PelicanFileSystem._remove_host_from_paths(paths.pop(key))
+                    paths[new_key] = new_item
+                return paths
 
         if isinstance(paths, str):
             return PelicanFileSystem._remove_host_from_path(paths)
@@ -687,7 +713,7 @@ class PelicanFileSystem(AsyncFileSystem):
             self.dircache[path] = out
         return self._remove_host_from_paths(out)
 
-    async def _ls_real(self, url, detail=True):
+    async def _ls_real(self, url, detail=True, client=None):
         """
         This _ls_real uses a webdavclient listing rather than an https call. This lets pelicanfs identify whether an object
         is a file or a collection. This is important for functions which are expected to recurse or walk the collection url
@@ -698,55 +724,59 @@ class PelicanFileSystem(AsyncFileSystem):
         parts = urllib.parse.urlparse(url)
         base_url = f"{parts.scheme}://{parts.netloc}"
 
-        # Create the options for the webdavclient
-        if self.token:
-            webdav_token = self.token.removeprefix("Bearer ")
-        else:
-            webdav_token = None
-
-        options = {
-            "hostname": base_url,
-            "token": webdav_token,
-        }
-
-        async with self.get_webdav_client(options) as client:
-            remote_dir = parts.path
-            try:
-                items = await client.list_files(remote_dir)
-            except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
-                if isinstance(e, ResponseErrorCodeError) and e.code != 500:
-                    raise
-
-                if remote_dir.endswith("/"):
-                    remote_dir = remote_dir[:-1]
-                exists = await client.check(remote_dir)
-                if exists:
-                    return set()
-                else:
-                    raise FileNotFoundError
-
-            # Now that we’ve passed the risky list_files part, continue safely
-            if detail:
-
-                async def get_item_detail(item):
-                    full_path = f"{base_url}{item}"
-                    try:
-                        is_directory = await client.is_dir(item)
-                        type_ = "directory" if is_directory else "file"
-                    except MethodNotSupportedError as e:
-                        if getattr(e, "name", "") == "is_dir":
-                            type_ = "file"
-                        else:
-                            raise
-                    return {
-                        "name": full_path,
-                        "size": None,
-                        "type": type_,
-                    }
-
-                return await asyncio.gather(*(get_item_detail(item) for item in items))
+        # If a client is provided, use it; otherwise, create one
+        if client is None:
+            # Create the options for the webdavclient
+            if self.token:
+                webdav_token = self.token.removeprefix("Bearer ")
             else:
-                return sorted(set(items))
+                webdav_token = None
+
+            options = {
+                "hostname": base_url,
+                "token": webdav_token,
+            }
+            async with self.get_webdav_client(options) as client_ctx:
+                return await self._ls_real(url, detail=detail, client=client_ctx)
+
+        # Now that we have a client, we can proceed with the listing
+        remote_dir = parts.path
+        try:
+            items = await client.list_files(remote_dir)
+        except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
+            if isinstance(e, ResponseErrorCodeError) and e.code != 500:
+                raise
+
+            if remote_dir.endswith("/"):
+                remote_dir = remote_dir[:-1]
+            exists = await client.check(remote_dir)
+            if exists:
+                return set()
+            else:
+                raise FileNotFoundError
+
+        # Now that we’ve passed the risky list_files part, continue safely
+        if detail:
+
+            async def get_item_detail(item):
+                full_path = f"{base_url}{item}"
+                try:
+                    is_directory = await client.is_dir(item)
+                    type_ = "directory" if is_directory else "file"
+                except MethodNotSupportedError as e:
+                    if getattr(e, "name", "") == "is_dir":
+                        type_ = "file"
+                    else:
+                        raise
+                return {
+                    "name": full_path,
+                    "size": None,
+                    "type": type_,
+                }
+
+            return await asyncio.gather(*(get_item_detail(item) for item in items))
+        else:
+            return sorted(set(items))
 
     @_dirlist_dec
     async def _isdir(self, path):
@@ -834,8 +864,27 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
         list_url, director_response = await self.get_dirlist_url(path)
-        async for _ in self.http_file_system._walk(list_url, maxdepth, on_error, **kwargs):
-            yield self._remove_host_from_path(_)
+        parts = urllib.parse.urlparse(list_url)
+        base_url = f"{parts.scheme}://{parts.netloc}"
+        options = {
+            "hostname": base_url,
+            "token": self.token.removeprefix("Bearer ") if self.token else None,
+        }
+        async with self.get_webdav_client(options) as client:
+            async for url, dirs, files in self.http_file_system._walk(
+                list_url,
+                maxdepth=maxdepth,
+                on_error=on_error,
+                client=client,
+                **kwargs,
+            ):
+                yield (
+                    self._remove_host_from_path(url),
+                    self._remove_host_from_paths(dirs, inplace=True),
+                    self._remove_host_from_paths(files, inplace=True),
+                )
+
+    fastwalk = sync_generator(_walk)
 
     def _io_wrapper(self, func):
         """
