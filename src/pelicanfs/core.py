@@ -329,9 +329,7 @@ class PelicanFileSystem(AsyncFileSystem):
         read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "get_working_cache", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
 
         # Write operations (if any are implemented)
-        write_operations = {
-            # Add write operations here when they are implemented
-        }
+        write_operations = {"_put_file"}
 
         if func_name in read_operations:
             return TokenOperation.TokenRead
@@ -889,6 +887,22 @@ class PelicanFileSystem(AsyncFileSystem):
             path = pelican_url.path
         logger.debug(f"Compatible path: {path}")
         return path
+
+    async def _put_file(self, lpath, rpath, **kwargs):
+        path = self._check_fspath(rpath)
+        data_url, director_response = await self.get_origin_url(path)
+
+        operation = self._get_token_operation("put_file")
+        self._handle_token_generation(data_url, director_response, operation)
+
+        logger.debug(f"Running put_file from {lpath} to {data_url}...")
+
+        async def upload_file():
+            await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
+
+        await asyncio.create_task(upload_file())
+        ar = _AccessResp(data_url, True)
+        self._access_stats.add_response(path, ar)
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
