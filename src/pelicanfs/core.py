@@ -901,8 +901,6 @@ class PelicanFileSystem(AsyncFileSystem):
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
         await asyncio.create_task(upload_file())
-        ar = _AccessResp(data_url, True)
-        self._access_stats.add_response(path, ar)
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
@@ -918,8 +916,9 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
         fp.read = self._io_wrapper(fp.read)
-        ar = _AccessResp(data_url, True)
-        self._access_stats.add_response(path, ar)
+        if not self.direct_reads:
+            ar = _AccessResp(data_url, True)
+            self._access_stats.add_response(path, ar)
         return fp
 
     async def open_async(self, path, **kwargs):
@@ -936,8 +935,9 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
         fp.read = self._async_io_wrapper(fp.read)
-        ar = _AccessResp(data_url, True)
-        self._access_stats.add_response(path, ar)
+        if not self.direct_reads:
+            ar = _AccessResp(data_url, True)
+            self._access_stats.add_response(path, ar)
         return fp
 
     def _cache_dec(func):
@@ -966,10 +966,12 @@ class PelicanFileSystem(AsyncFileSystem):
                 logger.debug(f"Calling {func} using the following url: {data_url}")
                 result = await func(self, data_url, *args[1:], **kwargs)
             except Exception as e:
-                self._bad_cache(data_url, e)
+                if not self.direct_reads:
+                    self._bad_cache(data_url, e)
                 raise
-            ar = _AccessResp(data_url, True)
-            self._access_stats.add_response(path, ar)
+            if not self.direct_reads:
+                ar = _AccessResp(data_url, True)
+                self._access_stats.add_response(path, ar)
             return result
 
         return wrapper
@@ -1021,20 +1023,22 @@ class PelicanFileSystem(AsyncFileSystem):
                 logger.debug(f"Calling {func} using the following urls: {data_url}")
                 result = await func(self, data_url, *args[1:], **kwargs)
             except Exception as e:
+                if not self.direct_reads:
+                    if isinstance(data_url, list):
+                        for d_url in data_url:
+                            self._bad_cache(d_url, e)
+                    else:
+                        self._bad_cache(data_url, e)
+                raise
+            if not self.direct_reads:
                 if isinstance(data_url, list):
                     for d_url in data_url:
-                        self._bad_cache(d_url, e)
+                        ns_path = self._remove_host_from_path(d_url)
+                        ar = _AccessResp(ns_path, True)
+                        self._access_stats.add_response(ns_path, ar)
                 else:
-                    self._bad_cache(data_url, e)
-                raise
-            if isinstance(data_url, list):
-                for d_url in data_url:
-                    ar = _AccessResp(d_url, True)
-                    ns_path = self._remove_host_from_path(d_url)
-                    self._access_stats.add_response(ns_path, ar)
-            else:
-                ar = _AccessResp(data_url, True)
-                self._access_stats.add_response(path, ar)
+                    ar = _AccessResp(data_url, True)
+                    self._access_stats.add_response(path, ar)
             return result
 
         return wrapper
