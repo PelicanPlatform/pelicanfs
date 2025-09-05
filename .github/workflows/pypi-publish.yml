@@ -37,6 +37,8 @@ jobs:
     if: "!github.event.release.prerelease"
     name: >-
       Publish Python Distribution to PyPI
+    needs:
+    - build
     runs-on: ubuntu-latest
     environment:
       name: pypi
