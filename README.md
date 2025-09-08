@@ -33,7 +33,7 @@ pip install -e .
 To use pelicanfs, first create a `PelicanFileSystem` and provide it with the pelican federation url. As an example using the OSDF federation
 
 ```python
-from pelicanfs.core import PelicanFileSystem
+from pelicanfs import PelicanFileSystem
 
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
 ```
@@ -50,7 +50,7 @@ print(hello_world)
 Sometimes various systems that interact with an fsspec want a key-value mapper rather than a url. To do that, call the `PelicanMap` function with the namespace path and a `PelicanFileSystem` object rather than using the fsspec `get_mapper` call. For example:
 
 ```python
-from pelicanfs.core import PelicanFileSystem, PelicanMap
+from pelicanfs import PelicanFileSystem, PelicanMap
 
 pelfs = PelicanFileSystem("some-director-url")
 file1 = PelicanMap("/namespace/file/1", pelfs=pelfs)
