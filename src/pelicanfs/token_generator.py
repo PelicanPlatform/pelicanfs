@@ -123,7 +123,7 @@ class TokenGenerator:
             # Initialize iterator if not already set
             # The iterator will iterate and yield all potential tokens in the token location
             if self.Iterator is None:
-                self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName)
+                self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName, operation=self.Operation, destination_url=self.DestinationURL)
 
             logger.debug("About to enter token validation loop")
             logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
