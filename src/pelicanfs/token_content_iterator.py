@@ -18,7 +18,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List
+from typing import List, Optional
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
@@ -68,6 +68,7 @@ class TokenDiscoveryMethod(Enum):
     ENV_TOKEN_PATH = auto()
     HTCONDOR_DISCOVERY = auto()
     HTCONDOR_FALLBACK = auto()
+    OIDC_DEVICE_FLOW = auto()
 
 
 @dataclass
@@ -82,10 +83,13 @@ class TokenContentIterator:
         4. Default token file via default_bearer_token_file()
         5. Environment variable TOKEN (interpreted as file path)
         6. HTCondor discovery via _CONDOR_CREDS or .condor_creds directory
+        7. OIDC device flow via pelican binary (final fallback)
 
     Attributes:
         location (str): Specific token file path (optional).
         name (str): Logical name of the token (used by HTCondor discovery).
+        operation: Token operation type (read/write).
+        destination_url (str): Destination URL for the token request.
         method_index (int): Internal index of the current discovery method.
         cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
@@ -93,6 +97,8 @@ class TokenContentIterator:
 
     location: str
     name: str
+    operation: Optional[object] = None
+    destination_url: Optional[str] = None
     method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
     fallback_index: int = 0
