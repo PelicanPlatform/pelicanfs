@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import json
+import subprocess
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -174,3 +175,204 @@ def test_htcondor_fallback_all_fail_raises_stopiteration(mock_access, mock_exist
     with pytest.raises(StopIteration):
         while True:
             next(iterator)
+
+
+# OIDC Device Flow Tests
+
+
+@patch("shutil.which", return_value=None)
+def test_oidc_device_flow_binary_not_found(mock_which):
+    """Test that OIDC device flow raises StopIteration when pelican binary is not found"""
+    iterator = TokenContentIterator(location=None, name="token_name", destination_url="https://example.com")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1  # Jump to last method
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_successful_token_acquisition(mock_popen, mock_which):
+    """Test successful token acquisition via OIDC device flow"""
+    from pelicanfs.token_generator import TokenOperation
+
+    # Mock the subprocess output with a fake JWT token
+    # Format: header.payload.signature (all base64url encoded)
+    fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+
+    mock_process = mock_popen.return_value
+    mock_process.returncode = 0
+    mock_process.stdout = [
+        "WARNING: empty password provided; the credentials will be saved unencrypted on disk\n",
+        "To approve credentials for this operation, please navigate to the following URL and approve the request:\n",
+        "https://example-issuer.org/device?user_code=ABC-123-XYZ\n",
+        fake_jwt + "\n",
+    ]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com/path")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1  # Jump to OIDC_DEVICE_FLOW
+
+    token = next(iterator)
+
+    # Verify token was extracted correctly
+    assert token.startswith("eyJ")
+    assert len(token.split(".")) == 3  # JWT has 3 parts
+    assert token == fake_jwt
+
+    # Verify the correct command was called
+    mock_popen.assert_called_once()
+    call_args = mock_popen.call_args[0][0]
+    assert call_args == ["pelican", "token", "fetch", "https://example.com/path", "-r"]
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_with_warning_prefix(mock_popen, mock_which):
+    """Test token extraction when output has warning prefix"""
+    from pelicanfs.token_generator import TokenOperation
+
+    fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.abc123def456"
+
+    mock_process = mock_popen.return_value
+    mock_process.returncode = 0
+    mock_process.stdout = ["Token was acquired from issuer but it does not appear valid for transfer; trying anyway\n", fake_jwt + "\n"]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    token = next(iterator)
+
+    assert token.startswith("eyJ")
+    assert "trying anyway" not in token  # Warning prefix should not be in token
+    assert token == fake_jwt
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_write_operation(mock_popen, mock_which):
+    """Test that write operation uses -w flag"""
+    from pelicanfs.token_generator import TokenOperation
+
+    fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3cml0ZSJ9.xyz789abc"
+
+    mock_process = mock_popen.return_value
+    mock_process.returncode = 0
+    mock_process.stdout = [fake_jwt + "\n"]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, destination_url="https://example.com/write/path")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    token = next(iterator)
+
+    # Verify -w flag was used for write operation
+    call_args = mock_popen.call_args[0][0]
+    assert call_args == ["pelican", "token", "fetch", "https://example.com/write/path", "-w"]
+    assert token == fake_jwt
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_binary_fails(mock_popen, mock_which):
+    """Test that StopIteration is raised when pelican binary exits with error"""
+    from pelicanfs.token_generator import TokenOperation
+
+    mock_process = mock_popen.return_value
+    mock_process.returncode = 1
+    mock_process.stdout = ["Error: failed to authenticate\n"]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_no_token_in_output(mock_popen, mock_which):
+    """Test that StopIteration is raised when no JWT token is found in output"""
+    from pelicanfs.token_generator import TokenOperation
+
+    mock_process = mock_popen.return_value
+    mock_process.returncode = 0
+    mock_process.stdout = ["Some output without a token\n", "Another line\n"]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("subprocess.Popen")
+def test_oidc_device_flow_timeout(mock_popen, mock_which):
+    """Test that timeout is handled gracefully"""
+    from pelicanfs.token_generator import TokenOperation
+
+    mock_process = mock_popen.return_value
+    mock_process.wait.side_effect = subprocess.TimeoutExpired("pelican", 300)
+    mock_process.stdout = []
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+    # Verify process was killed
+    mock_process.kill.assert_called_once()
+
+
+@patch("shutil.which", return_value="/usr/bin/pelican")
+def test_oidc_device_flow_no_destination_url(mock_which):
+    """Test that OIDC device flow fails gracefully without destination_url"""
+    from pelicanfs.token_generator import TokenOperation
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url=None)  # No destination URL
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+
+    with pytest.raises(StopIteration):
+        next(iterator)
+
+
+def test_get_pelican_flag_read_operations():
+    """Test that read operations map to -r flag"""
+    from pelicanfs.token_generator import TokenOperation
+
+    # TokenRead
+    iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    assert iterator._get_pelican_flag() == "-r"
+
+    # TokenSharedRead
+    iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenSharedRead, destination_url="https://example.com")
+    assert iterator._get_pelican_flag() == "-r"
+
+
+def test_get_pelican_flag_write_operations():
+    """Test that write operations map to -w flag"""
+    from pelicanfs.token_generator import TokenOperation
+
+    # TokenWrite
+    iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenWrite, destination_url="https://example.com")
+    assert iterator._get_pelican_flag() == "-w"
+
+    # TokenSharedWrite
+    iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenSharedWrite, destination_url="https://example.com")
+    assert iterator._get_pelican_flag() == "-w"
+
+
+def test_get_pelican_flag_default():
+    """Test that None operation defaults to -r flag"""
+    iterator = TokenContentIterator(location=None, name="test", operation=None, destination_url="https://example.com")
+    assert iterator._get_pelican_flag() == "-r"
+
+
+def test_pelican_binary_exists():
+    """Test _pelican_binary_exists method"""
+    iterator = TokenContentIterator(location=None, name="test")
+
+    # This will return True or False depending on whether pelican is actually installed
+    # We just test that the method works without error
+    result = iterator._pelican_binary_exists()
+    assert isinstance(result, bool)
