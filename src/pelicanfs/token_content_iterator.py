@@ -16,6 +16,9 @@ limitations under the License.
 import json
 import logging
 import os
+import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional
@@ -102,6 +105,96 @@ class TokenContentIterator:
     method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
     fallback_index: int = 0
+
+    def _pelican_binary_exists(self) -> bool:
+        """Check if pelican binary exists in PATH"""
+        return shutil.which("pelican") is not None
+
+    def _get_pelican_flag(self) -> str:
+        """
+        Map token operation to pelican binary flag.
+
+        Returns:
+            str: Flag to pass to pelican binary (-r for read, -w for write, -m for modify)
+        """
+        if self.operation is None:
+            return "-r"  # default to read
+
+        # Import TokenOperation here to avoid circular import
+        from pelicanfs.token_generator import TokenOperation
+
+        if self.operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
+            return "-r"
+        elif self.operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
+            return "-w"
+        else:
+            return "-r"  # default to read
+
+    def _get_token_from_pelican_binary(self) -> Optional[str]:
+        """
+        Invoke pelican binary to get token via OIDC device flow.
+
+        Returns:
+            str: JWT token if successful, None otherwise
+        """
+        if not self.destination_url:
+            logger.warning("Cannot invoke pelican binary without destination URL")
+            return None
+
+        flag = self._get_pelican_flag()
+        cmd = ["pelican", "token", "fetch", self.destination_url, flag]
+
+        logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
+
+        try:
+            # Use Popen for real-time output streaming
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+            output_lines = []
+
+            # Stream output to user and collect for parsing
+            if process.stdout:
+                for line in process.stdout:
+                    line = line.rstrip()
+                    output_lines.append(line)
+
+                    # Print interactive messages to user
+                    if any(keyword in line.lower() for keyword in ["navigate", "url", "approve", "code", "device"]):
+                        print(line)
+
+            # Wait for process to complete with timeout
+            process.wait(timeout=300)  # 5 minute timeout for device flow
+
+            if process.returncode != 0:
+                logger.debug(f"Pelican binary exited with code {process.returncode}")
+                logger.debug(f"Output: {output_lines}")
+                return None
+
+            # Extract JWT token from output
+            # Token should start with "eyJ" (base64 encoded JSON header)
+            full_output = "\n".join(output_lines)
+
+            # Look for JWT pattern in the output
+            jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+            matches = re.findall(jwt_pattern, full_output)
+
+            if matches:
+                token = matches[-1]  # Take the last match (most recent token)
+                logger.info("Successfully acquired token via OIDC device flow")
+                return token
+            else:
+                logger.warning("Could not extract JWT token from pelican binary output")
+                logger.debug(f"Output was: {full_output}")
+                return None
+
+        except subprocess.TimeoutExpired:
+            logger.warning("Pelican binary timed out (exceeded 5 minutes)")
+            if process:
+                process.kill()
+            return None
+        except Exception as err:
+            logger.debug(f"Error invoking pelican binary: {err}")
+            return None
 
     def __post_init__(self):
         self.methods = list(TokenDiscoveryMethod)
