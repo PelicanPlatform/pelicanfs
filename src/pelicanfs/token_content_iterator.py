@@ -283,6 +283,16 @@ class TokenContentIterator:
                         logger.debug("No cred_locations found for HTCONDOR_FALLBACK")
                     # No fallback tokens left to try
 
+                case TokenDiscoveryMethod.OIDC_DEVICE_FLOW:
+                    if not self._pelican_binary_exists():
+                        logger.warning("OAuth token generation is only available when the 'pelican' binary is installed and available in PATH")
+                        raise StopIteration
+
+                    token = self._get_token_from_pelican_binary()
+                    if token:
+                        return token
+                    raise StopIteration
+
         logger.debug("No more token sources to try")
         raise StopIteration
 
