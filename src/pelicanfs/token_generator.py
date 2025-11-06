@@ -69,9 +69,11 @@ class TokenGenerator:
         dir_resp: object,
         operation: TokenOperation,
         token_name: Optional[str] = None,
+        pelican_url: Optional[str] = None,
     ) -> None:
         self.DirResp: object = dir_resp
         self.DestinationURL: str = destination_url
+        self.PelicanURL: Optional[str] = pelican_url
         self.TokenName: Optional[str] = token_name
         self.TokenLocation: Optional[str] = None
         self.Operation: TokenOperation = operation
@@ -123,7 +125,7 @@ class TokenGenerator:
             # Initialize iterator if not already set
             # The iterator will iterate and yield all potential tokens in the token location
             if self.Iterator is None:
-                self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName, operation=self.Operation, destination_url=self.DestinationURL)
+                self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName, operation=self.Operation, destination_url=self.DestinationURL, pelican_url=self.PelicanURL)
 
             logger.debug("About to enter token validation loop")
             logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
