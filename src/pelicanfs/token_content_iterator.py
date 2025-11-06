@@ -16,9 +16,13 @@ limitations under the License.
 import json
 import logging
 import os
+import pty
 import re
+import select
 import shutil
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional
@@ -29,6 +33,11 @@ from igwn_auth_utils.scitokens import (
 )
 
 logger = logging.getLogger("fsspec.pelican")
+
+# Constants for OIDC device flow
+OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
+PTY_BUFFER_SIZE = 1024
+SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -149,53 +158,97 @@ class TokenContentIterator:
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
         try:
-            # Use Popen for real-time output streaming
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
+            # This lets the user see prompts and interact while we capture the output
 
-            output_lines = []
+            # Create a pseudo-terminal
+            master_fd, slave_fd = pty.openpty()
 
-            # Stream output to user and collect for parsing
-            if process.stdout:
-                for line in process.stdout:
-                    line = line.rstrip()
-                    output_lines.append(line)
+            # Run process with the slave end of the pty
+            process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)  # Use bytes mode for pty
 
-                    # Print interactive messages to user
-                    if any(keyword in line.lower() for keyword in ["navigate", "url", "approve", "code", "device"]):
-                        print(line)
+            # Close slave fd in parent (we'll use master_fd for both reading and writing)
+            os.close(slave_fd)
 
-            # Wait for process to complete with timeout
-            process.wait(timeout=300)  # 5 minute timeout for device flow
+            output_data = []
+            start_time = time.time()
+
+            def read_and_echo_output(fd):
+                """Helper to read from fd, echo to terminal, and store data"""
+                data = os.read(fd, PTY_BUFFER_SIZE)
+                if data:
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+                    output_data.append(data)
+                return data
+
+            # Read from master fd and echo to terminal, also forward stdin to the process
+            try:
+                while True:
+                    # Check timeout
+                    if time.time() - start_time > OIDC_TIMEOUT_SECONDS:
+                        process.kill()
+                        logger.warning("Pelican binary timed out (exceeded 5 minutes)")
+                        return None
+
+                    # Check if process is still running
+                    if process.poll() is not None:
+                        # Process finished, read any remaining output
+                        while True:
+                            ready, _, _ = select.select([master_fd], [], [], SELECT_TIMEOUT)
+                            if not ready:
+                                break
+                            try:
+                                if not read_and_echo_output(master_fd):
+                                    break
+                            except OSError:
+                                break
+                        break
+
+                    # Wait for data from either master_fd (subprocess) or stdin (user input)
+                    ready_read, _, _ = select.select([master_fd, sys.stdin], [], [], SELECT_TIMEOUT)
+
+                    for fd in ready_read:
+                        try:
+                            if fd == master_fd:
+                                if not read_and_echo_output(master_fd):
+                                    break
+                            elif fd == sys.stdin:
+                                # Data from user - forward to subprocess
+                                data = os.read(sys.stdin.fileno(), PTY_BUFFER_SIZE)
+                                if data:
+                                    os.write(master_fd, data)
+                        except OSError:
+                            break
+            finally:
+                os.close(master_fd)
+
+            # Ensure process has finished
+            process.wait()
 
             if process.returncode != 0:
                 logger.debug(f"Pelican binary exited with code {process.returncode}")
-                logger.debug(f"Output: {output_lines}")
                 return None
 
-            # Extract JWT token from output
-            # Token should start with "eyJ" (base64 encoded JSON header)
-            full_output = "\n".join(output_lines)
-
-            # Look for JWT pattern in the output
+            # Extract JWT token from captured output
+            full_output = b"".join(output_data).decode("utf-8", errors="replace")
             jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
             matches = re.findall(jwt_pattern, full_output)
 
             if matches:
-                token = matches[-1]  # Take the last match (most recent token)
+                token = matches[-1]
                 logger.info("Successfully acquired token via OIDC device flow")
                 return token
             else:
                 logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output}")
+                logger.debug(f"Output was: {full_output[:500]}")  # Log first 500 chars
                 return None
 
-        except subprocess.TimeoutExpired:
-            logger.warning("Pelican binary timed out (exceeded 5 minutes)")
-            if process:
-                process.kill()
-            return None
         except Exception as err:
             logger.debug(f"Error invoking pelican binary: {err}")
+            import traceback
+
+            logger.debug(traceback.format_exc())
             return None
 
     def __post_init__(self):

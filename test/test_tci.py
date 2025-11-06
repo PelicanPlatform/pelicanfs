@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import json
-import subprocess
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -191,53 +190,73 @@ def test_oidc_device_flow_binary_not_found(mock_which):
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_successful_token_acquisition(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+def test_oidc_device_flow_successful_token_acquisition(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test successful token acquisition via OIDC device flow"""
     from pelicanfs.token_generator import TokenOperation
 
-    # Mock the subprocess output with a fake JWT token
-    # Format: header.payload.signature (all base64url encoded)
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 
+    # Mock PTY and subprocess
+    mock_openpty.return_value = (100, 101)
     mock_process = mock_popen.return_value
     mock_process.returncode = 0
-    mock_process.stdout = [
-        "WARNING: empty password provided; the credentials will be saved unencrypted on disk\n",
-        "To approve credentials for this operation, please navigate to the following URL and approve the request:\n",
-        "https://example-issuer.org/device?user_code=ABC-123-XYZ\n",
-        fake_jwt + "\n",
-    ]
+    mock_process.poll.side_effect = [None, 0]
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1  # Jump to OIDC_DEVICE_FLOW
+    # Mock output data
+    full_output = (
+        b"WARNING: empty password provided; the credentials will be saved unencrypted on disk\n"
+        b"To approve credentials for this operation, please navigate to the following URL and approve the request:\n"
+        b"https://example-issuer.org/device?user_code=ABC-123-XYZ\n" + fake_jwt.encode() + b"\n"
+    )
+
+    mock_read.side_effect = [full_output, b""]
+    mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
+    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     token = next(iterator)
 
-    # Verify token was extracted correctly
     assert token.startswith("eyJ")
-    assert len(token.split(".")) == 3  # JWT has 3 parts
+    assert len(token.split(".")) == 3
     assert token == fake_jwt
 
-    # Verify the correct command was called
     mock_popen.assert_called_once()
     call_args = mock_popen.call_args[0][0]
-    assert call_args == ["pelican", "token", "fetch", "https://example.com/path", "-r"]
+    assert call_args == ["pelican", "token", "fetch", "pelican://example.com/path", "-r"]
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_with_warning_prefix(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+def test_oidc_device_flow_with_warning_prefix(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test token extraction when output has warning prefix"""
     from pelicanfs.token_generator import TokenOperation
 
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.abc123def456"
 
+    # Mock PTY
+    mock_openpty.return_value = (100, 101)
+
     mock_process = mock_popen.return_value
     mock_process.returncode = 0
-    mock_process.stdout = ["Token was acquired from issuer but it does not appear valid for transfer; trying anyway\n", fake_jwt + "\n"]
+    mock_process.poll.side_effect = [None, 0]
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    full_output = b"Token was acquired from issuer but it does not appear valid for transfer; trying anyway\n" + fake_jwt.encode() + b"\n"
+    mock_read.side_effect = [full_output, b""]
+    mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
     iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     token = next(iterator)
@@ -248,39 +267,61 @@ def test_oidc_device_flow_with_warning_prefix(mock_popen, mock_which):
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_write_operation(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+def test_oidc_device_flow_write_operation(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test that write operation uses -w flag"""
     from pelicanfs.token_generator import TokenOperation
 
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3cml0ZSJ9.xyz789abc"
 
+    # Mock PTY
+    mock_openpty.return_value = (100, 101)
+
     mock_process = mock_popen.return_value
     mock_process.returncode = 0
-    mock_process.stdout = [fake_jwt + "\n"]
+    mock_process.poll.side_effect = [None, 0]
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, destination_url="https://example.com/write/path")
+    mock_read.side_effect = [fake_jwt.encode() + b"\n", b""]
+    mock_select.side_effect = [([100], [], []), ([], [], [])]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, pelican_url="pelican://example.com/write/path")
     iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     token = next(iterator)
 
     # Verify -w flag was used for write operation
     call_args = mock_popen.call_args[0][0]
-    assert call_args == ["pelican", "token", "fetch", "https://example.com/write/path", "-w"]
+    assert call_args == ["pelican", "token", "fetch", "pelican://example.com/write/path", "-w"]
     assert token == fake_jwt
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_binary_fails(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+def test_oidc_device_flow_binary_fails(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test that StopIteration is raised when pelican binary exits with error"""
     from pelicanfs.token_generator import TokenOperation
 
+    # Mock PTY
+    mock_openpty.return_value = (100, 101)
+
     mock_process = mock_popen.return_value
     mock_process.returncode = 1
-    mock_process.stdout = ["Error: failed to authenticate\n"]
+    mock_process.poll.side_effect = [None, 1]
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    mock_read.side_effect = [b"Error: failed to authenticate\n", b""]
+    mock_select.side_effect = [([100], [], []), ([], [], [])]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
     iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     with pytest.raises(StopIteration):
@@ -288,16 +329,27 @@ def test_oidc_device_flow_binary_fails(mock_popen, mock_which):
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_no_token_in_output(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+def test_oidc_device_flow_no_token_in_output(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test that StopIteration is raised when no JWT token is found in output"""
     from pelicanfs.token_generator import TokenOperation
 
+    # Mock PTY
+    mock_openpty.return_value = (100, 101)
+
     mock_process = mock_popen.return_value
     mock_process.returncode = 0
-    mock_process.stdout = ["Some output without a token\n", "Another line\n"]
+    mock_process.poll.side_effect = [None, 0]
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    mock_read.side_effect = [b"Some output without a token\n", b"Another line\n", b""]
+    mock_select.side_effect = [([100], [], []), ([], [], [])]
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
     iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     with pytest.raises(StopIteration):
@@ -305,16 +357,29 @@ def test_oidc_device_flow_no_token_in_output(mock_popen, mock_which):
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pty.openpty")
 @patch("subprocess.Popen")
-def test_oidc_device_flow_timeout(mock_popen, mock_which):
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("select.select")
+@patch("time.time")
+def test_oidc_device_flow_timeout(mock_time, mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test that timeout is handled gracefully"""
     from pelicanfs.token_generator import TokenOperation
 
-    mock_process = mock_popen.return_value
-    mock_process.wait.side_effect = subprocess.TimeoutExpired("pelican", 300)
-    mock_process.stdout = []
+    # Mock PTY
+    mock_openpty.return_value = (100, 101)
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+    mock_process = mock_popen.return_value
+    mock_process.poll.return_value = None  # Process never finishes
+
+    # Simulate time passing beyond timeout (5 minutes = 300 seconds)
+    mock_time.side_effect = [0, 301]  # start_time=0, check time=301 (exceeds 300 sec timeout)
+
+    mock_select.return_value = ([], [], [])  # No data available
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
     iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
 
     with pytest.raises(StopIteration):
