@@ -93,6 +93,7 @@ class TokenContentIterator:
         name (str): Logical name of the token (used by HTCondor discovery).
         operation: Token operation type (read/write).
         destination_url (str): Destination URL for the token request.
+        pelican_url (str): Pelican protocol URL (pelican://<federation-url>/<path>) for OIDC device flow.
         method_index (int): Internal index of the current discovery method.
         cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
@@ -102,6 +103,7 @@ class TokenContentIterator:
     name: str
     operation: Optional[object] = None
     destination_url: Optional[str] = None
+    pelican_url: Optional[str] = None
     method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
     fallback_index: int = 0
@@ -137,12 +139,12 @@ class TokenContentIterator:
         Returns:
             str: JWT token if successful, None otherwise
         """
-        if not self.destination_url:
-            logger.warning("Cannot invoke pelican binary without destination URL")
+        if not self.pelican_url:
+            logger.warning("Cannot invoke pelican binary without pelican URL")
             return None
 
         flag = self._get_pelican_flag()
-        cmd = ["pelican", "token", "fetch", self.destination_url, flag]
+        cmd = ["pelican", "token", "fetch", self.pelican_url, flag]
 
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
