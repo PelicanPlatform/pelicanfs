@@ -29,14 +29,8 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import (
-    Client,
-    ClientOptions,
-)
-from aiowebdav2.exceptions import (
-    RemoteResourceNotFoundError,
-    ResponseErrorCodeError,
-)
+from aiowebdav2.client import Client, ClientOptions
+from aiowebdav2.exceptions import RemoteResourceNotFoundError, ResponseErrorCodeError
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -201,6 +195,7 @@ async def get_webdav_client(options):
 
 def sync_generator(async_gen_func, obj=None):
     """Wrap an async generator method into a sync generator."""
+
     @functools.wraps(async_gen_func)
     def wrapper(*args, **kwargs):
         if obj:
@@ -389,7 +384,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if session:
             session.headers["Authorization"] = f"Bearer {token}"
 
-    def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str:
+    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str:
         """
         Handle token generation if required by the director response.
 
@@ -415,8 +410,26 @@ class PelicanFileSystem(AsyncFileSystem):
             return existing_token
 
         try:
+            # Ensure director URL is set
+            await self._set_director_url()
+
+            # Construct pelican:// URL for OIDC device flow
+            pelican_url = None
+            if self.director_url and url:
+                # Extract federation host from director URL
+                parsed_director = urllib.parse.urlparse(self.director_url)
+                federation_host = parsed_director.netloc
+
+                # Extract path from the data URL
+                parsed_url = urllib.parse.urlparse(url)
+                path = parsed_url.path
+
+                # Construct pelican://<federation-host>/<path>
+                pelican_url = f"pelican://{federation_host}{path}"
+                logger.debug(f"Constructed pelican URL for token generation: {pelican_url}")
+
             # Create token generator
-            token_generator = TokenGenerator(destination_url=url, dir_resp=director_response, operation=operation)
+            token_generator = TokenGenerator(destination_url=url, dir_resp=director_response, operation=operation, pelican_url=pelican_url)
 
             # Get token (TokenContentIterator will automatically discover token location)
             token = token_generator.get_token()
@@ -540,7 +553,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Handle token generation for cache requests if required
             if director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token:
                 operation = self._get_token_operation("get_working_cache")
-                self._handle_token_generation(updated_url, director_response, operation)
+                await self._handle_token_generation(updated_url, director_response, operation)
 
                 # Set token in session headers if we have one (either existing or newly generated)
                 token_to_use = self._get_token()
@@ -697,7 +710,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
             # Handle token generation if required
             operation = self._get_token_operation(func.__name__)
-            self._handle_token_generation(data_url, director_response, operation)
+            await self._handle_token_generation(data_url, director_response, operation)
 
             logger.debug(f"Running {func} with url: {data_url}")
             return await func(self, data_url, *args[1:], **kwargs)
@@ -763,6 +776,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 raise FileNotFoundError
 
         if detail:
+
             def get_item_detail(item):
                 full_path = f"{base_url}{item['path']}"
                 isdir = item.get("isdir") == "True"
@@ -951,7 +965,7 @@ class PelicanFileSystem(AsyncFileSystem):
         data_url, director_response = await self.get_origin_url(path)
 
         operation = self._get_token_operation("put_file")
-        self._handle_token_generation(data_url, director_response, operation)
+        await self._handle_token_generation(data_url, director_response, operation)
 
         logger.debug(f"Running put_file from {lpath} to {data_url}...")
 
@@ -969,7 +983,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Handle token generation if required
         operation = self._get_token_operation("open")
-        self._handle_token_generation(data_url, director_response, operation)
+        sync(self.loop, self._handle_token_generation, data_url, director_response, operation)
 
         logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
@@ -988,7 +1002,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Handle token generation if required
         operation = self._get_token_operation("open_async")
-        self._handle_token_generation(data_url, director_response, operation)
+        await self._handle_token_generation(data_url, director_response, operation)
 
         logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
@@ -1018,7 +1032,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
             # Handle token generation if required
             operation = self._get_token_operation(func.__name__)
-            self._handle_token_generation(data_url, director_response, operation)
+            await self._handle_token_generation(data_url, director_response, operation)
 
             try:
                 logger.debug(f"Calling {func} using the following url: {data_url}")
@@ -1055,7 +1069,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
                 # Handle token generation if required (single path)
                 operation = self._get_token_operation(func.__name__)
-                self._handle_token_generation(data_url, director_response, operation)
+                await self._handle_token_generation(data_url, director_response, operation)
             else:
                 data_url = []
                 # For multiple paths, we'll use the first director_response for token generation
@@ -1075,7 +1089,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 if first_director_response:
                     operation = self._get_token_operation(func.__name__)
                     # Use the first URL for token generation (simplification)
-                    self._handle_token_generation(data_url[0] if data_url else "", first_director_response, operation)
+                    await self._handle_token_generation(data_url[0] if data_url else "", first_director_response, operation)
 
             try:
                 logger.debug(f"Calling {func} using the following urls: {data_url}")
