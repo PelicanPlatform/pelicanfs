@@ -553,12 +553,17 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 logger.debug(f"Checking to see if the cache at {updated_url} is working and returns a valid response code")
                 async with session.head(updated_url, timeout=timeout) as resp:
+                    # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
+                    # as indicators that the cache is working. Other error codes indicate
+                    # the cache itself is having problems.
                     if resp.status >= 200 and resp.status < 400:
                         logger.debug("Cache found")
                         break
+                    elif resp.status == 404:
+                        logger.debug("Cache is working (returned 404 for non-existent object)")
+                        break
             except (
                 aiohttp.client_exceptions.ClientConnectorError,
-                FileNotFoundError,
                 asyncio.TimeoutError,
                 asyncio.exceptions.TimeoutError,
             ):
