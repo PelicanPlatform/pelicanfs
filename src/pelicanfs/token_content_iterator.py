@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import io
 import json
 import logging
 import os
@@ -214,16 +215,25 @@ class TokenContentIterator:
                         break
 
                     # Wait for data from either master_fd (subprocess) or stdin (user input)
-                    ready_read, _, _ = select.select([master_fd, sys.stdin], [], [], SELECT_TIMEOUT)
+                    # In Jupyter/IPython, sys.stdin may not support fileno(), so we only monitor master_fd
+                    try:
+                        stdin_fd = sys.stdin.fileno()
+                        fds_to_monitor = [master_fd, sys.stdin]
+                    except (AttributeError, io.UnsupportedOperation):
+                        # stdin doesn't support fileno (Jupyter/IPython with redirected stdin)
+                        fds_to_monitor = [master_fd]
+                        stdin_fd = None
+
+                    ready_read, _, _ = select.select(fds_to_monitor, [], [], SELECT_TIMEOUT)
 
                     for fd in ready_read:
                         try:
                             if fd == master_fd:
                                 if not read_and_echo_output(master_fd):
                                     break
-                            elif fd == sys.stdin:
+                            elif stdin_fd is not None and fd == sys.stdin:
                                 # Data from user - forward to subprocess
-                                data = os.read(sys.stdin.fileno(), PTY_BUFFER_SIZE)
+                                data = os.read(stdin_fd, PTY_BUFFER_SIZE)
                                 if data:
                                     os.write(master_fd, data)
                         except OSError:
