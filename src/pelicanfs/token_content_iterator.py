@@ -177,8 +177,16 @@ class TokenContentIterator:
                 """Helper to read from fd, echo to terminal, and store data"""
                 data = os.read(fd, PTY_BUFFER_SIZE)
                 if data:
-                    sys.stdout.buffer.write(data)
-                    sys.stdout.buffer.flush()
+                    # Try to write to stdout.buffer (for real terminals)
+                    # Fall back to stdout.write() for Jupyter/IPython environments
+                    try:
+                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.flush()
+                    except AttributeError:
+                        # stdout doesn't have buffer (e.g., Jupyter/IPython)
+                        # Decode and write as text
+                        sys.stdout.write(data.decode("utf-8", errors="replace"))
+                        sys.stdout.flush()
                     output_data.append(data)
                 return data
 
