@@ -174,6 +174,23 @@ class TokenContentIterator:
             output_data = []
             start_time = time.time()
 
+            # Check if stdin has been redirected (e.g., StringIO in Jupyter)
+            # If so, read all available data from it once and send to subprocess
+            stdin_data_to_send = None
+            try:
+                stdin_fd = sys.stdin.fileno()
+                stdin_is_real = True
+            except (AttributeError, io.UnsupportedOperation):
+                # stdin is redirected (e.g., StringIO) - read its content
+                stdin_is_real = False
+                try:
+                    stdin_data_to_send = sys.stdin.read()
+                    if stdin_data_to_send:
+                        logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
+                except Exception as e:
+                    logger.debug(f"Could not read from redirected stdin: {e}")
+                    stdin_data_to_send = None
+
             def read_and_echo_output(fd):
                 """Helper to read from fd, echo to terminal, and store data"""
                 data = os.read(fd, PTY_BUFFER_SIZE)
@@ -216,13 +233,12 @@ class TokenContentIterator:
 
                     # Wait for data from either master_fd (subprocess) or stdin (user input)
                     # In Jupyter/IPython, sys.stdin may not support fileno(), so we only monitor master_fd
-                    try:
-                        stdin_fd = sys.stdin.fileno()
+                    if stdin_is_real:
+                        # Real stdin - monitor it with select
                         fds_to_monitor = [master_fd, sys.stdin]
-                    except (AttributeError, io.UnsupportedOperation):
-                        # stdin doesn't support fileno (Jupyter/IPython with redirected stdin)
+                    else:
+                        # Redirected stdin - only monitor master_fd
                         fds_to_monitor = [master_fd]
-                        stdin_fd = None
 
                     ready_read, _, _ = select.select(fds_to_monitor, [], [], SELECT_TIMEOUT)
 
@@ -231,13 +247,21 @@ class TokenContentIterator:
                             if fd == master_fd:
                                 if not read_and_echo_output(master_fd):
                                     break
-                            elif stdin_fd is not None and fd == sys.stdin:
-                                # Data from user - forward to subprocess
+                            elif stdin_is_real and fd == sys.stdin:
+                                # Data from real stdin - forward to subprocess
                                 data = os.read(stdin_fd, PTY_BUFFER_SIZE)
                                 if data:
                                     os.write(master_fd, data)
                         except OSError:
                             break
+
+                    # If stdin is redirected and we have data to send, write it to the subprocess
+                    if not stdin_is_real and stdin_data_to_send:
+                        try:
+                            os.write(master_fd, stdin_data_to_send.encode("utf-8"))
+                            stdin_data_to_send = None  # Only send once
+                        except OSError as e:
+                            logger.debug(f"Error writing redirected stdin to PTY: {e}")
             finally:
                 os.close(master_fd)
 
