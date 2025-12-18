@@ -282,6 +282,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Overwrite the httpsfs _ls_real call with ours with ours
         self.http_file_system._ls_real = self._ls_real
+        self.http_file_system._ls = self._ls_from_http
 
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @classmethod
@@ -517,10 +518,15 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Choosing a cache for {fileloc}...")
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
-        cache_url, director_response = self._match_namespace(fparsed.path)
-        if cache_url:
-            logger.debug(f"Found previously working cache: {cache_url}")
-            return cache_url, director_response
+        try:
+            cache_url, director_response = self._match_namespace(fparsed.path)
+            if cache_url:
+                logger.debug(f"Found previously working cache: {cache_url}")
+                return cache_url, director_response
+        except NoAvailableSource:
+            # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
+            # Fall through to discover caches
+            logger.debug("Namespace found but no caches available, discovering caches")
 
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
@@ -639,29 +645,47 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns a tuple of (dirlist url, director_response) for the given namespace location
         """
         logger.debug(f"Finding the collections endpoint for {fileloc}...")
-        await self._set_director_url()
 
-        url = urllib.parse.urljoin(self.director_url, fileloc)
+        # Check for cached namespace info (similar to get_working_cache)
+        fparsed = urllib.parse.urlparse(fileloc)
+        namespace_info = self._get_prefix_info(fparsed.path)
 
-        # Timeout response in seconds - the default response is 5 minutes
-        timeout = aiohttp.ClientTimeout(total=5)
-        session = await self.http_file_system.set_session()
-        async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
-            if "Link" not in resp.headers:
-                raise BadDirectorResponse()
-            collections_url = get_collections_url(resp.headers)
+        if namespace_info and namespace_info.cache_manager.director_response:
+            # We have cached director response, extract collections URL from it
+            director_response = namespace_info.cache_manager.director_response
+            collections_url = director_response.x_pel_ns_hdr.collections_url if director_response.x_pel_ns_hdr else None
+        else:
+            # No cache, query the director
+            await self._set_director_url()
+            url = urllib.parse.urljoin(self.director_url, fileloc)
 
-            if not collections_url:
-                logger.error(f"No collections endpoint found for {fileloc}")
-                raise NoCollectionsUrl()
+            # Timeout response in seconds - the default response is 5 minutes
+            timeout = aiohttp.ClientTimeout(total=5)
+            session = await self.http_file_system.set_session()
+            async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
+                if "Link" not in resp.headers:
+                    raise BadDirectorResponse()
+                collections_url = get_collections_url(resp.headers)
 
-            dirlist_url = urllib.parse.urljoin(collections_url, fileloc)
+                # Parse the headers to get the full director response
+                director_response = parse_director_response(resp.headers)
 
-            # Parse the headers to get the full director response
-            director_response = parse_director_response(resp.headers)
-            director_response.location = dirlist_url
+                # Cache the director response for future use
+                namespace = director_response.x_pel_ns_hdr.namespace if director_response.x_pel_ns_hdr else ""
+                if namespace:
+                    with self._namespace_lock:
+                        # Only cache if we don't already have a cache manager for this namespace
+                        if namespace not in self._namespace_cache:
+                            self._namespace_cache[namespace] = _CacheManager([], director_response)
 
-            return dirlist_url, director_response
+        if not collections_url:
+            logger.error(f"No collections endpoint found for {fileloc}")
+            raise NoCollectionsUrl()
+
+        dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
+        director_response.location = dirlist_url
+
+        return dirlist_url, director_response
 
     def _get_prefix_info(self, path: str) -> Optional[NamespaceInfo]:
         """
@@ -745,6 +769,32 @@ class PelicanFileSystem(AsyncFileSystem):
             self.dircache[path] = out
         return self._remove_host_from_paths(out)
 
+    async def _ls_from_http(self, url, detail=True, **kwargs):
+        """
+        This _ls is called from HTTPFileSystem and receives a cache URL.
+        We need to convert it to a namespace path and then to a collections URL.
+        Note: We do NOT remove hosts from the results because HTTPFileSystem needs
+        full URLs to download files.
+        """
+        # Extract the path from the URL
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path
+
+        # Get the collections URL for this path
+        collections_url, director_response = await self.get_dirlist_url(path)
+
+        # Handle token generation if required
+        operation = self._get_token_operation("_ls")
+        self._handle_token_generation(collections_url, director_response, operation)
+
+        # Call _ls_real with the collections URL
+        if self.use_listings_cache and collections_url in self.dircache:
+            out = self.dircache[collections_url]
+        else:
+            out = await self._ls_real(collections_url, detail=detail)
+            self.dircache[collections_url] = out
+        return out
+
     async def _ls_real(self, url, detail=True, client=None):
         """
         This _ls_real uses a webdavclient listing rather than an https call. This lets pelicanfs identify whether an object
@@ -815,8 +865,10 @@ class PelicanFileSystem(AsyncFileSystem):
             return [get_item_detail(item) for item in items]
         return sorted(set(items))
 
-    @_dirlist_dec
     async def _isdir(self, path):
+        # Don't use @_dirlist_dec here because http_file_system._isdir will call
+        # _ls_from_http which handles the collections URL conversion
+        path = self._check_fspath(path)
         return await self.http_file_system._isdir(path)
 
     @_dirlist_dec
@@ -886,8 +938,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return list(out)
 
-    @_dirlist_dec
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
+        # Don't use @_dirlist_dec here because http_file_system._du will call
+        # _walk which calls _ls_from_http which handles the collections URL conversion
+        path = self._check_fspath(path)
         return await self.http_file_system._du(path, total, maxdepth, **kwargs)
 
     @_dirlist_dec
