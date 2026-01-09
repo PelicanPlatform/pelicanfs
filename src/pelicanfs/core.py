@@ -239,6 +239,9 @@ class PelicanFileSystem(AsyncFileSystem):
         asynchronous=False,
         loop=None,
         get_webdav_client=get_webdav_client,
+        oidc_timeout_seconds=300,
+        pty_buffer_size=1024,
+        select_timeout=0.1,
         **kwargs,
     ):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
@@ -263,6 +266,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
         self.direct_reads = direct_reads
         self.preferred_caches = preferred_caches
+
+        # OIDC device flow configuration
+        self.oidc_timeout_seconds = oidc_timeout_seconds
+        self.pty_buffer_size = pty_buffer_size
+        self.select_timeout = select_timeout
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
         # They will raise NotImplementedErrors when called
@@ -410,15 +418,15 @@ class PelicanFileSystem(AsyncFileSystem):
             return existing_token
 
         try:
-            # Ensure director URL is set
+            # Ensure director URL is set (for token generation validation)
             await self._set_director_url()
 
             # Construct pelican:// URL for OIDC device flow
             pelican_url = None
-            if self.director_url and url:
-                # Extract federation host from director URL
-                parsed_director = urllib.parse.urlparse(self.director_url)
-                federation_host = parsed_director.netloc
+            if self.discovery_url and url:
+                # Extract federation host from discovery URL
+                parsed_discovery = urllib.parse.urlparse(self.discovery_url)
+                federation_host = parsed_discovery.netloc
 
                 # Extract path from the data URL
                 parsed_url = urllib.parse.urlparse(url)
@@ -428,8 +436,16 @@ class PelicanFileSystem(AsyncFileSystem):
                 pelican_url = f"pelican://{federation_host}{path}"
                 logger.debug(f"Constructed pelican URL for token generation: {pelican_url}")
 
-            # Create token generator
-            token_generator = TokenGenerator(destination_url=url, dir_resp=director_response, operation=operation, pelican_url=pelican_url)
+            # Create token generator with OIDC configuration
+            token_generator = TokenGenerator(
+                destination_url=url,
+                dir_resp=director_response,
+                operation=operation,
+                pelican_url=pelican_url,
+                oidc_timeout_seconds=self.oidc_timeout_seconds,
+                pty_buffer_size=self.pty_buffer_size,
+                select_timeout=self.select_timeout,
+            )
 
             # Get token (TokenContentIterator will automatically discover token location)
             token = token_generator.get_token()

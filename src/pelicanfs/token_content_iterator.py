@@ -17,9 +17,8 @@ import io
 import json
 import logging
 import os
-import pty
+import platform
 import re
-import select
 import shutil
 import subprocess
 import sys
@@ -33,12 +32,21 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
+# Platform-specific imports
+_IS_WINDOWS = platform.system() == "Windows"
+if not _IS_WINDOWS:
+    import pty
+    import select
+else:
+    # On Windows, use pywinpty for pseudo-terminal emulation
+    import winpty
+
 logger = logging.getLogger("fsspec.pelican")
 
-# Constants for OIDC device flow
-OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
-PTY_BUFFER_SIZE = 1024
-SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
+# Default constants for OIDC device flow (can be overridden)
+DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
+DEFAULT_PTY_BUFFER_SIZE = 1024
+DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -104,6 +112,9 @@ class TokenContentIterator:
         operation: Token operation type (read/write).
         destination_url (str): Destination URL for the token request.
         pelican_url (str): Pelican protocol URL (pelican://<federation-url>/<path>) for OIDC device flow.
+        oidc_timeout_seconds (int): Timeout in seconds for OIDC device flow (default: 300).
+        pty_buffer_size (int): Buffer size for PTY I/O (default: 1024).
+        select_timeout (float): Timeout in seconds for select() calls (default: 0.1).
         method_index (int): Internal index of the current discovery method.
         cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
@@ -114,47 +125,69 @@ class TokenContentIterator:
     operation: Optional[object] = None
     destination_url: Optional[str] = None
     pelican_url: Optional[str] = None
+    oidc_timeout_seconds: int = DEFAULT_OIDC_TIMEOUT_SECONDS
+    pty_buffer_size: int = DEFAULT_PTY_BUFFER_SIZE
+    select_timeout: float = DEFAULT_SELECT_TIMEOUT
     method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
     fallback_index: int = 0
 
     def _pelican_binary_exists(self) -> bool:
         """Check if pelican binary exists in PATH"""
-        return shutil.which("pelican") is not None
+        logger.debug(f"Checking for pelican binary in PATH: {os.environ.get('PATH', '(not set)')}")
+        result = shutil.which("pelican")
+        return result is not None
 
-    def _get_pelican_flag(self) -> str:
+    def _get_pelican_flag(self) -> list[str]:
         """
-        Map token operation to pelican binary flag.
+        Map token operation to pelican binary flags.
 
         Returns:
-            str: Flag to pass to pelican binary (-r for read, -w for write, -m for modify)
+            list[str]: List of flags to pass to pelican binary
+                      (-d for debug output based on log level,
+                       -r for read, -w for write, -m for modify)
         """
+        flags = []
+
+        # If logger is set to DEBUG level, add -d flag for debug output
+        if logger.isEnabledFor(logging.DEBUG):
+            flags.append("-d")
+            logger.debug("Adding -d flag to pelican binary for debug output")
+
+        # Add operation flag
         if self.operation is None:
-            return "-r"  # default to read
-
-        # Import TokenOperation here to avoid circular import
-        from pelicanfs.token_generator import TokenOperation
-
-        if self.operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
-            return "-r"
-        elif self.operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
-            return "-w"
+            flags.append("-r")  # default to read
         else:
-            return "-r"  # default to read
+            # Import TokenOperation here to avoid circular import
+            from pelicanfs.token_generator import TokenOperation
+
+            if self.operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
+                flags.append("-r")
+            elif self.operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
+                flags.append("-w")
+            else:
+                flags.append("-r")  # default to read
+
+        return flags
 
     def _get_token_from_pelican_binary(self) -> Optional[str]:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
+        Uses platform-specific pseudo-terminal implementation:
+        - Unix: pty module
+        - Windows: winpty module
+
         Returns:
             str: JWT token if successful, None otherwise
         """
+
         if not self.pelican_url:
             logger.warning("Cannot invoke pelican binary without pelican URL")
             return None
 
-        flag = self._get_pelican_flag()
-        cmd = ["pelican", "token", "fetch", self.pelican_url, flag]
+        flags = self._get_pelican_flag()
+        cmd = ["pelican"] + flags + ["token", "fetch", self.pelican_url]
 
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
@@ -162,114 +195,168 @@ class TokenContentIterator:
             # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
             # This lets the user see prompts and interact while we capture the output
 
-            # Create a pseudo-terminal
-            master_fd, slave_fd = pty.openpty()
-
-            # Run process with the slave end of the pty
-            process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)  # Use bytes mode for pty
-
-            # Close slave fd in parent (we'll use master_fd for both reading and writing)
-            os.close(slave_fd)
-
             output_data = []
             start_time = time.time()
 
-            # Check if stdin has been redirected (e.g., StringIO in Jupyter)
-            # If so, read all available data from it once and send to subprocess
-            stdin_data_to_send = None
-            try:
-                stdin_fd = sys.stdin.fileno()
-                stdin_is_real = True
-            except (AttributeError, io.UnsupportedOperation):
-                # stdin is redirected (e.g., StringIO) - read its content
-                stdin_is_real = False
-                try:
-                    stdin_data_to_send = sys.stdin.read()
-                    if stdin_data_to_send:
-                        logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
-                except Exception as e:
-                    logger.debug(f"Could not read from redirected stdin: {e}")
-                    stdin_data_to_send = None
+            # Platform-specific PTY setup
+            if _IS_WINDOWS:
+                # Windows: use winpty
+                pty_process = winpty.PtyProcess.spawn(cmd)
 
-            def read_and_echo_output(fd):
-                """Helper to read from fd, echo to terminal, and store data"""
-                data = os.read(fd, PTY_BUFFER_SIZE)
+                # On Windows, we'll use a simpler polling approach since select() doesn't work
+                def read_from_pty():
+                    """Read available data from winpty"""
+                    try:
+                        # winpty read() returns bytes or empty bytes if no data
+                        # timeout is in milliseconds
+                        timeout_ms = int(self.select_timeout * 1000)
+                        return pty_process.read(self.pty_buffer_size, timeout=timeout_ms)
+                    except Exception:
+                        return b""
+
+                def write_to_pty(data):
+                    """Write data to winpty"""
+                    if isinstance(data, str):
+                        data = data.encode("utf-8")
+                    pty_process.write(data)
+
+                def is_alive():
+                    """Check if process is still running"""
+                    return pty_process.isalive()
+
+                stdin_is_real = False  # Simplified for Windows
+                stdin_data_to_send = None
+            else:
+                # Unix: use pty module
+                master_fd, slave_fd = pty.openpty()
+                process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
+                os.close(slave_fd)
+
+                def read_from_pty():
+                    """Read available data from Unix PTY"""
+                    ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
+                    if ready:
+                        try:
+                            return os.read(master_fd, self.pty_buffer_size)
+                        except OSError:
+                            return b""
+                    return b""
+
+                def write_to_pty(data):
+                    """Write data to Unix PTY"""
+                    os.write(master_fd, data)
+
+                def is_alive():
+                    """Check if process is still running"""
+                    return process.poll() is None
+
+                # Check if stdin has been redirected (e.g., StringIO in Jupyter)
+                stdin_data_to_send = None
+                try:
+                    stdin_fd = sys.stdin.fileno()
+                    stdin_is_real = True
+                except (AttributeError, io.UnsupportedOperation):
+                    stdin_is_real = False
+                    try:
+                        stdin_data_to_send = sys.stdin.read()
+                        if stdin_data_to_send:
+                            logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
+                    except Exception as e:
+                        logger.debug(f"Could not read from redirected stdin: {e}")
+                        stdin_data_to_send = None
+
+            def read_and_echo_output():
+                """Helper to read from PTY, echo to terminal (filtering sensitive data), and store data"""
+                data = read_from_pty()
                 if data:
+                    # Store raw data for token extraction
+                    output_data.append(data)
+
+                    # Filter sensitive information before echoing to terminal
+                    decoded_data = data.decode("utf-8", errors="replace")
+
+                    # Hide passwords and tokens using regex patterns
+                    # Pattern for JWT tokens
+                    jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+                    filtered_data = re.sub(jwt_pattern, "[TOKEN_REDACTED]", decoded_data)
+
+                    # Pattern for password prompts and input (hide characters after "password:" or "Password:")
+                    # This is a heuristic and may need adjustment
+                    password_pattern = r"(password|Password)[^\n]*"
+                    filtered_data = re.sub(password_pattern, r"\1: [REDACTED]", filtered_data)
+
                     # Try to write to stdout.buffer (for real terminals)
                     # Fall back to stdout.write() for Jupyter/IPython environments
                     try:
-                        sys.stdout.buffer.write(data)
+                        sys.stdout.buffer.write(filtered_data.encode("utf-8"))
                         sys.stdout.buffer.flush()
                     except AttributeError:
                         # stdout doesn't have buffer (e.g., Jupyter/IPython)
-                        # Decode and write as text
-                        sys.stdout.write(data.decode("utf-8", errors="replace"))
+                        sys.stdout.write(filtered_data)
                         sys.stdout.flush()
-                    output_data.append(data)
                 return data
 
-            # Read from master fd and echo to terminal, also forward stdin to the process
+            # Read from PTY and echo to terminal, also forward stdin to the process
             try:
                 while True:
                     # Check timeout
-                    if time.time() - start_time > OIDC_TIMEOUT_SECONDS:
-                        process.kill()
-                        logger.warning("Pelican binary timed out (exceeded 5 minutes)")
+                    if time.time() - start_time > self.oidc_timeout_seconds:
+                        if _IS_WINDOWS:
+                            pty_process.terminate()
+                        else:
+                            process.kill()
+                        logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
                         return None
 
                     # Check if process is still running
-                    if process.poll() is not None:
+                    if not is_alive():
                         # Process finished, read any remaining output
                         while True:
-                            ready, _, _ = select.select([master_fd], [], [], SELECT_TIMEOUT)
-                            if not ready:
-                                break
-                            try:
-                                if not read_and_echo_output(master_fd):
-                                    break
-                            except OSError:
+                            data = read_from_pty()
+                            if not data:
                                 break
                         break
 
-                    # Wait for data from either master_fd (subprocess) or stdin (user input)
-                    # In Jupyter/IPython, sys.stdin may not support fileno(), so we only monitor master_fd
-                    if stdin_is_real:
-                        # Real stdin - monitor it with select
-                        fds_to_monitor = [master_fd, sys.stdin]
-                    else:
-                        # Redirected stdin - only monitor master_fd
-                        fds_to_monitor = [master_fd]
+                    # Read subprocess output
+                    read_and_echo_output()
 
-                    ready_read, _, _ = select.select(fds_to_monitor, [], [], SELECT_TIMEOUT)
-
-                    for fd in ready_read:
-                        try:
-                            if fd == master_fd:
-                                if not read_and_echo_output(master_fd):
-                                    break
-                            elif stdin_is_real and fd == sys.stdin:
+                    # Handle stdin forwarding (Unix only - Windows uses simpler approach)
+                    if not _IS_WINDOWS:
+                        if stdin_is_real:
+                            # Real stdin - check if data available
+                            ready, _, _ = select.select([sys.stdin], [], [], 0)
+                            if ready:
                                 # Data from real stdin - forward to subprocess
-                                data = os.read(stdin_fd, PTY_BUFFER_SIZE)
+                                data = os.read(stdin_fd, self.pty_buffer_size)
                                 if data:
-                                    os.write(master_fd, data)
-                        except OSError:
-                            break
-
-                    # If stdin is redirected and we have data to send, write it to the subprocess
-                    if not stdin_is_real and stdin_data_to_send:
-                        try:
-                            os.write(master_fd, stdin_data_to_send.encode("utf-8"))
-                            stdin_data_to_send = None  # Only send once
-                        except OSError as e:
-                            logger.debug(f"Error writing redirected stdin to PTY: {e}")
+                                    write_to_pty(data)
+                        elif stdin_data_to_send:
+                            # Redirected stdin - send buffered data once
+                            try:
+                                write_to_pty(stdin_data_to_send.encode("utf-8"))
+                                stdin_data_to_send = None  # Only send once
+                            except OSError as e:
+                                logger.debug(f"Error writing redirected stdin to PTY: {e}")
             finally:
-                os.close(master_fd)
+                # Cleanup platform-specific resources
+                if _IS_WINDOWS:
+                    # Windows cleanup
+                    if pty_process.isalive():
+                        pty_process.terminate()
+                else:
+                    # Unix cleanup
+                    os.close(master_fd)
 
-            # Ensure process has finished
-            process.wait()
+            # Wait for process to finish and get return code
+            if _IS_WINDOWS:
+                pty_process.wait()
+                returncode = pty_process.exitstatus()
+            else:
+                process.wait()
+                returncode = process.returncode
 
-            if process.returncode != 0:
-                logger.debug(f"Pelican binary exited with code {process.returncode}")
+            if returncode != 0:
+                logger.debug(f"Pelican binary exited with code {returncode}")
                 return None
 
             # Extract JWT token from captured output
@@ -283,7 +370,7 @@ class TokenContentIterator:
                 return token
             else:
                 logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output[:500]}")  # Log first 500 chars
+                logger.debug(f"Output was: {full_output}")
                 return None
 
         except Exception as err:
@@ -292,6 +379,25 @@ class TokenContentIterator:
 
             logger.debug(traceback.format_exc())
             return None
+
+    def get_method_index(self, method: TokenDiscoveryMethod) -> int:
+        """
+        Get the index of a specific token discovery method.
+
+        This method provides a stable way for tests to reference specific discovery methods
+        without relying on their position in the enum, making tests less fragile when
+        new discovery methods are added.
+
+        Args:
+            method: The TokenDiscoveryMethod to find
+
+        Returns:
+            int: The index of the method in the methods list
+
+        Raises:
+            ValueError: If the method is not in the methods list
+        """
+        return self.methods.index(method)
 
     def __post_init__(self):
         self.methods = list(TokenDiscoveryMethod)
@@ -382,13 +488,15 @@ class TokenContentIterator:
 
                 case TokenDiscoveryMethod.OIDC_DEVICE_FLOW:
                     if not self._pelican_binary_exists():
-                        logger.warning("OAuth token generation is only available when the 'pelican' binary is installed and available in PATH")
-                        raise StopIteration
+                        logger.warning(
+                            "OAuth token generation is only available when the 'pelican' binary is installed and available in PATH. "
+                            "To install the pelican binary, please visit: https://docs.pelicanplatform.org/install"
+                        )
+                        continue
 
                     token = self._get_token_from_pelican_binary()
                     if token:
                         return token
-                    raise StopIteration
 
         logger.debug("No more token sources to try")
         raise StopIteration

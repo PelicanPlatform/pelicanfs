@@ -180,13 +180,20 @@ def test_htcondor_fallback_all_fail_raises_stopiteration(mock_access, mock_exist
 
 
 @patch("shutil.which", return_value=None)
-def test_oidc_device_flow_binary_not_found(mock_which):
-    """Test that OIDC device flow raises StopIteration when pelican binary is not found"""
-    iterator = TokenContentIterator(location=None, name="token_name", destination_url="https://example.com")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1  # Jump to last method
+def test_oidc_device_flow_binary_not_found(mock_which, caplog):
+    """Test that missing pelican binary logs warning and allows iteration to continue"""
+    import logging
 
-    with pytest.raises(StopIteration):
-        next(iterator)
+    iterator = TokenContentIterator(location=None, name="token_name", destination_url="https://example.com")
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
+
+    # Iterator should exhaust naturally after OIDC_DEVICE_FLOW case runs
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(StopIteration):
+            next(iterator)
+
+    # Verify OIDC_DEVICE_FLOW case was executed and logged the expected warning
+    assert any("pelican' binary is installed" in record.message for record in caplog.records)
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
@@ -219,7 +226,7 @@ def test_oidc_device_flow_successful_token_acquisition(mock_select, mock_close, 
     mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     token = next(iterator)
 
@@ -229,7 +236,11 @@ def test_oidc_device_flow_successful_token_acquisition(mock_select, mock_close, 
 
     mock_popen.assert_called_once()
     call_args = mock_popen.call_args[0][0]
-    assert call_args == ["pelican", "token", "fetch", "pelican://example.com/path", "-r"]
+    assert "pelican" in call_args
+    assert "token" in call_args
+    assert "fetch" in call_args
+    assert "pelican://example.com/path" in call_args
+    assert "-r" in call_args
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
@@ -257,7 +268,7 @@ def test_oidc_device_flow_with_warning_prefix(mock_select, mock_close, mock_writ
     mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     token = next(iterator)
 
@@ -290,13 +301,17 @@ def test_oidc_device_flow_write_operation(mock_select, mock_close, mock_write, m
     mock_select.side_effect = [([100], [], []), ([], [], [])]
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, pelican_url="pelican://example.com/write/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     token = next(iterator)
 
     # Verify -w flag was used for write operation
     call_args = mock_popen.call_args[0][0]
-    assert call_args == ["pelican", "token", "fetch", "pelican://example.com/write/path", "-w"]
+    assert "pelican" in call_args
+    assert "token" in call_args
+    assert "fetch" in call_args
+    assert "pelican://example.com/write/path" in call_args
+    assert "-w" in call_args
     assert token == fake_jwt
 
 
@@ -322,7 +337,7 @@ def test_oidc_device_flow_binary_fails(mock_select, mock_close, mock_write, mock
     mock_select.side_effect = [([100], [], []), ([], [], [])]
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     with pytest.raises(StopIteration):
         next(iterator)
@@ -350,7 +365,7 @@ def test_oidc_device_flow_no_token_in_output(mock_select, mock_close, mock_write
     mock_select.side_effect = [([100], [], []), ([], [], [])]
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     with pytest.raises(StopIteration):
         next(iterator)
@@ -380,7 +395,7 @@ def test_oidc_device_flow_timeout(mock_time, mock_select, mock_close, mock_write
     mock_select.return_value = ([], [], [])  # No data available
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     with pytest.raises(StopIteration):
         next(iterator)
@@ -395,7 +410,7 @@ def test_oidc_device_flow_no_destination_url(mock_which):
     from pelicanfs.token_generator import TokenOperation
 
     iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, destination_url=None)  # No destination URL
-    iterator.method_index = len(list(TokenDiscoveryMethod)) - 1
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     with pytest.raises(StopIteration):
         next(iterator)
@@ -407,11 +422,17 @@ def test_get_pelican_flag_read_operations():
 
     # TokenRead
     iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenRead, destination_url="https://example.com")
-    assert iterator._get_pelican_flag() == "-r"
+    flags = iterator._get_pelican_flag()
+    assert "-r" in flags
+    assert "-w" not in flags
+    assert "-m" not in flags
 
     # TokenSharedRead
     iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenSharedRead, destination_url="https://example.com")
-    assert iterator._get_pelican_flag() == "-r"
+    flags = iterator._get_pelican_flag()
+    assert "-r" in flags
+    assert "-w" not in flags
+    assert "-m" not in flags
 
 
 def test_get_pelican_flag_write_operations():
@@ -420,17 +441,49 @@ def test_get_pelican_flag_write_operations():
 
     # TokenWrite
     iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenWrite, destination_url="https://example.com")
-    assert iterator._get_pelican_flag() == "-w"
+    flags = iterator._get_pelican_flag()
+    assert "-w" in flags
+    assert "-r" not in flags
+    assert "-m" not in flags
 
     # TokenSharedWrite
     iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenSharedWrite, destination_url="https://example.com")
-    assert iterator._get_pelican_flag() == "-w"
+    flags = iterator._get_pelican_flag()
+    assert "-w" in flags
+    assert "-r" not in flags
+    assert "-m" not in flags
 
 
 def test_get_pelican_flag_default():
     """Test that None operation defaults to -r flag"""
     iterator = TokenContentIterator(location=None, name="test", operation=None, destination_url="https://example.com")
-    assert iterator._get_pelican_flag() == "-r"
+    flags = iterator._get_pelican_flag()
+    assert "-r" in flags
+    assert "-w" not in flags
+    assert "-m" not in flags
+
+
+def test_get_pelican_flag_debug_mode():
+    """Test that debug flag is added when logger is in DEBUG mode"""
+    import logging
+
+    from pelicanfs.token_generator import TokenOperation
+
+    # Get the actual logger used in the module
+    logger = logging.getLogger("fsspec.pelican")
+    original_level = logger.getEffectiveLevel()
+
+    # Set logger to DEBUG level
+    logger.setLevel(logging.DEBUG)
+
+    try:
+        iterator = TokenContentIterator(location=None, name="test", operation=TokenOperation.TokenRead, destination_url="https://example.com")
+        flags = iterator._get_pelican_flag()
+        assert "-d" in flags
+        assert "-r" in flags
+    finally:
+        # Restore original log level
+        logger.setLevel(original_level)
 
 
 def test_pelican_binary_exists():

@@ -70,6 +70,9 @@ class TokenGenerator:
         operation: TokenOperation,
         token_name: Optional[str] = None,
         pelican_url: Optional[str] = None,
+        oidc_timeout_seconds: int = 300,
+        pty_buffer_size: int = 1024,
+        select_timeout: float = 0.1,
     ) -> None:
         self.DirResp: object = dir_resp
         self.DestinationURL: str = destination_url
@@ -80,6 +83,10 @@ class TokenGenerator:
         self.token: Optional[TokenInfo] = None
         self.Iterator: Optional[TokenContentIterator] = None
         self._lock: threading.Lock = threading.Lock()
+        # OIDC device flow configuration
+        self.oidc_timeout_seconds: int = oidc_timeout_seconds
+        self.pty_buffer_size: int = pty_buffer_size
+        self.select_timeout: float = select_timeout
 
     def set_token_location(self, token_location: str) -> None:
         """Sets the location (e.g., file path) where tokens can be found."""
@@ -125,7 +132,16 @@ class TokenGenerator:
             # Initialize iterator if not already set
             # The iterator will iterate and yield all potential tokens in the token location
             if self.Iterator is None:
-                self.Iterator = TokenContentIterator(self.TokenLocation, self.TokenName, operation=self.Operation, destination_url=self.DestinationURL, pelican_url=self.PelicanURL)
+                self.Iterator = TokenContentIterator(
+                    self.TokenLocation,
+                    self.TokenName,
+                    operation=self.Operation,
+                    destination_url=self.DestinationURL,
+                    pelican_url=self.PelicanURL,
+                    oidc_timeout_seconds=self.oidc_timeout_seconds,
+                    pty_buffer_size=self.pty_buffer_size,
+                    select_timeout=self.select_timeout,
+                )
 
             logger.debug("About to enter token validation loop")
             logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
