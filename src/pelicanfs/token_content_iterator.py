@@ -187,7 +187,7 @@ class TokenContentIterator:
             return None
 
         flags = self._get_pelican_flag()
-        cmd = ["pelican"] + flags + ["token", "fetch", self.pelican_url]
+        cmd = ["pelican"] + ["token", "fetch", self.pelican_url] + flags
 
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
