@@ -232,6 +232,8 @@ class TokenContentIterator:
                 stdin_data_to_send = None
             else:
                 # Unix: use pty module
+                import termios
+
                 master_fd, slave_fd = pty.openpty()
 
                 # Try to open /dev/tty for stdin so password prompts work correctly
@@ -241,7 +243,22 @@ class TokenContentIterator:
                     process = subprocess.Popen(cmd, stdin=tty_fd, stdout=slave_fd, stderr=slave_fd, text=False)
                     os.close(tty_fd)
                 except (OSError, FileNotFoundError):
-                    # /dev/tty not available (e.g., not running in a terminal)
+                    # /dev/tty not available (e.g., Jupyter with redirected stdin)
+                    # Disable echo on both master and slave PTY to prevent password echo
+                    # This only affects the fallback case where stdin goes through the PTY
+                    try:
+                        # Disable echo on slave side
+                        attrs = termios.tcgetattr(slave_fd)
+                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
+                        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+
+                        # Also disable echo on master side
+                        attrs = termios.tcgetattr(master_fd)
+                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
+                        termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
+                    except Exception as e:
+                        logger.debug(f"Could not disable echo on PTY: {e}")
+
                     process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
                 os.close(slave_fd)
 
