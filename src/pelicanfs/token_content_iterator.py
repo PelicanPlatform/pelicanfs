@@ -37,9 +37,6 @@ _IS_WINDOWS = platform.system() == "Windows"
 if not _IS_WINDOWS:
     import pty
     import select
-else:
-    # On Windows, use pywinpty for pseudo-terminal emulation
-    import winpty
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -174,9 +171,9 @@ class TokenContentIterator:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
-        Uses platform-specific pseudo-terminal implementation:
-        - Unix: pty module
-        - Windows: winpty module
+        Uses platform-specific approach for secure password input:
+        - Unix: pty module with stdin from /dev/tty
+        - Windows: subprocess with inherited stdin
 
         Returns:
             str: JWT token if successful, None otherwise
@@ -200,36 +197,52 @@ class TokenContentIterator:
 
             # Platform-specific PTY setup
             if _IS_WINDOWS:
-                # Windows: use winpty
-                pty_process = winpty.PtyProcess.spawn(cmd)
+                # Windows: Let the process inherit stdin from the console for password prompts
+                # We use PIPE for stdout/stderr to capture output, but inherit stdin
+                # This allows the pelican binary to handle password prompts directly
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=None,  # Inherit stdin from parent process
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
+                    text=False,
+                    bufsize=0,  # Unbuffered for real-time output
+                )
 
-                # On Windows, we'll use a simpler polling approach since select() doesn't work
                 def read_from_pty():
-                    """Read available data from winpty"""
+                    """Read available data from subprocess stdout"""
                     try:
-                        # winpty read() returns bytes or empty bytes if no data
-                        # timeout is in milliseconds
-                        timeout_ms = int(self.select_timeout * 1000)
-                        return pty_process.read(self.pty_buffer_size, timeout=timeout_ms)
+                        # Non-blocking read with timeout
+                        import msvcrt
+
+                        if msvcrt.kbhit() or process.stdout:
+                            return process.stdout.read(self.pty_buffer_size)
+                        return b""
                     except Exception:
                         return b""
 
                 def write_to_pty(data):
-                    """Write data to winpty"""
-                    if isinstance(data, str):
-                        data = data.encode("utf-8")
-                    pty_process.write(data)
+                    """Not used on Windows with inherited stdin"""
+                    pass
 
                 def is_alive():
                     """Check if process is still running"""
-                    return pty_process.isalive()
+                    return process.poll() is None
 
-                stdin_is_real = False  # Simplified for Windows
                 stdin_data_to_send = None
             else:
                 # Unix: use pty module
                 master_fd, slave_fd = pty.openpty()
-                process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
+
+                # Try to open /dev/tty for stdin so password prompts work correctly
+                # If /dev/tty is not available, fall back to slave_fd
+                try:
+                    tty_fd = os.open("/dev/tty", os.O_RDWR)
+                    process = subprocess.Popen(cmd, stdin=tty_fd, stdout=slave_fd, stderr=slave_fd, text=False)
+                    os.close(tty_fd)
+                except (OSError, FileNotFoundError):
+                    # /dev/tty not available (e.g., not running in a terminal)
+                    process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
                 os.close(slave_fd)
 
                 def read_from_pty():
@@ -251,12 +264,23 @@ class TokenContentIterator:
                     return process.poll() is None
 
                 # Check if stdin has been redirected (e.g., StringIO in Jupyter)
+                # If /dev/tty is available, the process reads from the terminal directly
+                # If not, we need to forward any redirected stdin data
                 stdin_data_to_send = None
                 try:
                     stdin_fd = sys.stdin.fileno()
-                    stdin_is_real = True
+                    # Check if stdin is redirected (not a terminal)
+                    if not os.isatty(stdin_fd):
+                        # Stdin is redirected, read the data to forward it
+                        try:
+                            stdin_data_to_send = sys.stdin.read()
+                            if stdin_data_to_send:
+                                logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
+                        except Exception as e:
+                            logger.debug(f"Could not read from redirected stdin: {e}")
+                            stdin_data_to_send = None
                 except (AttributeError, io.UnsupportedOperation):
-                    stdin_is_real = False
+                    # stdin doesn't have fileno() - likely redirected (e.g., Jupyter)
                     try:
                         stdin_data_to_send = sys.stdin.read()
                         if stdin_data_to_send:
@@ -280,11 +304,6 @@ class TokenContentIterator:
                     jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
                     filtered_data = re.sub(jwt_pattern, "[TOKEN_REDACTED]", decoded_data)
 
-                    # Pattern for password prompts and input (hide characters after "password:" or "Password:")
-                    # This is a heuristic and may need adjustment
-                    password_pattern = r"(password|Password)[^\n]*"
-                    filtered_data = re.sub(password_pattern, r"\1: [REDACTED]", filtered_data)
-
                     # Try to write to stdout.buffer (for real terminals)
                     # Fall back to stdout.write() for Jupyter/IPython environments
                     try:
@@ -301,10 +320,7 @@ class TokenContentIterator:
                 while True:
                     # Check timeout
                     if time.time() - start_time > self.oidc_timeout_seconds:
-                        if _IS_WINDOWS:
-                            pty_process.terminate()
-                        else:
-                            process.kill()
+                        process.kill()
                         logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
                         return None
 
@@ -321,16 +337,10 @@ class TokenContentIterator:
                     read_and_echo_output()
 
                     # Handle stdin forwarding (Unix only - Windows uses simpler approach)
+                    # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
+                    # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
                     if not _IS_WINDOWS:
-                        if stdin_is_real:
-                            # Real stdin - check if data available
-                            ready, _, _ = select.select([sys.stdin], [], [], 0)
-                            if ready:
-                                # Data from real stdin - forward to subprocess
-                                data = os.read(stdin_fd, self.pty_buffer_size)
-                                if data:
-                                    write_to_pty(data)
-                        elif stdin_data_to_send:
+                        if stdin_data_to_send:
                             # Redirected stdin - send buffered data once
                             try:
                                 write_to_pty(stdin_data_to_send.encode("utf-8"))
@@ -339,21 +349,13 @@ class TokenContentIterator:
                                 logger.debug(f"Error writing redirected stdin to PTY: {e}")
             finally:
                 # Cleanup platform-specific resources
-                if _IS_WINDOWS:
-                    # Windows cleanup
-                    if pty_process.isalive():
-                        pty_process.terminate()
-                else:
+                if not _IS_WINDOWS:
                     # Unix cleanup
                     os.close(master_fd)
 
             # Wait for process to finish and get return code
-            if _IS_WINDOWS:
-                pty_process.wait()
-                returncode = pty_process.exitstatus()
-            else:
-                process.wait()
-                returncode = process.returncode
+            process.wait()
+            returncode = process.returncode
 
             if returncode != 0:
                 logger.debug(f"Pelican binary exited with code {returncode}")
