@@ -923,7 +923,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     fastwalk = sync_generator(_walk)
 
-    def _io_wrapper(self, func):
+    def _io_wrapper(self, func, path):
         """
         A wrapper around calls to the file which intercepts
         failures and marks the corresponding cache as bad
@@ -933,12 +933,12 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                self._bad_cache(self.path, e)
+                self._bad_cache(path, e)
                 raise
 
         return io_wrapper
 
-    def _async_io_wrapper(self, func):
+    def _async_io_wrapper(self, func, path):
         """
         An async wrapper around calls to the file which intercepts
         failures and marks the corresponding cache as bad
@@ -948,7 +948,7 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                self._bad_cache(self.path, e)
+                self._bad_cache(path, e)
                 raise
 
         return io_wrapper
@@ -1008,7 +1008,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         logger.debug(f"Running open on {data_url}...")
         fp = self.http_file_system.open(data_url, mode, **kwargs)
-        fp.read = self._io_wrapper(fp.read)
+        fp.read = self._io_wrapper(fp.read, path)
         if not self.direct_reads:
             ar = _AccessResp(data_url, True)
             self._access_stats.add_response(path, ar)
@@ -1032,7 +1032,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         logger.debug(f"Running open_async on {data_url}...")
         fp = await self.http_file_system.open_async(data_url, **kwargs)
-        fp.read = self._async_io_wrapper(fp.read)
+        fp.read = self._async_io_wrapper(fp.read, path)
         if not self.direct_reads:
             ar = _AccessResp(data_url, True)
             self._access_stats.add_response(path, ar)
