@@ -209,3 +209,27 @@ def test_open_write_mode_not_supported(httpserver: HTTPServer, get_client):
         with pytest.raises(NotImplementedError) as exc_info:
             pelfs.open("/foo/bar", mode)
         assert "put()" in str(exc_info.value) or "pipe()" in str(exc_info.value)
+
+
+def test_io_wrapper_error_handling():
+    """
+    Test that _io_wrapper correctly handles errors during read() without
+    raising AttributeError due to missing 'path' attribute.
+
+    This regression test ensures the path is properly captured in the closure
+    rather than incorrectly referencing self.path on PelicanFileSystem.
+    """
+    # Create a minimal PelicanFileSystem without full initialization
+    pelfs = pelicanfs.core.PelicanFileSystem.__new__(pelicanfs.core.PelicanFileSystem)
+    # Patch _bad_cache to avoid side effects
+    pelfs._bad_cache = lambda path, e: None
+
+    def failing_read(*args, **kwargs):
+        raise IOError("Simulated read failure")
+
+    # Call _io_wrapper with a path argument - the fix adds this parameter
+    wrapped_read = pelfs._io_wrapper(failing_read, "/test/path")
+
+    # This should raise IOError, not AttributeError
+    with pytest.raises(IOError, match="Simulated read failure"):
+        wrapped_read()
