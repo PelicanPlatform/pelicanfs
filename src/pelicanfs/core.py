@@ -992,6 +992,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
+
+        # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
+        if any(char in mode for char in ["w", "a", "x", "+"]):
+            raise NotImplementedError("Write mode is not supported for open(). Use put() or pipe() to write files.")
+
         if self.direct_reads:
             data_url, director_response = sync(self.loop, self.get_origin_url, path)
         else:
@@ -1009,8 +1014,13 @@ class PelicanFileSystem(AsyncFileSystem):
             self._access_stats.add_response(path, ar)
         return fp
 
-    async def open_async(self, path, **kwargs):
+    async def open_async(self, path, mode="rb", **kwargs):
         path = self._check_fspath(path)
+
+        # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
+        if any(char in mode for char in ["w", "a", "x", "+"]):
+            raise NotImplementedError("Write mode is not supported for open_async(). Use put() or pipe() to write files.")
+
         if self.direct_reads:
             data_url, director_response = await self.get_origin_url(path)
         else:
