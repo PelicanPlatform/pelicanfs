@@ -192,3 +192,20 @@ def test_open_mapper(httpserver: HTTPServer, get_client):
 
     pel_map = pelicanfs.core.PelicanMap("/foo", pelfs=pelfs)
     assert pel_map["bar"] == b"hello, world!"
+
+
+def test_open_write_mode_not_supported(httpserver: HTTPServer, get_client):
+    """Test that open() with write mode raises NotImplementedError."""
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+
+    pelfs = PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    # Test various write modes
+    for mode in ["w", "wb", "a", "ab", "x", "xb", "w+", "r+"]:
+        with pytest.raises(NotImplementedError) as exc_info:
+            pelfs.open("/foo/bar", mode)
+        assert "put()" in str(exc_info.value) or "pipe()" in str(exc_info.value)

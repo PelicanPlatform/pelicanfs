@@ -29,14 +29,8 @@ from typing import Dict, List, Optional, Tuple
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import (
-    Client,
-    ClientOptions,
-)
-from aiowebdav2.exceptions import (
-    RemoteResourceNotFoundError,
-    ResponseErrorCodeError,
-)
+from aiowebdav2.client import Client, ClientOptions
+from aiowebdav2.exceptions import RemoteResourceNotFoundError, ResponseErrorCodeError
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -201,6 +195,7 @@ async def get_webdav_client(options):
 
 def sync_generator(async_gen_func, obj=None):
     """Wrap an async generator method into a sync generator."""
+
     @functools.wraps(async_gen_func)
     def wrapper(*args, **kwargs):
         if obj:
@@ -763,6 +758,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 raise FileNotFoundError
 
         if detail:
+
             def get_item_detail(item):
                 full_path = f"{base_url}{item['path']}"
                 isdir = item.get("isdir") == "True"
@@ -962,6 +958,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
+
+        # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
+        if any(char in mode for char in ["w", "a", "x", "+"]):
+            raise NotImplementedError("Write mode is not supported for open(). Use put() or pipe() to write files.")
+
         if self.direct_reads:
             data_url, director_response = sync(self.loop, self.get_origin_url, path)
         else:
@@ -979,8 +980,13 @@ class PelicanFileSystem(AsyncFileSystem):
             self._access_stats.add_response(path, ar)
         return fp
 
-    async def open_async(self, path, **kwargs):
+    async def open_async(self, path, mode="rb", **kwargs):
         path = self._check_fspath(path)
+
+        # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
+        if any(char in mode for char in ["w", "a", "x", "+"]):
+            raise NotImplementedError("Write mode is not supported for open_async(). Use put() or pipe() to write files.")
+
         if self.direct_reads:
             data_url, director_response = await self.get_origin_url(path)
         else:

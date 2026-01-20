@@ -78,6 +78,7 @@ PelicanFS is built on top of the HTTP fsspec implementation. As such, any functi
 - `cp` (copy objects within the federation - note that downloading objects via `get()` to local files works normally)
 - `mkdir` (create collections)
 - `makedirs` (create collection trees)
+- `open()` with write modes (`"w"`, `"wb"`, `"a"`, `"x"`, `"+"`, etc.) - use `put()` or `pipe()` to write files instead
 
 These operations will raise a `NotImplementedError` if called.
 
@@ -645,7 +646,7 @@ Main class for interacting with Pelican federations.
 
 - `ls(path, detail=True, **kwargs)` - List objects in a collection
 - `cat(path, recursive=False, on_error="raise", **kwargs)` - Read object contents
-- `open(path, mode, **kwargs)` - Open an object for reading or writing
+- `open(path, mode, **kwargs)` - Open an object for reading (write modes not supported; use `put()` instead)
 - `glob(path, maxdepth=None, **kwargs)` - Find objects matching a pattern
 - `find(path, maxdepth=None, withdirs=False, **kwargs)` - Recursively list all objects
 - `put(lpath, rpath, recursive=False, **kwargs)` - Upload local file(s) as remote object(s)
