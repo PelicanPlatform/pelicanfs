@@ -60,3 +60,6 @@ testing = [
 addopts = [
     "--import-mode=importlib",
 ]
+markers = [
+    "integration: marks tests as integration tests (require live OSDF infrastructure)",
+]
