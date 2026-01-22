@@ -4,6 +4,10 @@ This file is not meant for upload - it's for validation purposes only.
 
 Note: This only tests examples that use real, publicly accessible paths.
 Examples with placeholder paths (like /namespace/remote/path/) are not tested.
+
+These tests require live OSDF infrastructure and are marked as integration tests.
+Run with: pytest -m integration
+Skip with: pytest -m "not integration"
 """
 import os
 import tempfile
@@ -12,6 +16,9 @@ import fsspec
 import pytest
 
 from pelicanfs import OSDFFileSystem, PelicanFileSystem
+
+# Mark all tests in this module as integration tests
+pytestmark = pytest.mark.integration
 
 
 class TestQuickStartExamples:
