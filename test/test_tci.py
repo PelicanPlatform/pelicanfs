@@ -377,9 +377,10 @@ def test_oidc_device_flow_no_token_in_output(mock_select, mock_close, mock_write
 @patch("os.read")
 @patch("os.write")
 @patch("os.close")
+@patch("os.open", side_effect=OSError("No /dev/tty"))
 @patch("select.select")
 @patch("time.time")
-def test_oidc_device_flow_timeout(mock_time, mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
+def test_oidc_device_flow_timeout(mock_time, mock_select, mock_os_open, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
     """Test that timeout is handled gracefully"""
     from pelicanfs.token_generator import TokenOperation
 
@@ -390,7 +391,8 @@ def test_oidc_device_flow_timeout(mock_time, mock_select, mock_close, mock_write
     mock_process.poll.return_value = None  # Process never finishes
 
     # Simulate time passing beyond timeout (5 minutes = 300 seconds)
-    mock_time.side_effect = [0, 301]  # start_time=0, check time=301 (exceeds 300 sec timeout)
+    # First call is for start_time, second call is in the loop timeout check
+    mock_time.side_effect = [0, 301]
 
     mock_select.return_value = ([], [], [])  # No data available
 
