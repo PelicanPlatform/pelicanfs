@@ -23,6 +23,7 @@ from urllib.parse import ParseResult, urlparse
 
 from scitokens import SciToken
 
+from pelicanfs.dir_header_parser import DirectorResponse
 from pelicanfs.exceptions import (
     InvalidDestinationURL,
     NoCredentialsException,
@@ -66,7 +67,7 @@ class TokenGenerator:
     def __init__(
         self,
         destination_url: str,
-        dir_resp: object,
+        dir_resp: Optional[DirectorResponse],
         operation: TokenOperation,
         token_name: Optional[str] = None,
         pelican_url: Optional[str] = None,
@@ -74,7 +75,7 @@ class TokenGenerator:
         pty_buffer_size: int = 1024,
         select_timeout: float = 0.1,
     ) -> None:
-        self.DirResp: object = dir_resp
+        self.DirResp: Optional[DirectorResponse] = dir_resp
         self.DestinationURL: str = destination_url
         self.PelicanURL: Optional[str] = pelican_url
         self.TokenName: Optional[str] = token_name
@@ -207,7 +208,7 @@ def _is_path_prefix(object_name: str, resource: str) -> bool:
 def token_is_valid_and_acceptable(
     jwt_serialized: str,
     object_name: str,
-    dir_resp: object,
+    dir_resp: Optional[DirectorResponse],
     operation: TokenOperation,
 ) -> Tuple[bool, datetime]:
     """
@@ -258,7 +259,7 @@ def token_is_valid_and_acceptable(
     logger.debug(f"Required scopes for operation '{operation}': {ok_scopes}")
     logger.debug(f"Token scopes: {token.get('scope')}")
 
-    token_scopes = token.get("scope", "")
+    token_scopes = token.get("scope") or ""
     scope_list = token_scopes.split()
     acceptable_scope = False
 
