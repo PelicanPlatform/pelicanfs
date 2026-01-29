@@ -52,7 +52,7 @@ def test_cache_manager_without_token_requirement():
 
 def test_get_prefix_info_returns_namespace_info():
     """Test that _get_prefix_info returns namespace_info with namespace-level token requirements"""
-    pelfs = PelicanFileSystem()
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
 
     # Mock the namespace cache to return a _CacheManager with token requirement
     cache_list = ["https://cache1.example.com", "https://cache2.example.com"]
@@ -134,7 +134,7 @@ def test_get_origin_url_parses_token_requirements(monkeypatch):
 
     from pelicanfs.core import PelicanFileSystem
 
-    pelfs = PelicanFileSystem()
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
 
     # Mock the get_director_headers method to return headers with token requirement
     async def mock_get_director_headers(fileloc, origin=False):
@@ -174,7 +174,7 @@ def test_get_origin_url_no_token_requirement(monkeypatch):
 
     from pelicanfs.core import PelicanFileSystem
 
-    pelfs = PelicanFileSystem()
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
 
     # Mock the get_director_headers method to return headers without token requirement
     async def mock_get_director_headers(fileloc, origin=False):
@@ -215,7 +215,7 @@ def test_get_dirlist_url_parses_token_requirements(monkeypatch):
 
     from pelicanfs.core import PelicanFileSystem
 
-    pelfs = PelicanFileSystem()
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
 
     # Mock the _set_director_url method
     async def mock_set_director_url():
@@ -287,7 +287,7 @@ def test_get_dirlist_url_no_token_requirement(monkeypatch):
 
     from pelicanfs.core import PelicanFileSystem
 
-    pelfs = PelicanFileSystem()
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
 
     # Mock the _set_director_url method
     async def mock_set_director_url():
