@@ -26,6 +26,7 @@
   - [2. Environment Variables](#2-environment-variables)
   - [3. Default Token Location](#3-default-token-location)
   - [4. HTCondor Token Discovery](#4-htcondor-token-discovery)
+  - [5. OIDC Device Flow (Interactive)](#5-oidc-device-flow-interactive)
   - [Token File Formats](#token-file-formats)
   - [Automatic Token Discovery](#automatic-token-discovery)
   - [Token Scopes](#token-scopes)
@@ -67,6 +68,7 @@ For comprehensive tutorials and real-world examples using PelicanFS with geoscie
 - **Write Operations**: Upload objects to Pelican Origins with proper authorization
 - **Smart Caching**: Automatic cache selection and fallback for optimal performance
 - **Token Management**: Automatic token discovery and validation for authorized operations
+- **OIDC Device Flow**: Interactive browser-based authentication via the Pelican CLI as a fallback when no token is found
 - **Scheme Support**: Works with both `pelican://` and `osdf://` URL schemes
 - **Integration**: Seamless integration with popular data science libraries (xarray, zarr, PyTorch, etc.)
 - **Async Support**: Built on async foundations for efficient I/O operations
@@ -396,6 +398,64 @@ For HTCondor environments, PelicanFS will automatically discover tokens from:
 - `_CONDOR_CREDS` environment variable
 - `.condor_creds` directory in the current working directory
 
+### 5. OIDC Device Flow (Interactive)
+
+If no valid token is found through any of the methods above, PelicanFS can interactively obtain a token using the OIDC device authorization flow. This requires the `pelican` CLI binary to be installed and available on your `PATH`.
+
+When triggered, PelicanFS will:
+
+1. Launch `pelican token fetch` with the appropriate URL and operation flags
+2. Display a URL and device code in your terminal
+3. Wait for you to authenticate in your browser
+4. Extract the resulting token automatically
+
+No extra configuration is needed — the OIDC device flow activates automatically as a last resort when no existing token is found:
+
+```python
+from pelicanfs import PelicanFileSystem
+import fsspec
+
+# Using PelicanFileSystem directly
+pelfs = PelicanFileSystem("pelican://osg-htc.org")
+content = pelfs.cat('/protected/namespace/file.txt')
+
+# Using fsspec with the osdf:// scheme
+with fsspec.open('osdf:///protected/namespace/file.txt', 'r') as f:
+    data = f.read()
+
+# Using fsspec.filesystem()
+fs = fsspec.filesystem('osdf')
+content = fs.cat('/protected/namespace/file.txt')
+```
+
+When the device flow is triggered, you will see output similar to:
+
+```
+Navigate to the following URL in a browser:
+
+https://federation.example.com/api/v1.0/auth/device?client_id=pelican-client
+
+Enter the following code:
+ABCD-EFGH
+
+Waiting for authorization...
+```
+
+You may also be prompted for a password to encrypt or decrypt the local token file:
+
+```
+Enter a password for the token file:
+```
+
+You can configure the timeout (default 300 seconds) for the device flow:
+
+```python
+pelfs = PelicanFileSystem("pelican://osg-htc.org", oidc_timeout_seconds=600)
+```
+
+> [!NOTE]
+> The OIDC device flow requires the [`pelican` CLI](https://docs.pelicanplatform.org) to be installed. If the binary is not found, PelicanFS will skip this method and raise a `NoCredentialsException`.
+
 ### Token File Formats
 
 Token files can be in two formats:
@@ -428,9 +488,10 @@ When you attempt an operation that requires authorization, PelicanFS will:
    - Has the necessary scopes for the requested operation
    - Is authorized for the specific namespace path
 4. Use the first valid token found
-5. Cache the validated token for subsequent operations
+5. If no valid token is found, attempt the [OIDC device flow](#5-oidc-device-flow-interactive) as a final fallback (requires the `pelican` CLI)
+6. Cache the validated token for subsequent operations
 
-This happens transparently without requiring manual token management. If no valid token is found, the operation will fail with a `NoCredentialsException`.
+This happens transparently without requiring manual token management. If no valid token is found and the OIDC device flow is unavailable or fails, the operation will fail with a `NoCredentialsException`.
 
 ### Token Scopes
 
@@ -636,6 +697,7 @@ Main class for interacting with Pelican federations.
 - `direct_reads` (bool, optional): If `True`, read directly from Origins instead of Caches. Default: `False`
 - `preferred_caches` (list, optional): List of preferred Cache URLs. Use `"+"` to append Director's Caches
 - `headers` (dict, optional): HTTP headers to include in requests. Use for authorization: `{"Authorization": "Bearer TOKEN"}`
+- `oidc_timeout_seconds` (int, optional): Timeout in seconds for the OIDC device flow. Default: `300`
 - `use_listings_cache` (bool, optional): Enable caching of directory listings. Default: `False`
 - `asynchronous` (bool, optional): Use async mode. Default: `False`
 - `**kwargs`: Additional arguments passed to the underlying HTTP filesystem
