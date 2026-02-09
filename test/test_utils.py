@@ -50,28 +50,41 @@ def test_remove_hostname():
     assert PelicanFileSystem._remove_host_from_paths(22) == 22
 
 
-def test_fspath():
-    pelfs = PelicanFileSystem(
-        "pelican://test-discovery-url.org",
-        skip_instance_cache=True,
-    )
-    path = "/aboslute/path"
-    assert pelfs._check_fspath(path) == path
+@pytest.mark.parametrize(
+    "discovery_url,input_path,expected_path,expected_discovery",
+    [
+        # Absolute paths pass through unchanged
+        ("pelican://test-discovery-url.org", "/absolute/path", "/absolute/path", "pelican://test-discovery-url.org/"),
+        # pelican:// URLs with matching discovery
+        ("pelican://test-discovery-url.org", "pelican://test-discovery-url.org/p2/", "/p2/", "pelican://test-discovery-url.org/"),
+        # Host-style paths (no scheme)
+        ("pelican://test-discovery-url.org", "test-discovery-url.org/p3", "/p3", "pelican://test-discovery-url.org/"),
+        # osdf:// URLs should work with OSDFFileSystem (discovery_url is osg-htc.org)
+        ("pelican://osg-htc.org", "osdf:///namespace/path", "/namespace/path", "pelican://osg-htc.org/"),
+        # Fresh filesystem receiving osdf:// should auto-configure for OSDF
+        ("", "osdf:///namespace/path", "/namespace/path", "pelican://osg-htc.org/"),
+        # Fresh filesystem receiving pelican:// should set discovery from URL
+        ("", "pelican://new-discovery-url.org/p/", "/p/", "pelican://new-discovery-url.org/"),
+    ],
+)
+def test_fspath(discovery_url, input_path, expected_path, expected_discovery):
+    pelfs = PelicanFileSystem(discovery_url, skip_instance_cache=True) if discovery_url else PelicanFileSystem(skip_instance_cache=True)
+    assert pelfs._check_fspath(input_path) == expected_path
+    assert pelfs.discovery_url == expected_discovery
 
-    assert pelfs._check_fspath("pelican://test-discovery-url.org/p2/") == "/p2/"
 
-    assert pelfs._check_fspath("test-discovery-url.org/p3") == "/p3"
-
+@pytest.mark.parametrize(
+    "discovery_url,input_path",
+    [
+        # pelican:// URL with mismatched discovery
+        ("pelican://test-discovery-url.org", "pelican://diff-disc/path"),
+        # Host-style path with mismatched discovery
+        ("pelican://test-discovery-url.org", "not-the-discovery-url.org/p3"),
+        # osdf:// URL with non-OSDF federation should fail
+        ("pelican://other-federation.org", "osdf:///namespace/path"),
+    ],
+)
+def test_fspath_invalid(discovery_url, input_path):
+    pelfs = PelicanFileSystem(discovery_url, skip_instance_cache=True)
     with pytest.raises(InvalidMetadata):
-        pelfs._check_fspath("pelican://diff-disc/path")
-
-    with pytest.raises(InvalidMetadata):
-        pelfs._check_fspath("not-the-discovery-url.org/p3")
-
-    pelfs_disc = PelicanFileSystem(skip_instance_cache=True)
-
-    assert pelfs_disc.discovery_url == ""
-
-    pelfs_disc._check_fspath("pelican://new-discovery-url.org/p/")
-
-    assert pelfs_disc.discovery_url == "pelican://new-discovery-url.org/"
+        pelfs._check_fspath(input_path)
