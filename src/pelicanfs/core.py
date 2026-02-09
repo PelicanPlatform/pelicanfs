@@ -1016,18 +1016,30 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         logger.debug(f"Ensuring that {path} is a pelican compatible path...")
         if not path.startswith("/"):
-            if path.startswith("pelican://"):
-                pelican_url = urllib.parse.urlparse(path)
+            if path.startswith("osdf://"):
+                # Handle osdf:// URLs - these always use the OSDF federation
+                osdf_url = urllib.parse.urlparse(path)
+                # osdf:///path parses as: scheme='osdf', netloc='', path='/path'
+                extracted_path = osdf_url.path
+                if osdf_url.netloc:
+                    # Handle malformed osdf://host/path by treating netloc as part of path
+                    extracted_path = "/" + osdf_url.netloc + osdf_url.path
+                discovery_str = "pelican://osg-htc.org/"
+                path = extracted_path
             else:
-                pelican_url = urllib.parse.urlparse("pelican://" + path)
-            discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
-            discovery_str = discovery_url.geturl()
+                if path.startswith("pelican://"):
+                    pelican_url = urllib.parse.urlparse(path)
+                else:
+                    pelican_url = urllib.parse.urlparse("pelican://" + path)
+                discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
+                discovery_str = discovery_url.geturl()
+                path = pelican_url.path
+
             if not self.discovery_url:
                 self.discovery_url = discovery_str
             elif self.discovery_url != discovery_str:
                 logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
                 raise InvalidMetadata()
-            path = pelican_url.path
         logger.debug(f"Compatible path: {path}")
         return path
 
