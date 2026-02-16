@@ -1008,6 +1008,18 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return io_wrapper
 
+    def _validate_discovery_url(self, discovery_str: str) -> None:
+        """
+        Validate that the given discovery URL matches the filesystem's discovery URL.
+        If no discovery URL is set, set it to the given value.
+        Raises InvalidMetadata if the URLs don't match.
+        """
+        if not self.discovery_url:
+            self.discovery_url = discovery_str
+        elif self.discovery_url != discovery_str:
+            logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
+            raise InvalidMetadata()
+
     def _check_fspath(self, path: str) -> str:
         """
         Given a path (either absolute or a pelican://-style URL),
@@ -1024,7 +1036,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 if osdf_url.netloc:
                     # Handle malformed osdf://host/path by treating netloc as part of path
                     extracted_path = "/" + osdf_url.netloc + osdf_url.path
-                discovery_str = "pelican://osg-htc.org/"
+                self._validate_discovery_url("pelican://osg-htc.org/")
                 path = extracted_path
             else:
                 if path.startswith("pelican://"):
@@ -1032,14 +1044,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     pelican_url = urllib.parse.urlparse("pelican://" + path)
                 discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
-                discovery_str = discovery_url.geturl()
+                self._validate_discovery_url(discovery_url.geturl())
                 path = pelican_url.path
-
-            if not self.discovery_url:
-                self.discovery_url = discovery_str
-            elif self.discovery_url != discovery_str:
-                logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
-                raise InvalidMetadata()
         logger.debug(f"Compatible path: {path}")
         return path
 
