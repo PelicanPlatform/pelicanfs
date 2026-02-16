@@ -41,6 +41,7 @@ from .dir_header_parser import (
 )
 from .exceptions import (
     BadDirectorResponse,
+    InvalidDestinationURL,
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
@@ -1027,25 +1028,34 @@ class PelicanFileSystem(AsyncFileSystem):
         filesystem object and return the path.
         """
         logger.debug(f"Ensuring that {path} is a pelican compatible path...")
-        if not path.startswith("/"):
-            if path.startswith("osdf://"):
-                # Handle osdf:// URLs - these always use the OSDF federation
-                osdf_url = urllib.parse.urlparse(path)
-                # osdf:///path parses as: scheme='osdf', netloc='', path='/path'
-                extracted_path = osdf_url.path
-                if osdf_url.netloc:
-                    # Handle malformed osdf://host/path by treating netloc as part of path
-                    extracted_path = "/" + osdf_url.netloc + osdf_url.path
-                self._validate_discovery_url("pelican://osg-htc.org/")
-                path = extracted_path
+        parsed = urllib.parse.urlparse(path)
+        discovery_url = None
+
+        if parsed.scheme == "osdf":
+            # Handle osdf:// URLs - these always use the OSDF federation
+            discovery_url = "pelican://osg-htc.org/"
+            # osdf:///path parses as: scheme='osdf', netloc='', path='/path'
+            path = parsed.path
+            if parsed.netloc:
+                # Handle malformed osdf://host/path by treating netloc as part of path
+                path = "/" + parsed.netloc + parsed.path
+        elif parsed.scheme == "pelican":
+            discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
+            path = parsed.path
+        elif parsed.scheme != "":
+            raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
+        elif not path.startswith("/"):
+            pelican_url = urllib.parse.urlparse("pelican://" + path)
+            discovery_url = pelican_url._replace(path="/", fragment="", query="", params="").geturl()
+            path = pelican_url.path
+        else:
+            if not self.discovery_url:
+                raise InvalidMetadata("No discovery URL set")
             else:
-                if path.startswith("pelican://"):
-                    pelican_url = urllib.parse.urlparse(path)
-                else:
-                    pelican_url = urllib.parse.urlparse("pelican://" + path)
-                discovery_url = pelican_url._replace(path="/", fragment="", query="", params="")
-                self._validate_discovery_url(discovery_url.geturl())
-                path = pelican_url.path
+                discovery_url = self.discovery_url
+
+        self._validate_discovery_url(discovery_url)
+
         logger.debug(f"Compatible path: {path}")
         return path
 
