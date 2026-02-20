@@ -969,8 +969,9 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _check_fspath(self, path: str) -> str:
         """
-        Given a path, check that if it a URL, that the scheme is pelican:// or osdf:// and return
-        the path component of the URL. If the path is not a URL, return the path as is.
+        Given a path, check that if it is a URL, that the scheme is pelican:// or osdf:// and return
+        the path component of the URL. If the path is an absolute path (starts with /), return it unchanged.
+        Relative paths are treated as pelican URLs where the first component is the hostname.
         """
         logger.debug(f"Ensuring that {path} is a pelican compatible path...")
         parsed = urllib.parse.urlparse(path)
@@ -984,7 +985,7 @@ class PelicanFileSystem(AsyncFileSystem):
             path = parsed.path
             if parsed.netloc:
                 # Handle malformed osdf://host/path by treating netloc as part of path
-                path = PurePosixPath("/" + parsed.netloc + parsed.path)
+                path = str(PurePosixPath("/" + parsed.netloc + parsed.path))
         elif parsed.scheme == "pelican":
             discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
@@ -992,6 +993,10 @@ class PelicanFileSystem(AsyncFileSystem):
         elif parsed.scheme != "":
             raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
         elif not path.startswith("/"):
+            # When path has no scheme and is not absolute (e.g., "host.example.com/path"),
+            # treat it as a pelican URL where the first component is the hostname
+            # This is necessary because some upstream libraries (e.g., xarray) will pass in a path and
+            # hostname without a scheme.
             pelican_url = urllib.parse.urlparse("pelican://" + path)
             discovery_url = pelican_url._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
