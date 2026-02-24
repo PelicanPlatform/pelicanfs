@@ -117,8 +117,8 @@ class TokenContentIterator:
         index (int): Internal index of the current fallback cred_location
     """
 
-    location: str
-    name: str
+    location: Optional[str] = None
+    name: Optional[str] = None
     operation: Optional[object] = None
     destination_url: Optional[str] = None
     pelican_url: Optional[str] = None
@@ -215,7 +215,7 @@ class TokenContentIterator:
                         # Non-blocking read with timeout
                         import msvcrt
 
-                        if msvcrt.kbhit() or process.stdout:
+                        if process.stdout and (msvcrt.kbhit() or process.stdout):
                             return process.stdout.read(self.pty_buffer_size)
                         return b""
                     except Exception:
@@ -489,7 +489,8 @@ class TokenContentIterator:
                                 logger.warning(f"Error reading token from {token_path}: {err}")
 
                 case TokenDiscoveryMethod.HTCONDOR_DISCOVERY:
-                    self.cred_locations = self.discoverHTCondorTokenLocations(self.name)
+                    if self.name:
+                        self.cred_locations = self.discoverHTCondorTokenLocations(self.name)
                     # HTCONDOR_FALLBACK will be handled in the next iteration
 
                 case TokenDiscoveryMethod.HTCONDOR_FALLBACK:

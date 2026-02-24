@@ -37,6 +37,10 @@ repos:
     -   id: black
         language_version: python3.12
         args: ["--line-length=200"]
+-   repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.391
+    hooks:
+    -   id: pyright
 
 # Global exclusion for all hooks
 exclude: ^examples/

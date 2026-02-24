@@ -1,0 +1,11 @@
+{
+  "include": ["src"],
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false,
+  "reportMissingImports": false,
+  "reportUnknownMemberType": false,
+  "reportUnknownArgumentType": false,
+  "reportUnknownVariableType": false,
+  "reportIncompatibleMethodOverride": false,
+  "reportAttributeAccessIssue": "warning"
+}

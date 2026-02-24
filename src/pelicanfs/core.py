@@ -395,7 +395,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if session:
             session.headers["Authorization"] = f"Bearer {token}"
 
-    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str:
+    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> Optional[str]:
         """
         Handle token generation if required by the director response.
 
@@ -521,10 +521,10 @@ class PelicanFileSystem(AsyncFileSystem):
         fparsed = urllib.parse.urlparse(fileloc)
         # Removing the query if need be
         try:
-            cache_url, director_response = self._match_namespace(fparsed.path)
-            if cache_url:
-                logger.debug(f"Found previously working cache: {cache_url}")
-                return cache_url, director_response
+            cached_url, cached_director_response = self._match_namespace(fparsed.path)
+            if cached_url:
+                logger.debug(f"Found previously working cache: {cached_url}")
+                return cached_url, cached_director_response
         except NoAvailableSource:
             # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
             # Fall through to discover caches
@@ -554,15 +554,15 @@ class PelicanFileSystem(AsyncFileSystem):
                 new_caches = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
                 for cache in old_cache_list:
                     if cache == "+":
-                        for cache_url in new_caches:
-                            if cache_url not in cache_set:
-                                cache_set.add(cache_url)
-                                cache_list.append(cache_url)
+                        for new_cache_url in new_caches:
+                            if new_cache_url not in cache_set:
+                                cache_set.add(new_cache_url)
+                                cache_list.append(new_cache_url)
                     else:
-                        cache_set.add(cache_url)
+                        cache_set.add(cache)
                         cache_list.append(cache)
-            if not cache_list:
-                cache_list = new_caches
+                if not cache_list:
+                    cache_list = new_caches
         else:
             # Use director-provided caches
             cache_list = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
@@ -611,10 +611,11 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.error("No working cache found")
             raise NoAvailableSource()
 
+        working_url = cache_list[0]
         with self._namespace_lock:
             self._namespace_cache[namespace] = _CacheManager(cache_list, director_response)
 
-        return updated_url, director_response
+        return working_url, director_response
 
     async def get_origin_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
         """
@@ -630,7 +631,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return origin, director_response
 
-    async def _set_director_url(self) -> str:
+    async def _set_director_url(self) -> None:
         if not self.director_url:
             metadata_json = await self._discover_federation_metadata(self.discovery_url)
             # Ensure the director url has a '/' at the end
@@ -739,6 +740,7 @@ class PelicanFileSystem(AsyncFileSystem):
             return
         namespace_info.cache_manager.bad_cache(bad_cache)
 
+    @staticmethod
     def _dirlist_dec(func):
         """
         Decorator function which, when given a namespace location, get the url for the dirlist location from the headers
@@ -1088,9 +1090,9 @@ class PelicanFileSystem(AsyncFileSystem):
             raise NotImplementedError("Write mode is not supported for open(). Use put() or pipe() to write files.")
 
         if self.direct_reads:
-            data_url, director_response = sync(self.loop, self.get_origin_url, path)
+            data_url, director_response = sync(self.loop, self.get_origin_url, path)  # type: ignore[misc]
         else:
-            data_url, director_response = sync(self.loop, self.get_working_cache, path)
+            data_url, director_response = sync(self.loop, self.get_working_cache, path)  # type: ignore[misc]
 
         # Handle token generation if required
         operation = self._get_token_operation("open")
@@ -1128,6 +1130,7 @@ class PelicanFileSystem(AsyncFileSystem):
             self._access_stats.add_response(path, ar)
         return fp
 
+    @staticmethod
     def _cache_dec(func):
         """
         Decorator function which, when given a namespace location, finds the best working cache that serves the namespace,
@@ -1164,6 +1167,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return wrapper
 
+    @staticmethod
     def _cache_multi_dec(func):
         """
         Decorator function which, when given a list of namespace location, finds the best working cache that serves the namespace,
