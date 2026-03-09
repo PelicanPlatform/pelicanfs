@@ -1266,10 +1266,117 @@ class PelicanFileSystem(AsyncFileSystem):
         results = await self.http_file_system._info(path, **kwargs)
         return self._remove_host_from_paths(results)
 
-    @_cache_dec
-    async def _get(self, rpath, lpath, **kwargs):
-        results = await self.http_file_system._get(rpath, lpath, **kwargs)
-        return self._remove_host_from_paths(results)
+    async def _get(self, rpath, lpath, recursive=False, callback=None, maxdepth=None, **kwargs):
+        """
+        Copy file(s) to local.
+
+        This override is necessary because the base fsspec _get method only filters out
+        directories when `not recursive or maxdepth is not None`. When `recursive=True`
+        without maxdepth, directories are passed to _get_file which tries to GET them,
+        causing 403 errors on cache servers that don't serve directories via GET.
+        """
+        import os
+        from glob import has_magic
+
+        from fsspec.callbacks import DEFAULT_CALLBACK
+        from fsspec.implementations.local import (
+            LocalFileSystem,
+            make_path_posix,
+            trailing_sep,
+        )
+        from fsspec.utils import other_paths
+
+        if callback is None:
+            callback = DEFAULT_CALLBACK
+
+        path = self._check_fspath(rpath)
+        logger.debug(f"_get: Starting for path={path}, recursive={recursive}")
+        logger.debug(f"_get: self id={id(self)}, self.token before get_working_cache: {self.token[:30] if self.token else None}...")
+
+        if self.direct_reads:
+            data_url, director_response = await self.get_origin_url(path)
+        else:
+            data_url, director_response = await self.get_working_cache(path)
+
+        logger.debug(f"_get: self.token AFTER get_working_cache: {self.token[:30] if self.token else None}...")
+
+        # Handle token generation if required
+        operation = self._get_token_operation("_get")
+        await self._handle_token_generation(data_url, director_response, operation)
+
+        logger.debug(f"_get: self id={id(self)}, self.token AFTER _handle_token_generation: {self.token[:30] if self.token else None}...")
+        logger.debug("_get: About to call _expand_path")
+        logger.debug(f"_get: http_file_system._ls = {self.http_file_system._ls}")
+        logger.debug(f"_get: http_file_system._ls.__self__ id = {id(self.http_file_system._ls.__self__) if hasattr(self.http_file_system._ls, '__self__') else 'N/A'}")
+        logger.debug(f"_get: expected self._ls_from_http = {self._ls_from_http}")
+        logger.debug(f"_get: expected self._ls_from_http.__self__ id = {id(self._ls_from_http.__self__) if hasattr(self._ls_from_http, '__self__') else 'N/A'}")
+
+        # Now perform the actual _get logic with directory filtering
+        if isinstance(lpath, list) and isinstance(rpath, list):
+            # No need to expand paths when both source and destination
+            # are provided as lists
+            rpaths = rpath
+            lpaths = lpath
+        else:
+            source_is_str = isinstance(rpath, str)
+            # First check for rpath trailing slash as _strip_protocol removes it
+            source_not_trailing_sep = source_is_str and not trailing_sep(rpath)
+
+            # Use the data_url (cache URL) for expansion
+            rpaths = await self.http_file_system._expand_path(data_url, recursive=recursive, maxdepth=maxdepth)
+
+            # CRITICAL FIX: Always filter out directories to prevent 403 errors
+            # when trying to GET a directory from the cache server.
+            # The base fsspec only filters when `not recursive or maxdepth is not None`,
+            # but cache servers return 403 for directory GET requests.
+            if source_is_str:
+                filtered_rpaths = []
+                for p in rpaths:
+                    if trailing_sep(p):
+                        continue
+                    is_dir = await self.http_file_system._isdir(p)
+                    if is_dir:
+                        continue
+                    filtered_rpaths.append(p)
+                rpaths = filtered_rpaths
+                if not rpaths:
+                    return
+
+            lpath = make_path_posix(lpath)
+            source_is_file = len(rpaths) == 1
+            dest_is_dir = isinstance(lpath, str) and (trailing_sep(lpath) or LocalFileSystem().isdir(lpath))
+
+            exists = source_is_str and ((has_magic(data_url) and source_is_file) or (not has_magic(data_url) and dest_is_dir and source_not_trailing_sep))
+            lpaths = other_paths(
+                rpaths,
+                lpath,
+                exists=exists,
+                flatten=not source_is_str,
+            )
+
+        [os.makedirs(os.path.dirname(lp), exist_ok=True) for lp in lpaths]
+        batch_size = kwargs.pop("batch_size", self.http_file_system.batch_size)
+
+        from fsspec.asyn import _run_coros_in_chunks
+
+        coros = []
+        callback.set_size(len(lpaths))
+        for lp, rp in zip(lpaths, rpaths):
+            get_file = callback.branch_coro(self.http_file_system._get_file)
+            coros.append(get_file(rp, lp, **kwargs))
+
+        try:
+            results = await _run_coros_in_chunks(coros, batch_size=batch_size, callback=callback)
+        except Exception as e:
+            if not self.direct_reads:
+                self._bad_cache(data_url, e)
+            raise
+
+        if not self.direct_reads:
+            ar = _AccessResp(data_url, True)
+            self._access_stats.add_response(path, ar)
+
+        return self._remove_host_from_paths(results) if results else None
 
     @_cache_multi_dec
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
