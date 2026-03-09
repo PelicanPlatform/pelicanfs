@@ -14,11 +14,75 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import json
-from unittest.mock import mock_open, patch
+import sys
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
 from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod
+
+
+class MockPexpectChild:
+    """Mock pexpect child process for simulating pelican binary interaction."""
+
+    def __init__(self, interactions, exit_status=0):
+        """
+        Args:
+            interactions: List of tuples defining the interaction sequence.
+                Each tuple is (pattern_index, before_text, after_text)
+                where pattern_index maps to:
+                    0 = password prompt
+                    1 = OIDC URL
+                    2 = EOF
+                    3 = TIMEOUT
+            exit_status: The exit status code to return
+        """
+        self.interactions = list(interactions)
+        self.interaction_index = 0
+        self.before = ""
+        self.after = ""
+        self.exitstatus = exit_status
+        self.password_received = None
+        self._closed = False
+
+    def expect(self, patterns):
+        if self.interaction_index >= len(self.interactions):
+            raise EOFError("End of interactions")
+
+        interaction = self.interactions[self.interaction_index]
+        self.interaction_index += 1
+
+        pattern_index, before, after = interaction
+        self.before = before
+        self.after = after
+        return pattern_index
+
+    def sendline(self, text):
+        self.password_received = text
+
+    def close(self, force=False):
+        self._closed = True
+
+
+class MockEOF(Exception):
+    """Mock EOF exception."""
+
+    pass
+
+
+class MockTIMEOUT(Exception):
+    """Mock TIMEOUT exception."""
+
+    pass
+
+
+@pytest.fixture
+def mock_pexpect():
+    """Create a mock pexpect module."""
+    mock_module = MagicMock()
+    mock_module.EOF = MockEOF
+    mock_module.TIMEOUT = MockTIMEOUT
+    return mock_module
 
 
 @pytest.fixture(autouse=True)
@@ -196,151 +260,133 @@ def test_oidc_device_flow_binary_not_found(mock_which, caplog):
     assert any("pelican' binary is installed" in record.message for record in caplog.records)
 
 
-@patch("shutil.which", return_value="/usr/bin/pelican")
-@patch("pty.openpty")
-@patch("subprocess.Popen")
-@patch("os.read")
-@patch("os.write")
-@patch("os.close")
-@patch("select.select")
-def test_oidc_device_flow_successful_token_acquisition(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
+def test_oidc_device_flow_successful_token_acquisition(mock_pexpect):
     """Test successful token acquisition via OIDC device flow"""
     from pelicanfs.token_generator import TokenOperation
 
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 
-    # Mock PTY and subprocess
-    mock_openpty.return_value = (100, 101)
-    mock_process = mock_popen.return_value
-    mock_process.returncode = 0
-    mock_process.poll.side_effect = [None, 0]
-
-    # Mock output data
-    full_output = (
-        b"WARNING: empty password provided; the credentials will be saved unencrypted on disk\n"
-        b"To approve credentials for this operation, please navigate to the following URL and approve the request:\n"
-        b"https://example-issuer.org/device?user_code=ABC-123-XYZ\n" + fake_jwt.encode() + b"\n"
+    # Mock pexpect child with OIDC URL display followed by token output
+    mock_child = MockPexpectChild(
+        [
+            (1, "WARNING: empty password provided\n", "https://example-issuer.org/device?user_code=ABC-123-XYZ"),  # OIDC URL
+            (2, f"\n{fake_jwt}\n", ""),  # EOF with token
+        ]
     )
 
-    mock_read.side_effect = [full_output, b""]
-    mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
+    mock_pexpect.spawn = MagicMock(return_value=mock_child)
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
+    with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
+        with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
+            with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
+                iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
-    token = next(iterator)
+                token = next(iterator)
 
     assert token.startswith("eyJ")
     assert len(token.split(".")) == 3
     assert token == fake_jwt
 
-    mock_popen.assert_called_once()
-    call_args = mock_popen.call_args[0][0]
-    assert "pelican" in call_args
-    assert "token" in call_args
-    assert "fetch" in call_args
-    assert "pelican://example.com/path" in call_args
-    assert "-r" in call_args
+    # Verify spawn was called with expected command
+    mock_pexpect.spawn.assert_called_once()
+    call_args = mock_pexpect.spawn.call_args
+    cmd_str = call_args[0][0]
+    assert "pelican" in cmd_str
+    assert "token" in cmd_str
+    assert "fetch" in cmd_str
+    assert "pelican://example.com/path" in cmd_str
+    assert "-r" in cmd_str
 
 
-@patch("shutil.which", return_value="/usr/bin/pelican")
-@patch("pty.openpty")
-@patch("subprocess.Popen")
-@patch("os.read")
-@patch("os.write")
-@patch("os.close")
-@patch("select.select")
-def test_oidc_device_flow_with_warning_prefix(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
+def test_oidc_device_flow_with_warning_prefix(mock_pexpect):
     """Test token extraction when output has warning prefix"""
     from pelicanfs.token_generator import TokenOperation
 
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.abc123def456"
 
-    # Mock PTY
-    mock_openpty.return_value = (100, 101)
+    # Mock pexpect child with warning message followed by token
+    mock_child = MockPexpectChild(
+        [
+            (2, f"Token was acquired from issuer but it does not appear valid for transfer; trying anyway\n{fake_jwt}\n", ""),  # EOF with warning + token
+        ]
+    )
 
-    mock_process = mock_popen.return_value
-    mock_process.returncode = 0
-    mock_process.poll.side_effect = [None, 0]
+    mock_pexpect.spawn = MagicMock(return_value=mock_child)
 
-    full_output = b"Token was acquired from issuer but it does not appear valid for transfer; trying anyway\n" + fake_jwt.encode() + b"\n"
-    mock_read.side_effect = [full_output, b""]
-    mock_select.side_effect = [([100], [], []), ([], [], []), ([], [], [])]
+    with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
+        with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
+            with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
+                iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
-
-    token = next(iterator)
+                token = next(iterator)
 
     assert token.startswith("eyJ")
     assert "trying anyway" not in token  # Warning prefix should not be in token
     assert token == fake_jwt
 
 
-@patch("shutil.which", return_value="/usr/bin/pelican")
-@patch("pty.openpty")
-@patch("subprocess.Popen")
-@patch("os.read")
-@patch("os.write")
-@patch("os.close")
-@patch("select.select")
-def test_oidc_device_flow_write_operation(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
+def test_oidc_device_flow_write_operation(mock_pexpect):
     """Test that write operation uses -w flag"""
     from pelicanfs.token_generator import TokenOperation
 
     fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ3cml0ZSJ9.xyz789abc"
 
-    # Mock PTY
-    mock_openpty.return_value = (100, 101)
+    # Mock pexpect child with token output
+    mock_child = MockPexpectChild(
+        [
+            (2, f"{fake_jwt}\n", ""),  # EOF with token
+        ]
+    )
 
-    mock_process = mock_popen.return_value
-    mock_process.returncode = 0
-    mock_process.poll.side_effect = [None, 0]
+    mock_pexpect.spawn = MagicMock(return_value=mock_child)
 
-    mock_read.side_effect = [fake_jwt.encode() + b"\n", b""]
-    mock_select.side_effect = [([100], [], []), ([], [], [])]
+    with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
+        with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
+            with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
+                iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, pelican_url="pelican://example.com/write/path")
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenWrite, pelican_url="pelican://example.com/write/path")
-    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
-
-    token = next(iterator)
+                token = next(iterator)
 
     # Verify -w flag was used for write operation
-    call_args = mock_popen.call_args[0][0]
-    assert "pelican" in call_args
-    assert "token" in call_args
-    assert "fetch" in call_args
-    assert "pelican://example.com/write/path" in call_args
-    assert "-w" in call_args
+    mock_pexpect.spawn.assert_called_once()
+    cmd_str = mock_pexpect.spawn.call_args[0][0]
+    assert "pelican" in cmd_str
+    assert "token" in cmd_str
+    assert "fetch" in cmd_str
+    assert "pelican://example.com/write/path" in cmd_str
+    assert "-w" in cmd_str
     assert token == fake_jwt
 
 
-@patch("shutil.which", return_value="/usr/bin/pelican")
-@patch("pty.openpty")
-@patch("subprocess.Popen")
-@patch("os.read")
-@patch("os.write")
-@patch("os.close")
-@patch("select.select")
-def test_oidc_device_flow_binary_fails(mock_select, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_which):
+def test_oidc_device_flow_binary_fails(mock_pexpect):
     """Test that StopIteration is raised when pelican binary exits with error"""
     from pelicanfs.token_generator import TokenOperation
 
-    # Mock PTY
-    mock_openpty.return_value = (100, 101)
+    # Mock pexpect child with error exit status
+    mock_child = MockPexpectChild(
+        [
+            (2, "Error: failed to authenticate\n", ""),  # EOF with error
+        ],
+        exit_status=1,
+    )
 
-    mock_process = mock_popen.return_value
-    mock_process.returncode = 1
-    mock_process.poll.side_effect = [None, 1]
+    mock_pexpect.spawn = MagicMock(return_value=mock_child)
 
-    mock_read.side_effect = [b"Error: failed to authenticate\n", b""]
-    mock_select.side_effect = [([100], [], []), ([], [], [])]
+    with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
+        with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
+            with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
+                iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
-    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path")
-    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
-
-    with pytest.raises(StopIteration):
-        next(iterator)
+                with pytest.raises(StopIteration):
+                    next(iterator)
 
 
 @patch("shutil.which", return_value="/usr/bin/pelican")
