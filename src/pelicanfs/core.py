@@ -768,7 +768,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if self.use_listings_cache and path in self.dircache:
             out = self.dircache[path]
         else:
-            out = await self._ls_real(path, detail=detail)
+            out = await self._ls_real(path, detail=detail, **kwargs)
             self.dircache[path] = out
         return self._remove_host_from_paths(out)
 
@@ -794,7 +794,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if self.use_listings_cache and collections_url in self.dircache:
             out = self.dircache[collections_url]
         else:
-            out = await self._ls_real(collections_url, detail=detail)
+            out = await self._ls_real(collections_url, detail=detail, **kwargs)
             self.dircache[collections_url] = out
         return out
 
