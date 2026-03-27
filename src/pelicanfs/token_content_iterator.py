@@ -13,16 +13,13 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import io
 import json
 import logging
 import os
 import platform
 import re
 import shutil
-import subprocess
-import sys
-import time
+import traceback
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import List, Optional
@@ -32,18 +29,32 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
-# Platform-specific imports
+# Platform-specific imports for pexpect
 _IS_WINDOWS = platform.system() == "Windows"
-if not _IS_WINDOWS:
-    import pty
-    import select
+
+# Try to import pexpect (Unix) or wexpect (Windows)
+_PEXPECT_AVAILABLE = False
+_WEXPECT_AVAILABLE = False
+
+if _IS_WINDOWS:
+    try:
+        import wexpect
+
+        _WEXPECT_AVAILABLE = True
+    except ImportError:
+        pass
+else:
+    try:
+        import pexpect
+
+        _PEXPECT_AVAILABLE = True
+    except ImportError:
+        pass
 
 logger = logging.getLogger("fsspec.pelican")
 
 # Default constants for OIDC device flow (can be overridden)
 DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
-DEFAULT_PTY_BUFFER_SIZE = 1024
-DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -110,11 +121,9 @@ class TokenContentIterator:
         destination_url (str): Destination URL for the token request.
         pelican_url (str): Pelican protocol URL (pelican://<federation-url>/<path>) for OIDC device flow.
         oidc_timeout_seconds (int): Timeout in seconds for OIDC device flow (default: 300).
-        pty_buffer_size (int): Buffer size for PTY I/O (default: 1024).
-        select_timeout (float): Timeout in seconds for select() calls (default: 0.1).
         method_index (int): Internal index of the current discovery method.
         cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
-        index (int): Internal index of the current fallback cred_location
+        fallback_index (int): Internal index of the current fallback cred_location
     """
 
     location: str
@@ -123,8 +132,6 @@ class TokenContentIterator:
     destination_url: Optional[str] = None
     pelican_url: Optional[str] = None
     oidc_timeout_seconds: int = DEFAULT_OIDC_TIMEOUT_SECONDS
-    pty_buffer_size: int = DEFAULT_PTY_BUFFER_SIZE
-    select_timeout: float = DEFAULT_SELECT_TIMEOUT
     method_index: int = 0
     cred_locations: List[str] = field(default_factory=list)
     fallback_index: int = 0
@@ -167,220 +174,181 @@ class TokenContentIterator:
 
         return flags
 
+    def _is_oidc_device_flow_url(self, url: str) -> bool:
+        """
+        Check if a URL is an OIDC device flow authentication URL that users need to visit.
+
+        OIDC device flow URLs typically contain paths like /device, /activate, or similar.
+        URLs embedded in JSON debug output (containing braces, quotes) should not be treated
+        as user-facing authentication URLs.
+
+        Args:
+            url: The URL to check
+
+        Returns:
+            bool: True if this appears to be an OIDC device flow URL for user authentication
+        """
+        # If the URL contains JSON-like characters, it's probably embedded in debug output
+        if "{" in url or "}" in url or '"' in url or ':{"' in url:
+            return False
+
+        # OIDC device flow URLs typically have these path patterns
+        oidc_patterns = ["/device", "/activate", "/oauth", "/authorize", "/login"]
+        url_lower = url.lower()
+        return any(pattern in url_lower for pattern in oidc_patterns)
+
+    def _display_url_for_user(self, url: str) -> None:
+        """
+        Display a URL to the user, making it clickable in Jupyter environments.
+
+        Only creates clickable links for actual OIDC device flow URLs that users
+        need to visit. URLs embedded in debug JSON output are not made clickable.
+
+        Args:
+            url: The URL to potentially display as clickable
+        """
+        # Only create clickable links for actual OIDC device flow URLs
+        if not self._is_oidc_device_flow_url(url):
+            # This is likely a URL embedded in debug output - just print it normally
+            # without creating a clickable link
+            return
+
+        # Filter out tokens
+        jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+        filtered_url = re.sub(jwt_pattern, "[TOKEN_REDACTED]", url)
+
+        # Try to make URLs clickable in Jupyter/IPython
+        try:
+            from IPython.display import HTML, display
+
+            display(HTML(f'<a href="{filtered_url}" target="_blank">Click here to authenticate: {filtered_url}</a>'))
+        except ImportError:
+            pass
+
+        # Always print the text version
+        print(f"Please visit: {filtered_url}")
+
     def _get_token_from_pelican_binary(self) -> Optional[str]:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
-        Uses platform-specific approach for secure password input:
-        - Unix: pty module with stdin from /dev/tty
-        - Windows: subprocess with inherited stdin
+        Uses pexpect (Unix) or wexpect (Windows) to interact with the pelican
+        binary in a pseudo-terminal. This allows proper handling of password
+        prompts and interactive OIDC device flow regardless of the environment
+        (terminal, Jupyter, IDE, etc.).
 
         Returns:
             str: JWT token if successful, None otherwise
         """
-
         if not self.pelican_url:
             logger.warning("Cannot invoke pelican binary without pelican URL")
             return None
 
-        flags = self._get_pelican_flag()
-        cmd = ["pelican"] + ["token", "fetch", self.pelican_url] + flags
+        # Check if pexpect/wexpect is available
+        if _IS_WINDOWS:
+            if not _WEXPECT_AVAILABLE:
+                logger.warning("wexpect is required for OIDC device flow on Windows. " "Install it with: pip install wexpect")
+                return None
+        else:
+            if not _PEXPECT_AVAILABLE:
+                logger.warning("pexpect is required for OIDC device flow. " "Install it with: pip install pexpect")
+                return None
 
-        logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
+        flags = self._get_pelican_flag()
+        cmd_str = f"pelican token fetch {self.pelican_url} {' '.join(flags)}"
+
+        logger.info(f"Invoking OIDC device flow via pelican binary: {cmd_str}")
 
         try:
-            # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
-            # This lets the user see prompts and interact while we capture the output
-
-            output_data = []
-            start_time = time.time()
-
-            # Platform-specific PTY setup
+            # Use pexpect/wexpect to spawn the process with a PTY
             if _IS_WINDOWS:
-                # Windows: Let the process inherit stdin from the console for password prompts
-                # We use PIPE for stdout/stderr to capture output, but inherit stdin
-                # This allows the pelican binary to handle password prompts directly
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=None,  # Inherit stdin from parent process
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                    text=False,
-                    bufsize=0,  # Unbuffered for real-time output
-                )
-
-                def read_from_pty():
-                    """Read available data from subprocess stdout"""
-                    try:
-                        # Non-blocking read with timeout
-                        import msvcrt
-
-                        if msvcrt.kbhit() or process.stdout:
-                            return process.stdout.read(self.pty_buffer_size)
-                        return b""
-                    except Exception:
-                        return b""
-
-                def write_to_pty(data):
-                    """Not used on Windows with inherited stdin"""
-                    pass
-
-                def is_alive():
-                    """Check if process is still running"""
-                    return process.poll() is None
-
-                stdin_data_to_send = None
+                child = wexpect.spawn(cmd_str, timeout=self.oidc_timeout_seconds)
             else:
-                # Unix: use pty module
-                import termios
+                child = pexpect.spawn(cmd_str, timeout=self.oidc_timeout_seconds, encoding="utf-8")
 
-                master_fd, slave_fd = pty.openpty()
+            output_lines = []
+            jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
 
-                # Try to open /dev/tty for stdin so password prompts work correctly
-                # If /dev/tty is not available, fall back to slave_fd
+            # Patterns to expect from pelican binary
+            # The order matters - check for password prompt, OIDC URLs, EOF, and timeout
+            # Use a more specific pattern for OIDC device flow URLs to avoid matching
+            # URLs in debug JSON output
+            patterns = [
+                r"[Pp]assword[:\s]*",  # Password prompt (case-insensitive)
+                r'https?://[^\s"}\]]+/(?:device|activate|oauth|authorize|login)[^\s"}\]]*',  # OIDC device flow URL
+                pexpect.EOF if not _IS_WINDOWS else wexpect.EOF,
+                pexpect.TIMEOUT if not _IS_WINDOWS else wexpect.TIMEOUT,
+            ]
+
+            while True:
                 try:
-                    tty_fd = os.open("/dev/tty", os.O_RDWR)
-                    process = subprocess.Popen(cmd, stdin=tty_fd, stdout=slave_fd, stderr=slave_fd, text=False)
-                    os.close(tty_fd)
-                except (OSError, FileNotFoundError):
-                    # /dev/tty not available (e.g., Jupyter with redirected stdin)
-                    # Disable echo on both master and slave PTY to prevent password echo
-                    # This only affects the fallback case where stdin goes through the PTY
-                    try:
-                        # Disable echo on slave side
-                        attrs = termios.tcgetattr(slave_fd)
-                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
-                        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+                    index = child.expect(patterns)
 
-                        # Also disable echo on master side
-                        attrs = termios.tcgetattr(master_fd)
-                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
-                        termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
-                    except Exception as e:
-                        logger.debug(f"Could not disable echo on PTY: {e}")
+                    # Capture any output before the match
+                    if child.before:
+                        before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
+                        output_lines.append(before_text)
+                        # Filter line-by-line: skip JSON debug lines (containing braces)
+                        # but still print human-readable lines (e.g. the password prompt
+                        # preamble) even when debug logging produces JSON on other lines.
+                        for line in before_text.splitlines(keepends=True):
+                            filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
+                            if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
+                                print(filtered_line, end="", flush=True)
 
-                    process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
-                os.close(slave_fd)
+                    if index == 0:  # Password prompt
+                        # Get the matched text (e.g. "password: ")
+                        match_text = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                        output_lines.append(match_text)
 
-                def read_from_pty():
-                    """Read available data from Unix PTY"""
-                    ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
-                    if ready:
-                        try:
-                            return os.read(master_fd, self.pty_buffer_size)
-                        except OSError:
-                            return b""
-                    return b""
+                        # Print the matched "password:" text and flush before blocking
+                        # on getpass, so the full prompt (before_text + match_text) is
+                        # visible. Pass empty string to getpass so it doesn't double-print.
+                        import getpass
 
-                def write_to_pty(data):
-                    """Write data to Unix PTY"""
-                    os.write(master_fd, data)
+                        print(match_text, end="", flush=True)
+                        password = getpass.getpass(prompt="")
+                        child.sendline(password)
 
-                def is_alive():
-                    """Check if process is still running"""
-                    return process.poll() is None
+                    elif index == 1:  # URL (device flow)
+                        # Get the URL
+                        url = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                        output_lines.append(url)
+                        self._display_url_for_user(url)
 
-                # Check if stdin has been redirected (e.g., StringIO in Jupyter)
-                # If /dev/tty is available, the process reads from the terminal directly
-                # If not, we need to forward any redirected stdin data
-                stdin_data_to_send = None
-                try:
-                    stdin_fd = sys.stdin.fileno()
-                    # Check if stdin is redirected (not a terminal)
-                    if not os.isatty(stdin_fd):
-                        # Stdin is redirected, read the data to forward it
-                        try:
-                            stdin_data_to_send = sys.stdin.read()
-                            if stdin_data_to_send:
-                                logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
-                        except Exception as e:
-                            logger.debug(f"Could not read from redirected stdin: {e}")
-                            stdin_data_to_send = None
-                except (AttributeError, io.UnsupportedOperation):
-                    # stdin doesn't have fileno() - likely redirected (e.g., Jupyter)
-                    try:
-                        stdin_data_to_send = sys.stdin.read()
-                        if stdin_data_to_send:
-                            logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
-                    except Exception as e:
-                        logger.debug(f"Could not read from redirected stdin: {e}")
-                        stdin_data_to_send = None
-
-            def read_and_echo_output():
-                """Helper to read from PTY, echo to terminal (filtering sensitive data), and store data"""
-                data = read_from_pty()
-                if data:
-                    # Store raw data for token extraction
-                    output_data.append(data)
-
-                    # Filter sensitive information before echoing to terminal
-                    decoded_data = data.decode("utf-8", errors="replace")
-
-                    # Hide passwords and tokens using regex patterns
-                    # Pattern for JWT tokens
-                    jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
-                    filtered_data = re.sub(jwt_pattern, "[TOKEN_REDACTED]", decoded_data)
-
-                    # Try to write to stdout.buffer (for real terminals)
-                    # Fall back to stdout.write() for Jupyter/IPython environments
-                    try:
-                        sys.stdout.buffer.write(filtered_data.encode("utf-8"))
-                        sys.stdout.buffer.flush()
-                    except AttributeError:
-                        # stdout doesn't have buffer (e.g., Jupyter/IPython)
-                        sys.stdout.write(filtered_data)
-                        sys.stdout.flush()
-                return data
-
-            # Read from PTY and echo to terminal, also forward stdin to the process
-            try:
-                while True:
-                    # Check timeout
-                    if time.time() - start_time > self.oidc_timeout_seconds:
-                        process.kill()
-                        logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
-                        return None
-
-                    # Check if process is still running
-                    if not is_alive():
-                        # Process finished, read any remaining output
-                        while True:
-                            data = read_from_pty()
-                            if not data:
-                                break
+                    elif index == 2:  # EOF - process finished
+                        # Capture any remaining output
+                        if child.before:
+                            before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
+                            output_lines.append(before_text)
+                            # Filter line-by-line to skip JSON debug lines
+                            for line in before_text.splitlines(keepends=True):
+                                filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
+                                if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
+                                    print(filtered_line, end="")
                         break
 
-                    # Read subprocess output
-                    read_and_echo_output()
+                    elif index == 3:  # Timeout
+                        logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
+                        child.close(force=True)
+                        return None
 
-                    # Handle stdin forwarding (Unix only - Windows uses simpler approach)
-                    # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
-                    # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
-                    if not _IS_WINDOWS:
-                        if stdin_data_to_send:
-                            # Redirected stdin - send buffered data once
-                            try:
-                                write_to_pty(stdin_data_to_send.encode("utf-8"))
-                                stdin_data_to_send = None  # Only send once
-                            except OSError as e:
-                                logger.debug(f"Error writing redirected stdin to PTY: {e}")
-            finally:
-                # Cleanup platform-specific resources
-                if not _IS_WINDOWS:
-                    # Unix cleanup
-                    os.close(master_fd)
+                except (pexpect.EOF if not _IS_WINDOWS else wexpect.EOF):
+                    break
+                except (pexpect.TIMEOUT if not _IS_WINDOWS else wexpect.TIMEOUT):
+                    logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
+                    child.close(force=True)
+                    return None
 
-            # Wait for process to finish and get return code
-            process.wait()
-            returncode = process.returncode
+            child.close()
 
-            if returncode != 0:
-                logger.debug(f"Pelican binary exited with code {returncode}")
+            # Check exit status
+            if child.exitstatus != 0:
+                logger.debug(f"Pelican binary exited with code {child.exitstatus}")
                 return None
 
             # Extract JWT token from captured output
-            full_output = b"".join(output_data).decode("utf-8", errors="replace")
-            jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+            full_output = "".join(output_lines)
             matches = re.findall(jwt_pattern, full_output)
 
             if matches:
@@ -389,13 +357,11 @@ class TokenContentIterator:
                 return token
             else:
                 logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output}")
+                logger.debug(f"Output was: {re.sub(jwt_pattern, '[TOKEN_REDACTED]', full_output)}")
                 return None
 
         except Exception as err:
             logger.debug(f"Error invoking pelican binary: {err}")
-            import traceback
-
             logger.debug(traceback.format_exc())
             return None
 
