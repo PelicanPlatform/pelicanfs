@@ -288,22 +288,26 @@ class TokenContentIterator:
                     if child.before:
                         before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
                         output_lines.append(before_text)
-                        # Only display non-JSON debug output to the user
-                        # JSON debug output (containing braces) is logged but not printed
-                        filtered = re.sub(jwt_pattern, "[TOKEN_REDACTED]", before_text)
-                        if filtered.strip() and "{" not in filtered and "}" not in filtered:
-                            print(filtered, end="")
+                        # Filter line-by-line: skip JSON debug lines (containing braces)
+                        # but still print human-readable lines (e.g. the password prompt
+                        # preamble) even when debug logging produces JSON on other lines.
+                        for line in before_text.splitlines(keepends=True):
+                            filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
+                            if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
+                                print(filtered_line, end="", flush=True)
 
                     if index == 0:  # Password prompt
-                        # Get the matched text
+                        # Get the matched text (e.g. "password: ")
                         match_text = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
                         output_lines.append(match_text)
-                        print(match_text, end="")
 
-                        # Use getpass to securely prompt for password
+                        # Print the matched "password:" text and flush before blocking
+                        # on getpass, so the full prompt (before_text + match_text) is
+                        # visible. Pass empty string to getpass so it doesn't double-print.
                         import getpass
 
-                        password = getpass.getpass("")
+                        print(match_text, end="", flush=True)
+                        password = getpass.getpass(prompt="")
                         child.sendline(password)
 
                     elif index == 1:  # URL (device flow)
@@ -317,10 +321,11 @@ class TokenContentIterator:
                         if child.before:
                             before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
                             output_lines.append(before_text)
-                            # Only display non-JSON debug output
-                            filtered = re.sub(jwt_pattern, "[TOKEN_REDACTED]", before_text)
-                            if filtered.strip() and "{" not in filtered and "}" not in filtered:
-                                print(filtered, end="")
+                            # Filter line-by-line to skip JSON debug lines
+                            for line in before_text.splitlines(keepends=True):
+                                filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
+                                if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
+                                    print(filtered_line, end="")
                         break
 
                     elif index == 3:  # Timeout
