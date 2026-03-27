@@ -146,7 +146,7 @@ class TestOIDCDeviceFlow:
                         token = iterator._get_token_from_pelican_binary()
 
         # Verify password was requested and sent
-        mock_getpass.assert_called_once_with("")
+        mock_getpass.assert_called_once_with(prompt="")
         assert mock_child.password_received == "test_password_123"
 
         # Verify token was extracted
