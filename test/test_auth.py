@@ -78,3 +78,73 @@ def test_authz_query(httpserver: HTTPServer, get_client):
     )
 
     assert pelfs.cat("/foo/bar?authz=test") == b"hello, world!"
+
+
+def test_token_set_in_http_filesystem_kwargs(httpserver: HTTPServer, get_client):
+    """
+    Test that tokens passed via headers are set in http_file_system.kwargs.
+
+    Regression test: Ensures that when HTTPFileSystem makes requests, it includes
+    the Authorization header. Previously tokens were not properly propagated to
+    http_file_system.kwargs, causing 403 errors.
+    """
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+
+    test_token = "Bearer test_token_123"
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        headers={"Authorization": test_token},
+    )
+
+    # Token should be set in self.token
+    assert pelfs.token == test_token
+
+    # Token should also be in http_file_system.kwargs for requests
+    http_headers = pelfs.http_file_system.kwargs.get("headers", {})
+    assert http_headers.get("Authorization") == test_token
+
+
+def test_set_http_filesystem_token_updates_kwargs(httpserver: HTTPServer, get_client):
+    """
+    Test that _set_http_filesystem_token properly updates http_file_system.kwargs.
+
+    Regression test: This method is called after token generation to ensure tokens
+    are included in subsequent HTTP requests.
+    """
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    # Initially no token
+    assert pelfs.http_file_system.kwargs.get("headers", {}).get("Authorization") is None
+
+    # Set a token
+    pelfs._set_http_filesystem_token("new_token_456")
+
+    # Token should now be in http_file_system.kwargs
+    http_headers = pelfs.http_file_system.kwargs.get("headers", {})
+    assert http_headers.get("Authorization") == "Bearer new_token_456"
+
+
+def test_get_token_returns_token_without_bearer_prefix(httpserver: HTTPServer, get_client):
+    """
+    Test that _get_token() returns the token value without the Bearer prefix.
+    """
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        headers={"Authorization": "Bearer my_token"},
+    )
+
+    # _get_token should return the raw token value
+    token = pelfs._get_token()
+    assert token == "my_token"
