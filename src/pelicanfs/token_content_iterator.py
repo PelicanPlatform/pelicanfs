@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import html
 import json
 import logging
 import os
@@ -29,32 +30,39 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
-# Platform-specific imports for pexpect
+from pelicanfs.log_utils import format_token_for_log
+
+# Platform-specific pexpect/wexpect (PTY interaction for OIDC device flow)
 _IS_WINDOWS = platform.system() == "Windows"
 
-# Try to import pexpect (Unix) or wexpect (Windows)
-_PEXPECT_AVAILABLE = False
-_WEXPECT_AVAILABLE = False
+_expect_module = None
 
 if _IS_WINDOWS:
     try:
         import wexpect
 
-        _WEXPECT_AVAILABLE = True
+        _expect_module = wexpect
     except ImportError:
         pass
 else:
     try:
         import pexpect
 
-        _PEXPECT_AVAILABLE = True
+        _expect_module = pexpect
     except ImportError:
         pass
+
+_EOF = _expect_module.EOF if _expect_module is not None else None
+_TIMEOUT = _expect_module.TIMEOUT if _expect_module is not None else None
 
 logger = logging.getLogger("fsspec.pelican")
 
 # Default constants for OIDC device flow (can be overridden)
 DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
+
+# Match a line-ending password prompt (e.g. "...configuration file:"), not prose such as
+# "asked for this password whenever" (pelican 7.23+ prints several "password" mentions).
+_PASSWORD_PROMPT_PATTERN = r"[Pp]assword[^:\n]*:\s*"
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -221,7 +229,7 @@ class TokenContentIterator:
         try:
             from IPython.display import HTML, display
 
-            display(HTML(f'<a href="{filtered_url}" target="_blank">Click here to authenticate: {filtered_url}</a>'))
+            display(HTML(f'<a href="{html.escape(filtered_url, quote=True)}" target="_blank">' f"Click here to authenticate: {html.escape(filtered_url)}</a>"))
         except ImportError:
             pass
 
@@ -244,15 +252,10 @@ class TokenContentIterator:
             logger.warning("Cannot invoke pelican binary without pelican URL")
             return None
 
-        # Check if pexpect/wexpect is available
-        if _IS_WINDOWS:
-            if not _WEXPECT_AVAILABLE:
-                logger.warning("wexpect is required for OIDC device flow on Windows. " "Install it with: pip install wexpect")
-                return None
-        else:
-            if not _PEXPECT_AVAILABLE:
-                logger.warning("pexpect is required for OIDC device flow. " "Install it with: pip install pexpect")
-                return None
+        if _expect_module is None:
+            package = "wexpect" if _IS_WINDOWS else "pexpect"
+            logger.warning(f"{package} is required for OIDC device flow" + (" on Windows" if _IS_WINDOWS else "") + f". Install it with: pip install {package}")
+            return None
 
         flags = self._get_pelican_flag()
         cmd_str = f"pelican token fetch {self.pelican_url} {' '.join(flags)}"
@@ -260,11 +263,11 @@ class TokenContentIterator:
         logger.info(f"Invoking OIDC device flow via pelican binary: {cmd_str}")
 
         try:
-            # Use pexpect/wexpect to spawn the process with a PTY
+            # Spawn with a PTY; encoding= is pexpect-only (wexpect uses bytes)
             if _IS_WINDOWS:
-                child = wexpect.spawn(cmd_str, timeout=self.oidc_timeout_seconds)
+                child = _expect_module.spawn(cmd_str, timeout=self.oidc_timeout_seconds, echo=False)
             else:
-                child = pexpect.spawn(cmd_str, timeout=self.oidc_timeout_seconds, encoding="utf-8")
+                child = _expect_module.spawn(cmd_str, timeout=self.oidc_timeout_seconds, encoding="utf-8", echo=False)
 
             output_lines = []
             jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
@@ -274,10 +277,10 @@ class TokenContentIterator:
             # Use a more specific pattern for OIDC device flow URLs to avoid matching
             # URLs in debug JSON output
             patterns = [
-                r"[Pp]assword[:\s]*",  # Password prompt (case-insensitive)
+                _PASSWORD_PROMPT_PATTERN,
                 r'https?://[^\s"}\]]+/(?:device|activate|oauth|authorize|login)[^\s"}\]]*',  # OIDC device flow URL
-                pexpect.EOF if not _IS_WINDOWS else wexpect.EOF,
-                pexpect.TIMEOUT if not _IS_WINDOWS else wexpect.TIMEOUT,
+                _EOF,
+                _TIMEOUT,
             ]
 
             while True:
@@ -309,6 +312,7 @@ class TokenContentIterator:
                         print(match_text, end="", flush=True)
                         password = getpass.getpass(prompt="")
                         child.sendline(password)
+                        del password
 
                     elif index == 1:  # URL (device flow)
                         # Get the URL
@@ -333,9 +337,9 @@ class TokenContentIterator:
                         child.close(force=True)
                         return None
 
-                except (pexpect.EOF if not _IS_WINDOWS else wexpect.EOF):
+                except _EOF:
                     break
-                except (pexpect.TIMEOUT if not _IS_WINDOWS else wexpect.TIMEOUT):
+                except _TIMEOUT:
                     logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
                     child.close(force=True)
                     return None
@@ -437,7 +441,7 @@ class TokenContentIterator:
                         logger.debug(f"Using token from default bearer token file: {token_file}")
                         try:
                             token = get_token_from_file(token_file)
-                            logger.debug(f"Successfully read token from default file: {token[:30] if token else 'None'}...")
+                            logger.debug("Successfully read token from default file: %s", format_token_for_log(token))
                             return token
                         except Exception as err:
                             logger.warning(f"Could not read default bearer token: {err}")

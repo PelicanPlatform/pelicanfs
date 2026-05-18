@@ -7,7 +7,9 @@ These tests mock the pelican binary interaction via pexpect to verify:
 3. Token extraction from pelican binary output
 4. Error handling for timeouts and failures
 """
+import re
 import sys
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,7 +17,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from scitokens import SciToken
 
-from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod
+from pelicanfs.token_content_iterator import (
+    _PASSWORD_PROMPT_PATTERN,
+    TokenContentIterator,
+    TokenDiscoveryMethod,
+)
 from pelicanfs.token_generator import TokenOperation
 
 
@@ -96,9 +102,20 @@ class MockTIMEOUT(Exception):
     pass
 
 
+@contextmanager
+def patch_expect_module(mock_module):
+    """Patch the bound pexpect/wexpect module and exception constants."""
+    with (
+        patch("pelicanfs.token_content_iterator._expect_module", mock_module),
+        patch("pelicanfs.token_content_iterator._EOF", MockEOF),
+        patch("pelicanfs.token_content_iterator._TIMEOUT", MockTIMEOUT),
+    ):
+        yield
+
+
 @pytest.fixture
-def mock_pexpect():
-    """Create a mock pexpect module."""
+def mock_expect_module():
+    """Create a mock pexpect/wexpect module."""
     mock_module = MagicMock()
     mock_module.EOF = MockEOF
     mock_module.TIMEOUT = MockTIMEOUT
@@ -118,7 +135,7 @@ def iterator_factory():
 class TestOIDCDeviceFlow:
     """Test OIDC device flow via pelican binary."""
 
-    def test_password_prompt_handling(self, mock_pexpect, iterator_factory):
+    def test_password_prompt_handling(self, mock_expect_module, iterator_factory):
         """Test that password prompts are handled correctly."""
         test_token = generate_test_token()
 
@@ -132,18 +149,16 @@ class TestOIDCDeviceFlow:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
         mock_getpass = MagicMock(return_value="test_password_123")
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    with patch("getpass.getpass", mock_getpass):
-                        iterator = iterator_factory()
-                        # Mock _pelican_binary_exists to return True
-                        iterator._pelican_binary_exists = MagicMock(return_value=True)
+        with patch_expect_module(mock_expect_module):
+            with patch("getpass.getpass", mock_getpass):
+                iterator = iterator_factory()
+                # Mock _pelican_binary_exists to return True
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
 
-                        token = iterator._get_token_from_pelican_binary()
+                token = iterator._get_token_from_pelican_binary()
 
         # Verify password was requested and sent
         mock_getpass.assert_called_once_with(prompt="")
@@ -152,7 +167,7 @@ class TestOIDCDeviceFlow:
         # Verify token was extracted
         assert token == test_token
 
-    def test_oidc_url_display_without_jupyter(self, mock_pexpect, iterator_factory, capsys):
+    def test_oidc_url_display_without_jupyter(self, mock_expect_module, iterator_factory, capsys):
         """Test that OIDC URLs are printed as text when not in Jupyter."""
         test_token = generate_test_token()
         oidc_url = "https://auth.example.com/device?code=ABC123"
@@ -164,21 +179,19 @@ class TestOIDCDeviceFlow:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    iterator = iterator_factory()
-                    iterator._pelican_binary_exists = MagicMock(return_value=True)
+        with patch_expect_module(mock_expect_module):
+            iterator = iterator_factory()
+            iterator._pelican_binary_exists = MagicMock(return_value=True)
 
-                    token = iterator._get_token_from_pelican_binary()
+            token = iterator._get_token_from_pelican_binary()
 
         captured = capsys.readouterr()
         assert f"Please visit: {oidc_url}" in captured.out
         assert token == test_token
 
-    def test_timeout_handling(self, mock_pexpect, iterator_factory):
+    def test_timeout_handling(self, mock_expect_module, iterator_factory):
         """Test that timeouts are handled gracefully."""
         mock_child = MockPexpectChild(
             [
@@ -186,15 +199,13 @@ class TestOIDCDeviceFlow:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    iterator = iterator_factory(oidc_timeout_seconds=5)
-                    iterator._pelican_binary_exists = MagicMock(return_value=True)
+        with patch_expect_module(mock_expect_module):
+            iterator = iterator_factory(oidc_timeout_seconds=5)
+            iterator._pelican_binary_exists = MagicMock(return_value=True)
 
-                    token = iterator._get_token_from_pelican_binary()
+            token = iterator._get_token_from_pelican_binary()
 
         assert token is None
         assert mock_child._closed
@@ -216,7 +227,7 @@ class TestOIDCDeviceFlow:
 
         assert "pelican" in caplog.text.lower()
 
-    def test_non_zero_exit_status(self, mock_pexpect, iterator_factory):
+    def test_non_zero_exit_status(self, mock_expect_module, iterator_factory):
         """Test handling of pelican binary returning non-zero exit status."""
         mock_child = MockPexpectChild(
             [
@@ -225,19 +236,17 @@ class TestOIDCDeviceFlow:
             exit_status=1,
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    iterator = iterator_factory()
-                    iterator._pelican_binary_exists = MagicMock(return_value=True)
+        with patch_expect_module(mock_expect_module):
+            iterator = iterator_factory()
+            iterator._pelican_binary_exists = MagicMock(return_value=True)
 
-                    token = iterator._get_token_from_pelican_binary()
+            token = iterator._get_token_from_pelican_binary()
 
         assert token is None
 
-    def test_token_redaction_in_output(self, mock_pexpect, iterator_factory, capsys):
+    def test_token_redaction_in_output(self, mock_expect_module, iterator_factory, capsys):
         """Test that tokens are redacted when displayed to user."""
         test_token = generate_test_token()
 
@@ -250,15 +259,13 @@ class TestOIDCDeviceFlow:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    iterator = iterator_factory()
-                    iterator._pelican_binary_exists = MagicMock(return_value=True)
+        with patch_expect_module(mock_expect_module):
+            iterator = iterator_factory()
+            iterator._pelican_binary_exists = MagicMock(return_value=True)
 
-                    token = iterator._get_token_from_pelican_binary()
+            token = iterator._get_token_from_pelican_binary()
 
         captured = capsys.readouterr()
         # Token should be redacted in displayed output
@@ -383,10 +390,55 @@ class TestPelicanBinaryFlags:
         assert "-w" not in flags
 
 
+class TestPasswordPromptPattern:
+    """Unit tests for password prompt detection regex."""
+
+    PELICAN_723_PREAMBLE = (
+        "The client is able to save the authorization in a local file.\n"
+        "This prevents the need to reinitialize the authorization for each transfer.\n"
+        "You will be asked for this password whenever a new session is started.\n"
+        "Please provide a new password to encrypt the local OSDF client configuration file:"
+    )
+
+    def test_does_not_match_prose_password_before_colon_prompt(self):
+        match = re.search(_PASSWORD_PROMPT_PATTERN, self.PELICAN_723_PREAMBLE)
+        assert match is not None
+        assert match.group() == "password to encrypt the local OSDF client configuration file:"
+
+    def test_matches_simple_password_colon_prompt(self):
+        assert re.search(_PASSWORD_PROMPT_PATTERN, "Password: ") is not None
+
+    def test_does_not_match_password_in_warning_without_colon(self):
+        assert re.search(_PASSWORD_PROMPT_PATTERN, "WARNING: empty password provided\n") is None
+
+
 class TestPasswordPromptWithGetpass:
     """Test password prompting via getpass."""
 
-    def test_getpass_called_on_password_prompt(self, mock_pexpect, iterator_factory):
+    def test_pelican_723_preamble_single_getpass(self, mock_expect_module, iterator_factory):
+        """Pelican 7.23+ prose mentions 'password' before the real colon prompt."""
+        test_token = generate_test_token()
+        preamble = TestPasswordPromptPattern.PELICAN_723_PREAMBLE
+        mock_child = MockPexpectChild(
+            [
+                (0, preamble + "\n", ""),
+                (2, f"{test_token}\n", ""),
+            ]
+        )
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
+        mock_getpass = MagicMock(return_value="encrypt_secret")
+
+        with patch_expect_module(mock_expect_module):
+            with patch("getpass.getpass", mock_getpass):
+                iterator = iterator_factory()
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                token = iterator._get_token_from_pelican_binary()
+
+        mock_getpass.assert_called_once_with(prompt="")
+        assert mock_child.password_received == "encrypt_secret"
+        assert token == test_token
+
+    def test_getpass_called_on_password_prompt(self, mock_expect_module, iterator_factory):
         """Verify getpass.getpass is called when password prompt is detected."""
         test_token = generate_test_token()
         mock_child = MockPexpectChild(
@@ -396,7 +448,7 @@ class TestPasswordPromptWithGetpass:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
         captured_password = []
 
@@ -404,20 +456,18 @@ class TestPasswordPromptWithGetpass:
             captured_password.append(prompt)
             return "secret123"
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    with patch("getpass.getpass", mock_getpass):
-                        iterator = iterator_factory()
-                        iterator._pelican_binary_exists = MagicMock(return_value=True)
-                        iterator._get_token_from_pelican_binary()
+        with patch_expect_module(mock_expect_module):
+            with patch("getpass.getpass", mock_getpass):
+                iterator = iterator_factory()
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                iterator._get_token_from_pelican_binary()
 
         # getpass should have been called with empty prompt
         assert captured_password == [""]
         # Password should have been sent to the child process
         assert mock_child.password_received == "secret123"
 
-    def test_multiple_password_prompts(self, mock_pexpect, iterator_factory):
+    def test_multiple_password_prompts(self, mock_expect_module, iterator_factory):
         """Test handling of multiple password prompts (e.g., retry)."""
         test_token = generate_test_token()
         mock_child = MockPexpectChild(
@@ -428,7 +478,7 @@ class TestPasswordPromptWithGetpass:
             ]
         )
 
-        mock_pexpect.spawn = MagicMock(return_value=mock_child)
+        mock_expect_module.spawn = MagicMock(return_value=mock_child)
 
         password_calls = []
 
@@ -436,13 +486,11 @@ class TestPasswordPromptWithGetpass:
             password_calls.append(len(password_calls) + 1)
             return f"password{len(password_calls)}"
 
-        with patch.dict(sys.modules, {"pexpect": mock_pexpect}):
-            with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", True):
-                with patch("pelicanfs.token_content_iterator.pexpect", mock_pexpect):
-                    with patch("getpass.getpass", mock_getpass):
-                        iterator = iterator_factory()
-                        iterator._pelican_binary_exists = MagicMock(return_value=True)
-                        token = iterator._get_token_from_pelican_binary()
+        with patch_expect_module(mock_expect_module):
+            with patch("getpass.getpass", mock_getpass):
+                iterator = iterator_factory()
+                iterator._pelican_binary_exists = MagicMock(return_value=True)
+                token = iterator._get_token_from_pelican_binary()
 
         # Should have prompted for password twice
         assert len(password_calls) == 2
@@ -456,7 +504,7 @@ class TestPexpectNotAvailable:
         """Test that appropriate warning is logged when pexpect is not available."""
         import logging
 
-        with patch("pelicanfs.token_content_iterator._PEXPECT_AVAILABLE", False):
+        with patch("pelicanfs.token_content_iterator._expect_module", None):
             iterator = iterator_factory()
             iterator._pelican_binary_exists = MagicMock(return_value=True)
 
