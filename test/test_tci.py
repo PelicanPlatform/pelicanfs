@@ -17,84 +17,20 @@ limitations under the License.
 import json
 import os
 import sys
-from contextlib import contextmanager
 from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
+from expect_mocks import MockPexpectChild, patch_expect_module
 
 from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod
 
 needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
 
 
-class MockPexpectChild:
-    """Mock pexpect child process for simulating pelican binary interaction."""
-
-    def __init__(self, interactions, exit_status=0):
-        """
-        Args:
-            interactions: List of tuples defining the interaction sequence.
-                Each tuple is (pattern_index, before_text, after_text)
-                where pattern_index maps to:
-                    0 = password prompt
-                    1 = OIDC URL
-                    2 = EOF
-                    3 = TIMEOUT
-            exit_status: The exit status code to return
-        """
-        self.interactions = list(interactions)
-        self.interaction_index = 0
-        self.before = ""
-        self.after = ""
-        self.exitstatus = exit_status
-        self.password_received = None
-        self._closed = False
-
-    def expect(self, patterns):
-        if self.interaction_index >= len(self.interactions):
-            raise EOFError("End of interactions")
-
-        interaction = self.interactions[self.interaction_index]
-        self.interaction_index += 1
-
-        pattern_index, before, after = interaction
-        self.before = before
-        self.after = after
-        return pattern_index
-
-    def sendline(self, text):
-        self.password_received = text
-
-    def close(self, force=False):
-        self._closed = True
-
-
-class MockEOF(Exception):
-    """Mock EOF exception."""
-
-
-class MockTIMEOUT(Exception):
-    """Mock TIMEOUT exception."""
-
-
-@contextmanager
-def patch_expect_module(mock_module):
-    """Patch the bound pexpect/wexpect module and exception constants."""
-    with (
-        patch("pelicanfs.token_content_iterator._expect_module", mock_module),
-        patch("pelicanfs.token_content_iterator._EOF", MockEOF),
-        patch("pelicanfs.token_content_iterator._TIMEOUT", MockTIMEOUT),
-    ):
-        yield
-
-
 @pytest.fixture
 def mock_expect_module():
     """Create a mock pexpect/wexpect module."""
-    mock_module = MagicMock()
-    mock_module.EOF = MockEOF
-    mock_module.TIMEOUT = MockTIMEOUT
-    return mock_module
+    return MagicMock()
 
 
 @pytest.fixture(autouse=True)
