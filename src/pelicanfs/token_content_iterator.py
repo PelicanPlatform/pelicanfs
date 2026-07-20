@@ -258,16 +258,19 @@ class TokenContentIterator:
             return None
 
         flags = self._get_pelican_flag()
-        cmd_str = f"pelican token fetch {self.pelican_url} {' '.join(flags)}"
+        cmd = "pelican"
+        cmd_args = ["token", "fetch", self.pelican_url, *flags]
 
-        logger.info(f"Invoking OIDC device flow via pelican binary: {cmd_str}")
+        logger.info(f"Invoking OIDC device flow via pelican binary: {cmd} {' '.join(cmd_args)}")
 
         try:
-            # Spawn with a PTY; encoding= is pexpect-only (wexpect uses bytes)
+            # Spawn with a PTY; passing the program and its args separately avoids
+            # any shell/shlex interpretation of metacharacters in pelican_url.
+            # encoding= is pexpect-only (wexpect uses bytes).
             if _IS_WINDOWS:
-                child = _expect_module.spawn(cmd_str, timeout=self.oidc_timeout_seconds, echo=False)
+                child = _expect_module.spawn(cmd, cmd_args, timeout=self.oidc_timeout_seconds, echo=False)
             else:
-                child = _expect_module.spawn(cmd_str, timeout=self.oidc_timeout_seconds, encoding="utf-8", echo=False)
+                child = _expect_module.spawn(cmd, cmd_args, timeout=self.oidc_timeout_seconds, encoding="utf-8", echo=False)
 
             output_lines = []
             jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"

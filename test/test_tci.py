@@ -297,15 +297,13 @@ def test_oidc_device_flow_successful_token_acquisition(mock_expect_module):
     assert len(token.split(".")) == 3
     assert token == fake_jwt
 
-    # Verify spawn was called with expected command
+    # Verify spawn was called with the program and its args passed separately
     mock_expect_module.spawn.assert_called_once()
     call_args = mock_expect_module.spawn.call_args
-    cmd_str = call_args[0][0]
-    assert "pelican" in cmd_str
-    assert "token" in cmd_str
-    assert "fetch" in cmd_str
-    assert "pelican://example.com/path" in cmd_str
-    assert "-r" in cmd_str
+    assert call_args[0][0] == "pelican"
+    cmd_args = call_args[0][1]
+    assert cmd_args[:3] == ["token", "fetch", "pelican://example.com/path"]
+    assert "-r" in cmd_args
 
 
 def test_oidc_device_flow_with_warning_prefix(mock_expect_module):
@@ -359,12 +357,11 @@ def test_oidc_device_flow_write_operation(mock_expect_module):
 
     # Verify -w flag was used for write operation
     mock_expect_module.spawn.assert_called_once()
-    cmd_str = mock_expect_module.spawn.call_args[0][0]
-    assert "pelican" in cmd_str
-    assert "token" in cmd_str
-    assert "fetch" in cmd_str
-    assert "pelican://example.com/write/path" in cmd_str
-    assert "-w" in cmd_str
+    call_args = mock_expect_module.spawn.call_args
+    assert call_args[0][0] == "pelican"
+    cmd_args = call_args[0][1]
+    assert cmd_args[:3] == ["token", "fetch", "pelican://example.com/write/path"]
+    assert "-w" in cmd_args
     assert token == fake_jwt
 
 
