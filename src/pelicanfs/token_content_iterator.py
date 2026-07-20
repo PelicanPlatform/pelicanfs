@@ -198,7 +198,7 @@ class TokenContentIterator:
             bool: True if this appears to be an OIDC device flow URL for user authentication
         """
         # If the URL contains JSON-like characters, it's probably embedded in debug output
-        if "{" in url or "}" in url or '"' in url or ':{"' in url:
+        if "{" in url or "}" in url or '"' in url:
             return False
 
         # OIDC device flow URLs typically have these path patterns
@@ -216,15 +216,19 @@ class TokenContentIterator:
         Args:
             url: The URL to potentially display as clickable
         """
-        # Only create clickable links for actual OIDC device flow URLs
+        # Only create clickable links for actual OIDC device flow URLs. URLs
+        # embedded in debug output are intentionally not displayed here (the
+        # line-by-line output filter already surfaces any human-readable text).
         if not self._is_oidc_device_flow_url(url):
-            # This is likely a URL embedded in debug output - just print it normally
-            # without creating a clickable link
             return
 
         # Filter out tokens
         jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
         filtered_url = re.sub(jwt_pattern, "[TOKEN_REDACTED]", url)
+
+        # Print the plaintext version first so there's a single change in output
+        # format (plaintext then, if available, the clickable version) rather than two.
+        print(f"Please visit: {filtered_url}")
 
         # Try to make URLs clickable in Jupyter/IPython
         try:
@@ -233,9 +237,6 @@ class TokenContentIterator:
             display(HTML(f'<a href="{html.escape(filtered_url, quote=True)}" target="_blank">Click here to authenticate: {html.escape(filtered_url)}</a>'))
         except ImportError:
             pass
-
-        # Always print the text version
-        print(f"Please visit: {filtered_url}")
 
     def _get_token_from_pelican_binary(self) -> str | None:
         """
