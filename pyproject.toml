@@ -66,6 +66,7 @@ strict = true
 filterwarnings = ["error"]
 log_level = "INFO"
 testpaths = ["test"]
+pythonpath = ["test"]
 markers = [
     "integration: marks tests as integration tests (require live OSDF infrastructure)",
 ]
