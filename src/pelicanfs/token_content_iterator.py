@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import getpass
 import html
 import json
 import logging
@@ -286,63 +287,47 @@ class TokenContentIterator:
                 _TIMEOUT,
             ]
 
+            # _EOF and _TIMEOUT are included in `patterns`, so child.expect returns
+            # their index (2 and 3) rather than raising; no except clauses needed here.
             while True:
-                try:
-                    index = child.expect(patterns)
+                index = child.expect(patterns)
 
-                    # Capture any output before the match
-                    if child.before:
-                        before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
-                        output_lines.append(before_text)
-                        # Filter line-by-line: skip JSON debug lines (containing braces)
-                        # but still print human-readable lines (e.g. the password prompt
-                        # preamble) even when debug logging produces JSON on other lines.
-                        for line in before_text.splitlines(keepends=True):
-                            filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
-                            if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
-                                print(filtered_line, end="", flush=True)
+                # Capture any output before the match
+                if child.before:
+                    before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
+                    output_lines.append(before_text)
+                    # Filter line-by-line: skip JSON debug lines (containing braces)
+                    # but still print human-readable lines (e.g. the password prompt
+                    # preamble) even when debug logging produces JSON on other lines.
+                    for line in before_text.splitlines(keepends=True):
+                        filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
+                        if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
+                            print(filtered_line, end="", flush=True)
 
-                    if index == 0:  # Password prompt
-                        # Get the matched text (e.g. "password: ")
-                        match_text = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
-                        output_lines.append(match_text)
+                if index == 0:  # Password prompt
+                    # Get the matched text (e.g. "password: ")
+                    match_text = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                    output_lines.append(match_text)
 
-                        # Print the matched "password:" text and flush before blocking
-                        # on getpass, so the full prompt (before_text + match_text) is
-                        # visible. Pass empty string to getpass so it doesn't double-print.
-                        import getpass
+                    # Print the matched "password:" text and flush before blocking
+                    # on getpass, so the full prompt (before_text + match_text) is
+                    # visible. Pass empty string to getpass so it doesn't double-print.
+                    print(match_text, end="", flush=True)
+                    password = getpass.getpass(prompt="")
+                    child.sendline(password)
+                    del password
 
-                        print(match_text, end="", flush=True)
-                        password = getpass.getpass(prompt="")
-                        child.sendline(password)
-                        del password
+                elif index == 1:  # URL (device flow)
+                    # Get the URL
+                    url = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                    output_lines.append(url)
+                    self._display_url_for_user(url)
 
-                    elif index == 1:  # URL (device flow)
-                        # Get the URL
-                        url = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
-                        output_lines.append(url)
-                        self._display_url_for_user(url)
-
-                    elif index == 2:  # EOF - process finished
-                        # Capture any remaining output
-                        if child.before:
-                            before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
-                            output_lines.append(before_text)
-                            # Filter line-by-line to skip JSON debug lines
-                            for line in before_text.splitlines(keepends=True):
-                                filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
-                                if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
-                                    print(filtered_line, end="")
-                        break
-
-                    elif index == 3:  # Timeout
-                        logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
-                        child.close(force=True)
-                        return None
-
-                except _EOF:
+                elif index == 2:  # EOF - process finished
+                    # child.before was already captured and printed above.
                     break
-                except _TIMEOUT:
+
+                elif index == 3:  # Timeout
                     logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
                     child.close(force=True)
                     return None
