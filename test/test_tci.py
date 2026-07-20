@@ -72,7 +72,7 @@ def test_discoverHTCondorTokenLocations(monkeypatch, tmp_path):
 @patch("os.access", return_value=False)
 def test_explicit_location_unreadable_fallback(mock_access, mock_exists, monkeypatch):
     iterator = TokenContentIterator(location="/nonexistent/token", name="token_name")
-    iterator.method = TokenDiscoveryMethod.LOCATION
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.LOCATION)
     monkeypatch.setenv("BEARER_TOKEN", "fallback-token")
     token = next(iterator)
     assert token == "fallback-token"
@@ -80,7 +80,7 @@ def test_explicit_location_unreadable_fallback(mock_access, mock_exists, monkeyp
 
 def test_bearer_token_env_missing_fallback(monkeypatch):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.ENV_BEARER_TOKEN
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.ENV_BEARER_TOKEN)
     with pytest.raises(StopIteration):
         next(iterator)
 
@@ -89,7 +89,7 @@ def test_bearer_token_env_missing_fallback(monkeypatch):
 @patch("os.access", return_value=False)
 def test_bearer_token_file_unreadable(mock_access, mock_exists, monkeypatch):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE)
     monkeypatch.setenv("BEARER_TOKEN_FILE", "/unreadable/token/file")
     with pytest.raises(StopIteration):
         next(iterator)
@@ -99,7 +99,7 @@ def test_bearer_token_file_unreadable(mock_access, mock_exists, monkeypatch):
 @patch("os.path.exists", return_value=False)
 def test_default_bearer_token_file_missing(mock_exists, mock_default_path):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.DEFAULT_BEARER_TOKEN
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.DEFAULT_BEARER_TOKEN)
     with pytest.raises(StopIteration):
         next(iterator)
 
@@ -107,7 +107,7 @@ def test_default_bearer_token_file_missing(mock_exists, mock_default_path):
 @patch("os.path.exists", return_value=False)
 def test_token_env_file_missing(mock_exists, monkeypatch):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.ENV_TOKEN_PATH
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.ENV_TOKEN_PATH)
     monkeypatch.setenv("TOKEN", "/nonexistent/token/file")
     with pytest.raises(StopIteration):
         next(iterator)
@@ -116,7 +116,7 @@ def test_token_env_file_missing(mock_exists, monkeypatch):
 @patch("igwn_auth_utils.scitokens._find_condor_creds_token_paths", side_effect=FileNotFoundError)
 def test_htcondor_creds_dir_missing(mock_find_paths):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.HTCONDOR_DISCOVERY
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
     with pytest.raises(StopIteration):
         next(iterator)
 
@@ -125,7 +125,7 @@ def test_htcondor_creds_dir_missing(mock_find_paths):
 @patch("pelicanfs.token_content_iterator.get_token_from_file", side_effect=OSError("Unreadable file"))
 def test_htcondor_creds_files_unreadable(mock_get_token, mock_find_paths):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.HTCONDOR_DISCOVERY
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
     with pytest.raises(StopIteration):
         next(iterator)  # All paths are unreadable, no token returned
 
@@ -135,7 +135,7 @@ def test_htcondor_creds_files_unreadable(mock_get_token, mock_find_paths):
 @patch("pelicanfs.token_content_iterator.get_token_from_file", return_value="valid-token")
 def test_bearer_token_file_success(mock_get_token, mock_access, mock_exists, monkeypatch):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.ENV_BEARER_TOKEN_FILE)
     monkeypatch.setenv("BEARER_TOKEN_FILE", "/valid/token/file")
     token = next(iterator)
     assert token == "valid-token"
@@ -146,7 +146,7 @@ def test_bearer_token_file_success(mock_get_token, mock_access, mock_exists, mon
 @patch("builtins.open", new_callable=mock_open, read_data='{"access_token": "xyz789"}')
 def test_token_iterator_reads_valid_file(mock_open_func, mock_access, mock_exists):
     iterator = TokenContentIterator(location="/valid/token/file", name="token_name")
-    iterator.method = TokenDiscoveryMethod.LOCATION
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.LOCATION)
     token = next(iterator)
     assert token == "xyz789"
 
@@ -156,7 +156,7 @@ def test_token_iterator_reads_valid_file(mock_open_func, mock_access, mock_exist
 @patch("pelicanfs.token_content_iterator.get_token_from_file", side_effect=json.JSONDecodeError("Expecting value", "", 0))
 def test_token_iterator_handles_json_error(mock_get_token, mock_access, mock_exists):
     iterator = TokenContentIterator(location="/bad.json", name="token_name")
-    iterator.method = TokenDiscoveryMethod.LOCATION
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.LOCATION)
     with pytest.raises(StopIteration):
         next(iterator)
 
@@ -167,7 +167,7 @@ def test_token_iterator_handles_json_error(mock_get_token, mock_access, mock_exi
 @patch("os.access", return_value=True)
 def test_htcondor_creds_fallback_succeeds(mock_access, mock_exists, mock_get_token, mock_discover):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.HTCONDOR_DISCOVERY
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
 
     token = next(iterator)
     assert token == "valid-fallback-token"
@@ -179,7 +179,7 @@ def test_htcondor_creds_fallback_succeeds(mock_access, mock_exists, mock_get_tok
 @patch("os.access", return_value=True)
 def test_htcondor_fallback_all_fail_raises_stopiteration(mock_access, mock_exists, mock_get_token, mock_find_paths):
     iterator = TokenContentIterator(location=None, name="token_name")
-    iterator.method = TokenDiscoveryMethod.HTCONDOR_DISCOVERY
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
 
     # First next(): triggers discovery and appends fallback
     with pytest.raises(StopIteration):  # noqa: PT012
