@@ -763,7 +763,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 token_to_use = self._get_token()
                 trace(logger, "get_working_cache token_to_use=%s", format_token_for_log(token_to_use))
                 if token_to_use:
-                    self._set_http_filesystem_token(token_to_use)
+                    # _handle_token_generation already set the filesystem token above;
+                    # here we only need the per-request header for the HEAD probe.
                     request_headers["Authorization"] = f"Bearer {token_to_use}"
 
             try:
