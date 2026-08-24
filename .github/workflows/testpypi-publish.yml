@@ -1,8 +1,12 @@
 name: Publish PelicanFS distribution to TestPyPI
 on:
   release:
+    # Every release goes to TestPyPI -- prereleases and full releases alike.
+    # `published` is the only type that fires exactly once for both cases;
+    # `prereleased` additionally never fires for a prerelease published from
+    # a draft, which would silently skip TestPyPI.
     types:
-      - prereleased
+      - published
 
 jobs:
   build:
@@ -64,6 +68,10 @@ jobs:
         repository-url: https://test.pypi.org/legacy/
 
   github-release:
+    # Prereleases only. For a full release the PyPI workflow signs the same
+    # dists and attaches them to the same GitHub release, so running this here
+    # too would race two uploads of identical assets onto one release.
+    if: github.event.release.prerelease
     name: >-
       Sign the Python distribution with Sigstore
       and upload them to GitHub Release
@@ -82,7 +90,7 @@ jobs:
         name: python-package-distributions
         path: dist/
     - name: Sign the dists with Sigstore
-      uses: sigstore/gh-action-sigstore-python@v3.0.0
+      uses: sigstore/gh-action-sigstore-python@v3.5.0
       with:
         inputs: >-
           ./dist/*.tar.gz
@@ -93,14 +101,11 @@ jobs:
       # Upload to GitHub Release using the `gh` CLI.
       # `dist/` contains the built packages, and the
       # sigstore-produced signatures and certificates.
+      # --clobber: the sigstore action already attaches the *.sigstore.json
+      # bundles as release assets (release-signing-artifacts defaults to true),
+      # so uploading dist/** would otherwise fail on the existing assets.
       run: >-
         gh release upload
         '${{ github.ref_name }}' dist/**
         --repo '${{ github.repository }}'
-
-  always_job:
-    name: Always run job
-    runs-on: ubuntu-latest
-    steps:
-      - name: Always run
-        run: echo "This job is used to prevent the workflow status from showing as failed when all other jobs are skipped."
+        --clobber
