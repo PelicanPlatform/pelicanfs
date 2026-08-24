@@ -367,6 +367,8 @@ class PelicanFileSystem(AsyncFileSystem):
     @classmethod
     def _strip_protocol(cls, path):
         """For HTTP, we always want to keep the full URL"""
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
         if path.startswith("osdf://"):
             path = path[7:]
         elif path.startswith("pelican://"):
