@@ -600,6 +600,12 @@ class PelicanFileSystem(AsyncFileSystem):
         try:
             cached_url, cached_director_response = self._match_namespace(fparsed.path)
             if cached_url:
+                # _CacheManager keeps bare scheme://host entries, so a namespace hit
+                # comes back without the query string the caller asked for. Put it back:
+                # it can carry an authz token, and dropping it turns an authorized
+                # request into an unauthorized one.
+                if fparsed.query:
+                    cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
                 logger.debug(f"Found previously working cache: {cached_url}")
                 return cached_url, cached_director_response
         except NoAvailableSource:
