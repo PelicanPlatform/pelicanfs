@@ -1199,6 +1199,14 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Compatible path: {path}")
         return path
 
+    def _check_fspaths(self, path):
+        """
+        _check_fspath over a single path or a list of paths, preserving which was given.
+        """
+        if isinstance(path, str):
+            return self._check_fspath(path)
+        return [self._check_fspath(p) for p in path]
+
     async def _put_file(self, lpath, rpath, **kwargs):
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
@@ -1298,74 +1306,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return wrapper
 
-    @staticmethod
-    def _cache_multi_dec(func):
-        """
-        Decorator function which, when given a list of namespace location, finds the best working cache that serves the namespace,
-        then calls the sub function with that namespace
-
-
-        Note: If a valid url is provided, it will not call the director to get a cache. This does mean that if a url was created/retrieved via
-        ls and then used for another function, the url will be an origin url and not a cache url. This should be fixed in the future.
-        """
-
-        async def wrapper(self, *args, **kwargs):
-            path = args[0]
-            if isinstance(path, str):
-                path = self._check_fspath(args[0])
-                if self.direct_reads:
-                    data_url, director_response = await self.get_origin_url(path)
-                else:
-                    data_url, director_response = await self.get_working_cache(path)
-
-                # Handle token generation if required (single path)
-                operation = self._get_token_operation(func.__name__)
-                await self._handle_token_generation(data_url, director_response, operation)
-            else:
-                data_url = []
-                # For multiple paths, we'll use the first director_response for token generation
-                # This is a simplification - in practice, all paths should have the same token requirements
-                first_director_response = None
-                for p in path:
-                    p = self._check_fspath(p)
-                    if self.direct_reads:
-                        d_url, director_response = await self.get_origin_url(p)
-                    else:
-                        d_url, director_response = await self.get_working_cache(p)
-                    data_url.append(d_url)
-                    if first_director_response is None:
-                        first_director_response = director_response
-
-                # Handle token generation if required (multiple paths)
-                if first_director_response:
-                    operation = self._get_token_operation(func.__name__)
-                    # Use the first URL for token generation (simplification)
-                    await self._handle_token_generation(data_url[0] if data_url else "", first_director_response, operation)
-
-            try:
-                logger.debug(f"Calling {func} using the following urls: {data_url}")
-                result = await func(self, data_url, *args[1:], **kwargs)
-            except Exception as e:
-                if not self.direct_reads:
-                    if isinstance(data_url, list):
-                        for d_url in data_url:
-                            self._bad_cache(d_url, e)
-                    else:
-                        self._bad_cache(data_url, e)
-                raise
-            if not self.direct_reads:
-                if isinstance(data_url, list):
-                    for d_url in data_url:
-                        ns_path = self._remove_host_from_path(d_url)
-                        ar = _AccessResp(ns_path, True)
-                        self._access_stats.add_response(ns_path, ar)
-                else:
-                    ar = _AccessResp(data_url, True)
-                    self._access_stats.add_response(path, ar)
-            return result
-
-        return wrapper
-
     @_cache_dec
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         return await self.http_file_system._cat_file(path, start, end, **kwargs)
@@ -1402,14 +1342,69 @@ class PelicanFileSystem(AsyncFileSystem):
         results = await self.http_file_system._get(rpath, lpath, **kwargs)
         return self._remove_host_from_paths(results)
 
-    @_cache_multi_dec
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
-        results = await self.http_file_system._cat(path, recursive, on_error, batch_size, **kwargs)
-        return self._remove_host_from_paths(results)
+        """
+        Read the contents of one or more objects.
 
-    @_cache_multi_dec
+        Same reason as _get for not delegating to the http filesystem: it would expand a
+        cache url through _ls_from_http and then read every object from the collections
+        endpoint it answers with, bypassing the caches entirely. Expanding here keeps the
+        paths in the namespace and lets _cat_file pick a cache per object.
+        """
+        path = self._check_fspaths(path)
+        await self._warm_namespace_cache(path)
+        return await AsyncFileSystem._cat(self, path, recursive=recursive, on_error=on_error, batch_size=batch_size, **kwargs)
+
+    async def _warm_namespace_cache(self, path):
+        """
+        Resolve a cache for `path` so that the namespace cache is populated.
+
+        The bulk operations below fetch each object individually, and those fetches run
+        concurrently -- so without an already-warm namespace cache the whole first batch
+        would go back to the director for the same answer. That matters most for the
+        many-small-objects case: a catalogue-driven read of a zarr store asks for its
+        chunks as one big list, which would otherwise become one director round trip per
+        chunk.
+
+        For a list we only warm on the first entry. A list almost always sits within one
+        namespace, and anything left over is still resolved correctly by the per-object
+        lookup -- this is an optimization, not a correctness requirement. Best effort
+        throughout: if it fails, the per-object lookups still work on their own.
+        """
+        if isinstance(path, (list, tuple)):
+            path = path[0] if len(path) else None
+        if self.direct_reads or not isinstance(path, str) or fshttp.has_magic(path):
+            return
+        try:
+            await self.get_working_cache(path)
+        except Exception as e:
+            # Still best effort, but worth saying out loud: if warming fails
+            # systematically, every object goes back to the director on its own --
+            # exactly the stampede this function exists to prevent.
+            logger.warning(f"Could not pre-resolve a cache for {path}; each object will consult the director individually: {e}")
+
     async def _expand_path(self, path, recursive=False, maxdepth=None):
-        return await self.http_file_system._expand_path(path, recursive, maxdepth)
+        """
+        Turn a path, glob, or list of either into the list of paths it refers to.
+
+        Expansion is a listing operation, so it has to go through our _glob/_find/
+        _exists, which ask the collections endpoint and answer in namespace paths.
+        Handing a cache url to the http filesystem's expansion instead would mix hosts
+        in the result: the root would keep the cache's host while everything found
+        underneath it would come back on the collections endpoint's host. See _get.
+        """
+        paths = self._check_fspaths(path)
+        if isinstance(paths, str):
+            paths = [paths]
+
+        # fsspec counts "?" as a glob character, but a pelican path can legitimately
+        # carry a query string -- an authz token, say -- and HTTPFileSystem's own _glob
+        # makes the same exception. Without this, such a path would be sent down the glob
+        # route and charged an existence check instead of just being taken literally.
+        if not recursive and not any(fshttp.has_magic(p) for p in paths):
+            return sorted(set(paths))
+
+        return await AsyncFileSystem._expand_path(self, paths, recursive=recursive, maxdepth=maxdepth)
 
 
 class OSDFFileSystem(PelicanFileSystem):
