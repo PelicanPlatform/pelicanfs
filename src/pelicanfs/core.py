@@ -1159,7 +1159,7 @@ class PelicanFileSystem(AsyncFileSystem):
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
 
-        operation = self._get_token_operation("put_file")
+        operation = self._get_token_operation("_put_file")
         await self._handle_token_generation(data_url, director_response, operation)
 
         logger.debug(f"Running put_file from {lpath} to {data_url}...")
