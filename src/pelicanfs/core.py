@@ -31,7 +31,11 @@ import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav2.client import Client, ClientOptions
-from aiowebdav2.exceptions import RemoteResourceNotFoundError, ResponseErrorCodeError
+from aiowebdav2.exceptions import (
+    MethodNotSupportedError,
+    RemoteResourceNotFoundError,
+    ResponseErrorCodeError,
+)
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -958,10 +962,50 @@ class PelicanFileSystem(AsyncFileSystem):
         return sorted(set(items))
 
     async def _isdir(self, path):
-        # Don't use @_dirlist_dec here because http_file_system._isdir will call
-        # _ls_from_http which handles the collections URL conversion
-        path = self._check_fspath(path)
-        return await self.http_file_system._isdir(path)
+        """
+        Whether `path` is a collection, asked directly of the resource via
+        _is_collection. The http filesystem's listing-based answer would call an
+        *empty* collection False (and costs a full listing rather than a depth-0
+        PROPFIND).
+        """
+        return await self._is_collection(self._check_fspath(path))
+
+    async def _is_collection(self, path):
+        """
+        Whether `path` names a collection, asked of the collections endpoint directly.
+
+        Not the same question as _isdir: a webdav listing excludes the collection
+        itself, so an *empty* collection lists as nothing and _isdir answers False.
+        This asks about the resource itself (a depth-0 PROPFIND) instead.
+        """
+        try:
+            list_url, director_response = await self.get_dirlist_url(path)
+        except NoCollectionsUrl:
+            # No collections endpoint means nothing in this namespace can be listed,
+            # so nothing in it is usefully a collection
+            return False
+
+        operation = self._get_token_operation("_is_collection")
+        await self._handle_token_generation(list_url, director_response, operation)
+
+        parts = urllib.parse.urlparse(list_url)
+        # Probe the trailing-slash form: origins answer a collection's slash form
+        # directly and reject an object's with a 500 -- the same convention _ls_real
+        # keys on to tell the two apart
+        probe_path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
+            try:
+                return await client.is_dir(probe_path)
+            except (RemoteResourceNotFoundError, MethodNotSupportedError):
+                # Missing, or the response carries no resourcetype to judge by --
+                # nothing we can treat as a collection
+                return False
+            except ResponseErrorCodeError as e:
+                # Anything but the object-signalling 500 is a real failure and must
+                # not quietly classify the path as "not a collection"
+                if e.code != 500:
+                    raise
+                return False
 
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
@@ -1039,9 +1083,15 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _isfile(self, path):
         try:
-            return not bool(await self._ls_real(path, detail=False))
+            items = await self._ls_real(path, detail=False)
         except (FileNotFoundError, ValueError):
             return False
+        if items:
+            # A non-empty listing is a collection
+            return False
+        # An empty listing is an object or an *empty* collection -- a webdav listing
+        # excludes the collection itself -- so ask the resource's own type
+        return not await self._is_collection(urllib.parse.urlparse(path).path)
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
