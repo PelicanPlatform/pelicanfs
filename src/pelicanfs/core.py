@@ -426,6 +426,16 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             return None
 
+    def _webdav_options(self, url: str) -> dict:
+        """
+        Connection options for a webdav client rooted at `url`'s host.
+        """
+        parts = urllib.parse.urlparse(url)
+        return {
+            "hostname": f"{parts.scheme}://{parts.netloc}",
+            "token": self._get_token(),
+        }
+
     def _get_token_operation(self, func_name: str) -> TokenOperation:
         """
         Determine the token operation based on the function being called.
@@ -900,17 +910,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # If a client is provided, use it; otherwise, create one
         if client is None:
-            # Create the options for the webdavclient
-            if self.token:
-                webdav_token = self.token.removeprefix("Bearer ")
-            else:
-                webdav_token = None
-
-            options = {
-                "hostname": base_url,
-                "token": webdav_token,
-            }
-            async with self.get_webdav_client(options) as client_ctx:
+            async with self.get_webdav_client(self._webdav_options(url)) as client_ctx:
                 return await self._ls_real(url, detail=detail, client=client_ctx)
 
         # Now that we have a client, we can proceed with the listing
@@ -1047,13 +1047,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
         list_url, director_response = await self.get_dirlist_url(path)
-        parts = urllib.parse.urlparse(list_url)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        options = {
-            "hostname": base_url,
-            "token": self.token.removeprefix("Bearer ") if self.token else None,
-        }
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             async for url, dirs, files in self.http_file_system._walk(
                 list_url,
                 maxdepth=maxdepth,
@@ -1329,10 +1323,7 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _exists(self, path, **kwargs):
         parts = urllib.parse.urlparse(path)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        webdav_token = self.token.removeprefix("Bearer ") if self.token else None
-        options = {"hostname": base_url, "token": webdav_token}
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
 
     @_cache_dec
@@ -1342,10 +1333,7 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _info(self, path, **kwargs):
         parts = urllib.parse.urlparse(path)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        webdav_token = self.token.removeprefix("Bearer ") if self.token else None
-        options = {"hostname": base_url, "token": webdav_token}
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
             try:
                 result = await client.info(parts.path)
             except RemoteResourceNotFoundError:
