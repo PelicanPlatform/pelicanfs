@@ -17,6 +17,7 @@ limitations under the License.
 import asyncio
 import functools
 import logging
+import os
 import re
 import threading
 import urllib.parse
@@ -1316,8 +1317,30 @@ class PelicanFileSystem(AsyncFileSystem):
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
 
+    async def _get_file(self, rpath, lpath, _collection_roots=None, **kwargs):
+        """
+        Copy a single object to a local file.
+
+        A recursive _get expands to the collections it walked through as well as the
+        objects it found, and a collection only needs to exist locally -- there is
+        nothing to fetch. _ls_real marks a listed collection with a trailing slash, but
+        walk roots and glob matches arrive without one; _get resolves those up front
+        and passes them down as `_collection_roots`. As a safety net, anything else
+        whose destination already exists as a directory (_get pre-creates every parent
+        before it starts fetching) gets one confirmation against the collections
+        endpoint -- so a collection arriving by a route not covered above is still
+        skipped, while a stale local directory in the way of a real object fails the
+        download loudly rather than silently skipping it.
+        """
+        if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
+            os.makedirs(lpath, exist_ok=True)
+            return
+        if os.path.isdir(lpath) and await self._is_collection(rpath):
+            return
+        return await self._get_file_from_cache(rpath, lpath, **kwargs)
+
     @_cache_dec
-    async def _get_file(self, rpath, lpath, **kwargs):
+    async def _get_file_from_cache(self, rpath, lpath, **kwargs):
         return await self.http_file_system._get_file(rpath, lpath, **kwargs)
 
     @_cache_dec
@@ -1337,10 +1360,48 @@ class PelicanFileSystem(AsyncFileSystem):
             }
             return self._remove_host_from_paths(info)
 
-    @_cache_dec
     async def _get(self, rpath, lpath, **kwargs):
-        results = await self.http_file_system._get(rpath, lpath, **kwargs)
-        return self._remove_host_from_paths(results)
+        """
+        Copy an object, or a whole collection, to local files.
+
+        Deliberately not delegating to the http filesystem. Doing so would hand it a
+        single cache url as the root and then expand that url through _ls_from_http,
+        which answers with collections urls. The resulting list of sources spans two
+        hosts, so fsspec's common-prefix logic collapses the prefix to "https:" and
+        rewrites every source into "<lpath>/<host>/<namespace path>" -- leaving the
+        caller with one local folder per host (an empty one for the cache, holding just
+        the collection root, and a populated one for the collections endpoint) instead of
+        a single copy of the collection.
+
+        Expanding in namespace paths instead keeps the prefix at the collection itself;
+        each object then resolves its own cache in _get_file.
+        """
+        rpath = self._check_fspaths(rpath)
+        await self._warm_namespace_cache(rpath)
+
+        # A collection can reach _get_file without the trailing slash that marks
+        # listed collections: the root of a walk (fsspec keys it by the path it was
+        # given) and a glob match (_glob strips the slash to match fsspec
+        # convention). An *empty* collection leaves no other trace at all, so settle
+        # the question up front and pass the answer down. Literal roots are probed
+        # concurrently; a glob already knows the type of every match, and the
+        # listings behind it land in the dircache, so the expansion inside
+        # AsyncFileSystem._get reuses them rather than refetching.
+        if kwargs.get("recursive"):
+            roots = [rpath] if isinstance(rpath, str) else rpath
+            literals = [root for root in roots if not fshttp.has_magic(root)]
+            # return_exceptions so a failing probe doesn't strand its siblings
+            # mid-flight; the first failure is re-raised once all have settled
+            probes = await asyncio.gather(*(self._is_collection(root) for root in literals), return_exceptions=True)
+            for probe in probes:
+                if isinstance(probe, BaseException):
+                    raise probe
+            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes) if is_collection}
+            for pattern in (root for root in roots if fshttp.has_magic(root)):
+                matches = await self._glob(pattern, detail=True, maxdepth=kwargs.get("maxdepth"))
+                collection_roots |= {p.rstrip("/") for p, info in matches.items() if info.get("type") == "directory"}
+            kwargs["_collection_roots"] = collection_roots
+        return await AsyncFileSystem._get(self, rpath, lpath, **kwargs)
 
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
         """
