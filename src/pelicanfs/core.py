@@ -451,8 +451,22 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns:
             TokenOperation: The appropriate token operation for the function
         """
-        # Read operations
-        read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "get_working_cache", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
+        # Read operations. These are the names that actually reach this function --
+        # decorated functions arrive as func.__name__, the rest are passed as literal
+        # strings at their call sites. Unknown names default to read below.
+        read_operations = {
+            "_cat_file",
+            "_exists",
+            "_info",
+            "_get_file_from_cache",
+            "_is_collection",
+            "get_working_cache",
+            "_ls",
+            "_find",
+            "_isfile",
+            "open",
+            "open_async",
+        }
 
         # Write operations (if any are implemented)
         write_operations = {"_put_file"}
