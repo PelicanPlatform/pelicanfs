@@ -1458,7 +1458,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # exactly the stampede this function exists to prevent.
             logger.warning(f"Could not pre-resolve a cache for {path}; each object will consult the director individually: {e}")
 
-    async def _expand_path(self, path, recursive=False, maxdepth=None):
+    async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs):
         """
         Turn a path, glob, or list of either into the list of paths it refers to.
 
@@ -1467,6 +1467,10 @@ class PelicanFileSystem(AsyncFileSystem):
         Handing a cache url to the http filesystem's expansion instead would mix hosts
         in the result: the root would keep the cache's host while everything found
         underneath it would come back on the collections endpoint's host. See _get.
+
+        kwargs pass through to fsspec untouched, so newer arguments -- 2026.x expands
+        glob results with assume_literal=True -- keep working against the older
+        releases this package also supports.
         """
         paths = self._check_fspaths(path)
         if isinstance(paths, str):
@@ -1479,7 +1483,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not recursive and not any(fshttp.has_magic(p) for p in paths):
             return sorted(set(paths))
 
-        return await AsyncFileSystem._expand_path(self, paths, recursive=recursive, maxdepth=maxdepth)
+        return await AsyncFileSystem._expand_path(self, paths, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
 
 class OSDFFileSystem(PelicanFileSystem):
