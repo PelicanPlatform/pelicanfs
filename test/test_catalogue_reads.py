@@ -20,11 +20,7 @@ import pelicanfs.core
 
 # These tests cover the access pattern used by scientific data catalogues, where the
 # library is driven by another tool rather than called directly. A catalogue (intake) is
-# an index of datasets; opening one hands xarray a zarr store, which is not a single file
-# but a directory of small objects -- a little JSON metadata plus one object per chunk of
-# the array. Reading it asks for all of those at once, as a single list of paths, so what
-# matters here is not only that the bytes come back but how many times the director is
-# asked where to find them: once for the request, not once per chunk.
+# an index of datasets; opening one hands xarray a zarr store, which is directory of small objects
 #
 # See examples/intake for a catalogue whose entries are osdf:// urls of stores like this.
 

@@ -1363,12 +1363,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Copy a single object to a local file, creating collections rather than fetching them.
 
         A recursive get asks for every collection it walked through as well as the
-        objects inside them, and a collection just needs to exist on disk. We recognise
-        one three ways, in order of cost: a trailing slash (how listings mark them),
-        membership of `_collection_roots` (the roots _get worked out up front, which
-        arrive without a slash), or -- as a backstop -- a destination that is already a
-        directory, confirmed against the collections endpoint. The confirmation matters:
-        without it a stale local directory would silently skip a real download.
+        objects inside them, and a collection just needs to exist on disk.
         """
         if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
             os.makedirs(lpath, exist_ok=True)
@@ -1403,9 +1398,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Copy an object, or a whole collection, to local files.
 
         We expand the source list ourselves, in namespace paths, rather than letting the
-        http filesystem do it. It would start from a cache url but list from the
-        collections endpoint, so the sources would span two hosts -- and fsspec decides
-        local names by their common prefix. Across two hosts that prefix shrinks to
+        http filesystem do it. Across two hosts that prefix shrinks to
         "https:", and the caller ends up with a directory per host:
 
             get("/foo/bar", "dest")  ->  dest/cache.example.com/foo/bar     (empty)
@@ -1418,11 +1411,7 @@ class PelicanFileSystem(AsyncFileSystem):
         await self._warm_namespace_cache(rpath)
 
         # Work out which of the requested roots are collections, so _get_file can tell
-        # them apart later. It cannot work this out itself: a root reaches it without
-        # the trailing slash that marks a listed collection, and an empty collection
-        # leaves no other trace. Literal roots are probed concurrently; a glob already
-        # reports the type of each match, and its listings land in the dircache for the
-        # expansion below to reuse.
+        # them apart later.
         if kwargs.get("recursive"):
             roots = [rpath] if isinstance(rpath, str) else rpath
             literals = [root for root in roots if not fshttp.has_magic(root)]
@@ -1459,18 +1448,6 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns nothing: the point is the side effect. get_working_cache stores the
         caches it is told about in self._namespace_cache, keyed by namespace prefix, and
         every later lookup for a path under that prefix is answered from memory.
-
-        Without this, a bulk read would stampede. Its objects are fetched concurrently
-        and each one resolves its own cache, so the whole first batch would reach the
-        director before any of them had stored an answer -- one round trip per object
-        rather than one for the request. That is the common case for many small objects:
-        an array store read through a data catalogue (see test_catalogue_reads.py) asks
-        for its chunks as a single list of thousands of paths.
-
-        For a list we warm on the first entry only, since a list almost always sits in
-        one namespace. Anything left over is still resolved correctly by the per-object
-        lookup, so this is an optimization rather than a correctness requirement, and it
-        is best effort throughout.
         """
         if isinstance(path, (list, tuple)):
             path = path[0] if len(path) else None
