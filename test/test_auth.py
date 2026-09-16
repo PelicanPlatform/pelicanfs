@@ -84,9 +84,11 @@ def test_authz_query_survives_namespace_cache(httpserver: HTTPServer, get_client
     """
     A repeat read of the same namespace keeps its query string.
 
-    The second read is answered from the namespace cache, whose _CacheManager holds bare
-    scheme://host entries -- so the authz token used to be dropped and the request went
-    out unauthorized.
+    The first read asks the director and gets back a full url. The second is answered
+    from the namespace cache, which stores only bare scheme://host entries: it used to
+    rebuild the url from those alone, dropping the authz token, so the request went out
+    unauthorized. get_working_cache now puts the caller's query string back on the url
+    it rebuilds, and both reads are authorized.
     """
     foo_bar_url = httpserver.url_for("/foo/bar")
 
