@@ -16,6 +16,7 @@ limitations under the License.
 
 import asyncio
 import functools
+import inspect
 import logging
 import os
 import re
@@ -275,6 +276,29 @@ async def get_webdav_client(options):
         finally:
             await client.close()
             logger.debug("WebDAV client closed")
+
+
+def _path_arg_splitter(func):
+    """
+    Build a function that pulls `func`'s path argument out of a call, however it was passed.
+
+    The decorators below rewrite that argument into a url before handing the call on, so
+    they need it whether the caller passed it positionally or by name. fsspec's public
+    API allows both -- fs.exists(path="/ns/obj") is as valid as fs.exists("/ns/obj") --
+    so reaching for args[0] raises IndexError on a perfectly legal call.
+    """
+    # The first parameter after self is the path in every function these decorators wrap
+    name = list(inspect.signature(func).parameters)[1]
+
+    def split(args, kwargs):
+        if args:
+            return args[0], args[1:]
+        try:
+            return kwargs.pop(name), ()
+        except KeyError:
+            raise TypeError(f"{func.__name__}() missing required argument: '{name}'") from None
+
+    return split
 
 
 def sync_generator(async_gen_func, obj=None):
@@ -864,9 +888,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
         This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
         """
+        split_path_arg = _path_arg_splitter(func)
 
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
+            raw_path, rest = split_path_arg(args, kwargs)
+            path = self._check_fspath(raw_path)
             data_url, director_response = await self.get_dirlist_url(path)
 
             # Handle token generation if required
@@ -874,7 +900,7 @@ class PelicanFileSystem(AsyncFileSystem):
             await self._handle_token_generation(data_url, director_response, operation)
 
             logger.debug(f"Running {func} with url: {data_url}")
-            return await func(self, data_url, *args[1:], **kwargs)
+            return await func(self, data_url, *rest, **kwargs)
 
         return wrapper
 
@@ -1295,9 +1321,11 @@ class PelicanFileSystem(AsyncFileSystem):
         via an "ls" call, then that url points to an origin, not the cache. So it cannot be assumed that a valid url points to
         a cache
         """
+        split_path_arg = _path_arg_splitter(func)
 
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
+            raw_path, rest = split_path_arg(args, kwargs)
+            path = self._check_fspath(raw_path)
             if self.direct_reads:
                 data_url, director_response = await self.get_origin_url(path)
             else:
@@ -1309,7 +1337,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
             try:
                 logger.debug(f"Calling {func} using the following url: {data_url}")
-                result = await func(self, data_url, *args[1:], **kwargs)
+                result = await func(self, data_url, *rest, **kwargs)
             except Exception as e:
                 if not self.direct_reads:
                     self._bad_cache(data_url, e)
