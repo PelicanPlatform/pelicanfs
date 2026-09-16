@@ -65,6 +65,9 @@ EMPTY_LISTING = collection_multistatus("/foo/empty/")
 
 @pytest.fixture(name="two_host_fs_factory")
 def fixture_two_host_fs_factory(
+    # httpserver/httpserver2 are test servers, get_client/get_webdav_client build
+    # clients that trust their certificate, and the *_listing_response fixtures are
+    # canned PROPFIND bodies read from test/resources. All are defined in conftest.py
     httpserver: HTTPServer,
     httpserver2: HTTPServer,
     get_client,
@@ -219,6 +222,9 @@ def test_get_recursive_lands_in_one_directory(two_host_federation, tmp_path):
 
     two_host_federation.get("/foo/bar", str(dest), recursive=True)
 
+    # The collection itself lands in dest, so its contents are under dest/bar rather
+    # than dest/foo/bar -- the same convention as `cp -r /foo/bar dest`, and what
+    # fsspec's own filesystems do
     assert local_tree(dest) == {
         "bar/",
         *(f"bar/{c}/" for c in COLLECTIONS),
@@ -264,6 +270,10 @@ def test_cat_recursive_reads_from_the_cache(two_host_federation, httpserver: HTT
     Same defect as the recursive get: expansion went through the http filesystem, so
     every object was read straight off the origin's collections endpoint.
     """
+    # A recursive expansion lists the collections as well as the objects in them, and
+    # reading a collection fails. That is fsspec's own behaviour, not something specific
+    # to pelican -- LocalFileSystem.cat(dir, recursive=True) raises the same way -- so
+    # omitting those errors is how a caller asks for "the objects underneath"
     out = two_host_federation.cat("/foo/bar", recursive=True, on_error="omit")
 
     for obj in OBJECTS:
@@ -357,7 +367,9 @@ def test_get_stale_local_directory_fails_loudly(two_host_federation, tmp_path):
     dest = tmp_path / "dest"
     (dest / "bar" / "file1.txt").mkdir(parents=True)
 
-    with pytest.raises(IsADirectoryError):
+    # Which OSError depends on the platform: IsADirectoryError on POSIX,
+    # PermissionError on Windows. What matters is that it raises rather than skipping
+    with pytest.raises(OSError):
         two_host_federation.get("/foo/bar", str(dest), recursive=True)
 
 

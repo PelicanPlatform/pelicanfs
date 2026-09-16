@@ -18,47 +18,74 @@ from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
 
-# A catalogue-driven read (intake -> xarray -> zarr) asks for a store's chunks in one
-# bulk call, so these tests care as much about how many times the director is consulted
-# as they do about the bytes coming back.
+# These tests cover the access pattern used by scientific data catalogues, where the
+# library is driven by another tool rather than called directly. A catalogue (intake) is
+# an index of datasets; opening one hands xarray a zarr store, which is not a single file
+# but a directory of small objects -- a little JSON metadata plus one object per chunk of
+# the array. Reading it asks for all of those at once, as a single list of paths, so what
+# matters here is not only that the bytes come back but how many times the director is
+# asked where to find them: once for the request, not once per chunk.
+#
+# See examples/intake for a catalogue whose entries are osdf:// urls of stores like this.
+
+# One store, laid out the way zarr does it:
+#   .zmetadata     consolidated metadata for the whole store
+#   .zgroup        marks the store as a group of arrays
+#   FLNS/.zarray   the FLNS array's shape, dtype and chunking
+#   FLNS/<i>.0.0   the array's data, one object per chunk
 STORE = "/chtc/PUBLIC/ncar/monthly/cesm2LE-FLNS.zarr"
 CHUNKS = (".zmetadata", ".zgroup", "FLNS/.zarray", *(f"FLNS/{i}.0.0" for i in range(16)))
 
 
 @pytest.fixture(name="store_fs_factory")
-def fixture_store_fs_factory(httpserver: HTTPServer, get_client):
+def fixture_store_fs_factory(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
     """
-    A single-host federation serving a zarr store's chunks.
+    A federation serving one zarr store, with the director and the cache on separate hosts.
+
+    `httpserver` is the director, `httpserver2` is the cache (and, for direct reads, the
+    origin). They have to be different hosts for the tests below to be able to count
+    director traffic: the director is asked for an object under the same path the object
+    is then fetched from, so on a single host the two are indistinguishable in the log.
 
     Returns a factory so tests can pass filesystem options (e.g. direct_reads=True).
     """
+    httpserver2.clear()
+
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
 
     for chunk in CHUNKS:
         path = f"{STORE}/{chunk}"
+        cache_url = httpserver2.url_for(path)
+
+        # The director points at the cache holding the object
         httpserver.expect_request(path).respond_with_data(
-            f"bytes of {chunk}",
-            status=200,
+            "",
+            status=307,
             headers={
-                "Link": f'<{httpserver.url_for(path)}>; rel="duplicate"; pri=1; depth=1',
+                "Link": f'<{cache_url}>; rel="duplicate"; pri=1; depth=1',
                 "X-Pelican-Namespace": "namespace=/chtc",
             },
         )
-        # The origin api serves direct reads for the same objects
+        # The director's origin endpoint, which direct reads use instead: it redirects
+        # to the origin rather than returning the object, and Location is what is followed
         httpserver.expect_request(f"/api/v1.0/director/origin{path}").respond_with_data(
             "",
             status=307,
             headers={
-                "Link": f'<{httpserver.url_for(path)}>; rel="duplicate"; pri=1; depth=1',
-                "Location": httpserver.url_for(path),
+                "Link": f'<{cache_url}>; rel="duplicate"; pri=1; depth=1',
+                "Location": cache_url,
                 "X-Pelican-Namespace": "namespace=/chtc",
             },
         )
+        # The cache (or origin) serves the bytes
+        httpserver2.expect_request(path).respond_with_data(f"bytes of {chunk}", status=200)
 
     def make_fs(**kwargs):
         return pelicanfs.core.PelicanFileSystem(
             httpserver.url_for("/"),
             get_client=get_client,
+            # skip_instance_cache is consumed by fsspec's caching metaclass, not by
+            # __init__; it stops these filesystems being shared between tests
             skip_instance_cache=True,
             **kwargs,
         )
@@ -71,27 +98,29 @@ def fixture_store_federation(store_fs_factory):
     return store_fs_factory()
 
 
-def director_calls(httpserver, total_objects):
-    """Requests to the director, i.e. GETs that were not object fetches or discovery."""
-    gets = [r.path for r, _ in httpserver.log if r.method == "GET"]
-    discovery = [p for p in gets if p.endswith("pelican-configuration")]
-    return len(gets) - total_objects - len(discovery)
+def director_lookups(httpserver):
+    """The paths the director was asked to resolve, ignoring federation discovery."""
+    return [r.path for r, _ in httpserver.log if r.method == "GET" and not r.path.endswith("pelican-configuration")]
 
 
-def test_cat_list_consults_the_director_once(store_federation, httpserver: HTTPServer):
+def test_cat_list_consults_the_director_once(store_federation, httpserver: HTTPServer, httpserver2: HTTPServer):
     """
-    A bulk cat resolves one cache for the namespace, not one per object.
+    A bulk cat resolves one cache for the whole namespace, not one per object.
 
-    The objects are fetched concurrently, so unless the namespace cache is warm before
-    the fan-out every one of them races off to the director for the same answer -- which
-    for a real zarr store means thousands of redundant director round trips.
+    The objects are fetched concurrently, so unless a cache has been resolved before the
+    fan-out every one of them races off to the director for the same answer -- for a real
+    store, thousands of redundant round trips.
     """
     keys = [f"{STORE}/{chunk}" for chunk in CHUNKS]
 
     out = store_federation.cat(keys)
 
     assert out == {f"{STORE}/{chunk}": f"bytes of {chunk}".encode() for chunk in CHUNKS}
-    assert director_calls(httpserver, len(keys)) == 1
+    assert len(director_lookups(httpserver)) == 1
+    # every object still came back, and came from the cache (which also sees one HEAD,
+    # the liveness probe get_working_cache makes before settling on it)
+    cache_gets = [r.path for r, _ in httpserver2.log if r.method == "GET"]
+    assert sorted(cache_gets) == sorted(keys)
 
 
 def test_cat_list_direct_reads(store_fs_factory, httpserver: HTTPServer):
@@ -112,13 +141,18 @@ def test_cat_list_direct_reads(store_fs_factory, httpserver: HTTPServer):
 
 
 def test_mapper_getitems(store_federation, httpserver: HTTPServer):
-    """The same bulk read through PelicanMap, which is how a catalogue reaches a store."""
+    """
+    The same bulk read through PelicanMap.
+
+    A mapper is how a catalogue actually reaches a store: zarr is handed something that
+    behaves like a dict of keys, and asks for many of them at once through getitems.
+    """
     mapper = pelicanfs.core.PelicanMap(STORE, pelfs=store_federation)
 
     out = mapper.getitems(list(CHUNKS))
 
     assert out == {chunk: f"bytes of {chunk}".encode() for chunk in CHUNKS}
-    assert director_calls(httpserver, len(CHUNKS)) == 1
+    assert len(director_lookups(httpserver)) == 1
 
 
 def test_mapper_single_key(store_federation):
@@ -130,11 +164,13 @@ def test_mapper_single_key(store_federation):
 
 def test_cat_osdf_urls(httpserver: HTTPServer, get_client):
     """
-    Catalogue entries are full osdf:// urls, and cat keys its results by namespace path.
+    A bulk read of full osdf:// urls comes back keyed by namespace path.
 
-    The intake catalogue in examples/intake stores paths like
-    osdf:///chtc/PUBLIC/.../foo.zarr, so a bulk read arrives as a list of urls rather
-    than of bare paths.
+    A catalogue records where each dataset lives, and records it as a url rather than a
+    bare path -- the entries in examples/intake look like
+    osdf:///chtc/PUBLIC/.../cesm2LE-FLNS.zarr. So a read driven by one arrives as a list
+    of urls, and the caller has to be able to match the results back up to what it asked
+    for.
     """
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     for chunk in (".zgroup", "FLNS/0.0.0"):

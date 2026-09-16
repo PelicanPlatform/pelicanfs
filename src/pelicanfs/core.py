@@ -1004,20 +1004,19 @@ class PelicanFileSystem(AsyncFileSystem):
 
     async def _isdir(self, path):
         """
-        Whether `path` is a collection, asked directly of the resource via
-        _is_collection. The http filesystem's listing-based answer would call an
-        *empty* collection False (and costs a full listing rather than a depth-0
-        PROPFIND).
+        Whether `path` is a collection. Accepts any path a caller may pass; the work is
+        done by _is_collection, which needs a namespace path.
         """
         return await self._is_collection(self._check_fspath(path))
 
     async def _is_collection(self, path):
         """
-        Whether `path` names a collection, asked of the collections endpoint directly.
+        Whether the namespace path `path` names a collection.
 
-        Not the same question as _isdir: a webdav listing excludes the collection
-        itself, so an *empty* collection lists as nothing and _isdir answers False.
-        This asks about the resource itself (a depth-0 PROPFIND) instead.
+        We ask the resource what it is rather than listing it, because a webdav listing
+        leaves out the collection itself: an empty collection lists as nothing, which
+        is indistinguishable from an object. Asking directly also costs one small
+        request instead of a whole listing.
         """
         try:
             list_url, director_response = await self.get_dirlist_url(path)
@@ -1361,18 +1360,15 @@ class PelicanFileSystem(AsyncFileSystem):
 
     async def _get_file(self, rpath, lpath, _collection_roots=None, **kwargs):
         """
-        Copy a single object to a local file.
+        Copy a single object to a local file, creating collections rather than fetching them.
 
-        A recursive _get expands to the collections it walked through as well as the
-        objects it found, and a collection only needs to exist locally -- there is
-        nothing to fetch. _ls_real marks a listed collection with a trailing slash, but
-        walk roots and glob matches arrive without one; _get resolves those up front
-        and passes them down as `_collection_roots`. As a safety net, anything else
-        whose destination already exists as a directory (_get pre-creates every parent
-        before it starts fetching) gets one confirmation against the collections
-        endpoint -- so a collection arriving by a route not covered above is still
-        skipped, while a stale local directory in the way of a real object fails the
-        download loudly rather than silently skipping it.
+        A recursive get asks for every collection it walked through as well as the
+        objects inside them, and a collection just needs to exist on disk. We recognise
+        one three ways, in order of cost: a trailing slash (how listings mark them),
+        membership of `_collection_roots` (the roots _get worked out up front, which
+        arrive without a slash), or -- as a backstop -- a destination that is already a
+        directory, confirmed against the collections endpoint. The confirmation matters:
+        without it a stale local directory would silently skip a real download.
         """
         if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
             os.makedirs(lpath, exist_ok=True)
@@ -1406,29 +1402,27 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         Copy an object, or a whole collection, to local files.
 
-        Deliberately not delegating to the http filesystem. Doing so would hand it a
-        single cache url as the root and then expand that url through _ls_from_http,
-        which answers with collections urls. The resulting list of sources spans two
-        hosts, so fsspec's common-prefix logic collapses the prefix to "https:" and
-        rewrites every source into "<lpath>/<host>/<namespace path>" -- leaving the
-        caller with one local folder per host (an empty one for the cache, holding just
-        the collection root, and a populated one for the collections endpoint) instead of
-        a single copy of the collection.
+        We expand the source list ourselves, in namespace paths, rather than letting the
+        http filesystem do it. It would start from a cache url but list from the
+        collections endpoint, so the sources would span two hosts -- and fsspec decides
+        local names by their common prefix. Across two hosts that prefix shrinks to
+        "https:", and the caller ends up with a directory per host:
 
-        Expanding in namespace paths instead keeps the prefix at the collection itself;
-        each object then resolves its own cache in _get_file.
+            get("/foo/bar", "dest")  ->  dest/cache.example.com/foo/bar     (empty)
+                                         dest/origin.example.com/foo/bar/*  (the objects)
+
+        Namespace paths share the prefix "/foo/bar", so the same call gives dest/bar.
+        Each object then picks its own cache in _get_file.
         """
         rpath = self._check_fspaths(rpath)
         await self._warm_namespace_cache(rpath)
 
-        # A collection can reach _get_file without the trailing slash that marks
-        # listed collections: the root of a walk (fsspec keys it by the path it was
-        # given) and a glob match (_glob strips the slash to match fsspec
-        # convention). An *empty* collection leaves no other trace at all, so settle
-        # the question up front and pass the answer down. Literal roots are probed
-        # concurrently; a glob already knows the type of every match, and the
-        # listings behind it land in the dircache, so the expansion inside
-        # AsyncFileSystem._get reuses them rather than refetching.
+        # Work out which of the requested roots are collections, so _get_file can tell
+        # them apart later. It cannot work this out itself: a root reaches it without
+        # the trailing slash that marks a listed collection, and an empty collection
+        # leaves no other trace. Literal roots are probed concurrently; a glob already
+        # reports the type of each match, and its listings land in the dircache for the
+        # expansion below to reuse.
         if kwargs.get("recursive"):
             roots = [rpath] if isinstance(rpath, str) else rpath
             literals = [root for root in roots if not fshttp.has_magic(root)]
@@ -1443,36 +1437,40 @@ class PelicanFileSystem(AsyncFileSystem):
                 matches = await self._glob(pattern, detail=True, maxdepth=kwargs.get("maxdepth"))
                 collection_roots |= {p.rstrip("/") for p, info in matches.items() if info.get("type") == "directory"}
             kwargs["_collection_roots"] = collection_roots
-        return await AsyncFileSystem._get(self, rpath, lpath, **kwargs)
+        return await super()._get(rpath, lpath, **kwargs)
 
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
         """
         Read the contents of one or more objects.
 
-        Same reason as _get for not delegating to the http filesystem: it would expand a
-        cache url through _ls_from_http and then read every object from the collections
-        endpoint it answers with, bypassing the caches entirely. Expanding here keeps the
-        paths in the namespace and lets _cat_file pick a cache per object.
+        Expanded here rather than by the http filesystem for the same reason as _get:
+        it would list from the collections endpoint and then read every object from
+        there, never touching a cache. Working in namespace paths lets _cat_file pick a
+        cache per object.
         """
         path = self._check_fspaths(path)
         await self._warm_namespace_cache(path)
-        return await AsyncFileSystem._cat(self, path, recursive=recursive, on_error=on_error, batch_size=batch_size, **kwargs)
+        return await super()._cat(path, recursive=recursive, on_error=on_error, batch_size=batch_size, **kwargs)
 
     async def _warm_namespace_cache(self, path):
         """
-        Resolve a cache for `path` so that the namespace cache is populated.
+        Ask the director about `path` once, before a bulk read fans out.
 
-        The bulk operations below fetch each object individually, and those fetches run
-        concurrently -- so without an already-warm namespace cache the whole first batch
-        would go back to the director for the same answer. That matters most for the
-        many-small-objects case: a catalogue-driven read of a zarr store asks for its
-        chunks as one big list, which would otherwise become one director round trip per
-        chunk.
+        Returns nothing: the point is the side effect. get_working_cache stores the
+        caches it is told about in self._namespace_cache, keyed by namespace prefix, and
+        every later lookup for a path under that prefix is answered from memory.
 
-        For a list we only warm on the first entry. A list almost always sits within one
-        namespace, and anything left over is still resolved correctly by the per-object
-        lookup -- this is an optimization, not a correctness requirement. Best effort
-        throughout: if it fails, the per-object lookups still work on their own.
+        Without this, a bulk read would stampede. Its objects are fetched concurrently
+        and each one resolves its own cache, so the whole first batch would reach the
+        director before any of them had stored an answer -- one round trip per object
+        rather than one for the request. That is the common case for many small objects:
+        an array store read through a data catalogue (see test_catalogue_reads.py) asks
+        for its chunks as a single list of thousands of paths.
+
+        For a list we warm on the first entry only, since a list almost always sits in
+        one namespace. Anything left over is still resolved correctly by the per-object
+        lookup, so this is an optimization rather than a correctness requirement, and it
+        is best effort throughout.
         """
         if isinstance(path, (list, tuple)):
             path = path[0] if len(path) else None
@@ -1504,14 +1502,17 @@ class PelicanFileSystem(AsyncFileSystem):
         if isinstance(paths, str):
             paths = [paths]
 
-        # fsspec counts "?" as a glob character, but a pelican path can legitimately
-        # carry a query string -- an authz token, say -- and HTTPFileSystem's own _glob
-        # makes the same exception. Without this, such a path would be sent down the glob
-        # route and charged an existence check instead of just being taken literally.
+        # Decide what counts as a glob the way HTTPFileSystem does -- "*" and "[" only.
+        # fsspec also counts "?", but a pelican path can legitimately carry a query
+        # string (an authz token, say), and treating that as a glob would send a plain
+        # path down the glob route instead of using it as given. Note this only rescues
+        # paths whose "?" is their sole magic: one that also contains "*" or "[" still
+        # globs, and fsspec's pattern translation treats its "?" as a wildcard. That
+        # limitation is inherited from HTTPFileSystem and is not handled here.
         if not recursive and not any(fshttp.has_magic(p) for p in paths):
             return sorted(set(paths))
 
-        return await AsyncFileSystem._expand_path(self, paths, recursive=recursive, maxdepth=maxdepth, **kwargs)
+        return await super()._expand_path(paths, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
 
 class OSDFFileSystem(PelicanFileSystem):
