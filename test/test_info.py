@@ -26,6 +26,22 @@ from pytest_httpserver import HTTPServer
 import pelicanfs.core
 
 
+def assert_probed_not_listed(httpserver: HTTPServer):
+    """
+    Every PROPFIND the filesystem sent was served by a registered handler and carried
+    Depth: 0 -- it probed, it never listed.
+
+    Registering only Depth: 0 handlers is not enough on its own: pytest-httpserver answers
+    an unmatched request with a 500 and merely records an assertion, and _ls_real reads a
+    500 as "this is an object" and recovers. check_assertions surfaces the unmatched
+    request; the header check makes the intent explicit.
+    """
+    httpserver.check_assertions()
+    depths = [request.headers["Depth"] for request, _ in httpserver.log if request.method == "PROPFIND" and "Depth" in request.headers]
+    assert depths
+    assert set(depths) == {"0"}
+
+
 def _multistatus(href, props="<D:getcontentlength>13</D:getcontentlength>"):
     """A PROPFIND reply describing the single resource at href."""
     return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -416,12 +432,13 @@ def test_isfile(httpserver: HTTPServer, get_client, get_webdav_client, file1_lis
         },
     )
 
-    httpserver.expect_request("/foo/bar/file1.txt/", method="PROPFIND").respond_with_data(
+    # isfile only ever probes, so only Depth: 0 is served; assert_probed_not_listed checks
+    httpserver.expect_request("/foo/bar/file1.txt/", method="PROPFIND", headers={"Depth": "0"}).respond_with_data(
         "not a directory",
         status=500,
     )
 
-    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND", headers={"Depth": "0"}).respond_with_data(
         file1_listing_response,
         status=207,
     )
@@ -434,6 +451,7 @@ def test_isfile(httpserver: HTTPServer, get_client, get_webdav_client, file1_lis
     )
 
     assert pelfs.isfile("/foo/bar/file1.txt") is True
+    assert_probed_not_listed(httpserver)
 
 
 def test_isfile_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
@@ -447,9 +465,11 @@ def test_isfile_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_l
     )
 
     # A real origin answers a collection with or without the trailing slash, and the same
-    # multistatus serves a depth-0 probe since the client only reads the entry it asked for
-    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(top_listing_response, status=207)
-    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+    # multistatus serves a depth-0 probe since the client only reads the entry it asked
+    # for. Only Depth: 0 is served: isfile must not list the collection, and
+    # assert_probed_not_listed checks that it did not
+    httpserver.expect_request("/foo/bar", method="PROPFIND", headers={"Depth": "0"}).respond_with_data(top_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/", method="PROPFIND", headers={"Depth": "0"}).respond_with_data(top_listing_response, status=207)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -459,6 +479,7 @@ def test_isfile_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_l
     )
 
     assert pelfs.isfile("/foo/bar") is False
+    assert_probed_not_listed(httpserver)
 
 
 def test_isfile_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
@@ -472,7 +493,7 @@ def test_isfile_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
     )
 
     # A missing path is settled by the existence probe alone; nothing else is asked
-    httpserver.expect_request("/foo/bar/file2", method="PROPFIND").respond_with_data(status=404)
+    httpserver.expect_request("/foo/bar/file2", method="PROPFIND", headers={"Depth": "0"}).respond_with_data(status=404)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -482,3 +503,4 @@ def test_isfile_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
     )
 
     assert pelfs.isfile("/foo/bar/file2") is False
+    assert_probed_not_listed(httpserver)
