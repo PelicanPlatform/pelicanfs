@@ -1042,23 +1042,31 @@ class PelicanFileSystem(AsyncFileSystem):
         await self._handle_token_generation(list_url, director_response, operation)
 
         parts = urllib.parse.urlparse(list_url)
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
+            return await self._probe_collection(client, parts.path)
+
+    async def _probe_collection(self, client, url_path):
+        """
+        Whether `url_path`, the path part of an already-resolved collections url, is a
+        collection. One depth-0 PROPFIND through `client`, which must be rooted at that
+        url's host; the caller has already handled token generation.
+        """
         # Probe the trailing-slash form: origins answer a collection's slash form
         # directly and reject an object's with a 500 -- the same convention _ls_real
         # keys on to tell the two apart
-        probe_path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
-        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
-            try:
-                return await client.is_dir(probe_path)
-            except (RemoteResourceNotFoundError, MethodNotSupportedError):
-                # Missing, or the response carries no resourcetype to judge by --
-                # nothing we can treat as a collection
-                return False
-            except ResponseErrorCodeError as e:
-                # Anything but the object-signalling 500 is a real failure and must
-                # not quietly classify the path as "not a collection"
-                if e.code != 500:
-                    raise
-                return False
+        probe_path = url_path if url_path.endswith("/") else f"{url_path}/"
+        try:
+            return await client.is_dir(probe_path)
+        except (RemoteResourceNotFoundError, MethodNotSupportedError):
+            # Missing, or the response carries no resourcetype to judge by --
+            # nothing we can treat as a collection
+            return False
+        except ResponseErrorCodeError as e:
+            # Anything but the object-signalling 500 is a real failure and must
+            # not quietly classify the path as "not a collection"
+            if e.code != 500:
+                raise
+            return False
 
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
