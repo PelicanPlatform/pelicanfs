@@ -308,9 +308,7 @@ def test_isfile(httpserver: HTTPServer, get_client, get_webdav_client, file1_lis
     assert pelfs.isfile("/foo/bar/file1.txt") is True
 
 
-def test_isfile_dir(
-    httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, file1_listing_response, file2_listing_response, file3_listing_response, f1_listing_response, f2_listing_response
-):
+def test_isfile_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
     foo_bar_url = httpserver.url_for("foo/bar")
     httpserver.expect_request("/").respond_with_data("", status=200)
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
@@ -320,22 +318,10 @@ def test_isfile_dir(
         headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
     )
 
+    # A real origin answers a collection with or without the trailing slash, and the same
+    # multistatus serves a depth-0 probe since the client only reads the entry it asked for
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(top_listing_response, status=207)
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
-
-    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(
-        file1_listing_response,
-        status=207,
-    )
-    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(
-        file3_listing_response,
-        status=207,
-    )
-    httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response, status=207)
-    httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response, status=207)
-    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(
-        file2_listing_response,
-        status=207,
-    )
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),
@@ -357,7 +343,7 @@ def test_isfile_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
         headers={"Link": f'<{foo_bar_file2_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_file2_url}"},
     )
 
-    httpserver.expect_request("/foo/bar/file2/", method="PROPFIND").respond_with_data(status=404)
+    # A missing path is settled by the existence probe alone; nothing else is asked
     httpserver.expect_request("/foo/bar/file2", method="PROPFIND").respond_with_data(status=404)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
