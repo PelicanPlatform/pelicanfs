@@ -80,6 +80,7 @@ def fixture_keyword_fs(httpserver: HTTPServer, get_client, get_webdav_client):
         ("info", "path"),
         ("ls", "path"),
         ("isdir", "path"),
+        ("isfile", "path"),
     ],
 )
 def test_read_methods_accept_a_keyword_path(keyword_fs, method, keyword):
