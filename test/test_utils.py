@@ -15,7 +15,7 @@ limitations under the License.
 """
 import pytest
 
-from pelicanfs.core import InvalidMetadata, PelicanFileSystem
+from pelicanfs.core import InvalidDestinationURL, InvalidMetadata, PelicanFileSystem
 
 
 def test_remove_hostname():
@@ -59,6 +59,12 @@ def test_remove_hostname():
         ("pelican://test-discovery-url.org", "pelican://test-discovery-url.org/p2/", "/p2/", "pelican://test-discovery-url.org/"),
         # Host-style paths (no scheme)
         ("pelican://test-discovery-url.org", "test-discovery-url.org/p3", "/p3", "pelican://test-discovery-url.org/"),
+        # Host-style paths with a port. urlparse reads "localhost:8444/p4" as scheme "localhost", so this
+        # must not be rejected as an unsupported scheme. This is what fsspec hands us after stripping
+        # pelican:// from a pelican://host:port/... destination in put() and get().
+        ("pelican://localhost:8444", "localhost:8444/p4", "/p4", "pelican://localhost:8444/"),
+        # Fresh filesystem receiving a host:port path should set discovery from it
+        ("", "localhost:8444/p4", "/p4", "pelican://localhost:8444/"),
         # osdf:// URLs should work with OSDFFileSystem (discovery_url is osg-htc.org)
         ("pelican://osg-htc.org", "osdf:///namespace/path", "/namespace/path", "pelican://osg-htc.org/"),
         # Fresh filesystem receiving osdf:// should auto-configure for OSDF
@@ -80,6 +86,8 @@ def test_fspath(discovery_url, input_path, expected_path, expected_discovery):
         ("pelican://test-discovery-url.org", "pelican://diff-disc/path"),
         # Host-style path with mismatched discovery
         ("pelican://test-discovery-url.org", "not-the-discovery-url.org/p3"),
+        # Host-style path whose port differs from the discovery URL's port
+        ("pelican://localhost:8444", "localhost:9999/p3"),
         # osdf:// URL with non-OSDF federation should fail
         ("pelican://other-federation.org", "osdf:///namespace/path"),
     ],
@@ -87,4 +95,20 @@ def test_fspath(discovery_url, input_path, expected_path, expected_discovery):
 def test_fspath_invalid(discovery_url, input_path):
     pelfs = PelicanFileSystem(discovery_url, skip_instance_cache=True)
     with pytest.raises(InvalidMetadata):
+        pelfs._check_fspath(input_path)
+
+
+@pytest.mark.parametrize(
+    "input_path",
+    [
+        # Full URLs with a scheme other than pelican:// or osdf:// are still rejected, even
+        # though bare host:port/path is now accepted
+        "https://test-discovery-url.org/path",
+        "s3://bucket/key",
+        "https://localhost:8444/path",
+    ],
+)
+def test_fspath_unsupported_scheme(input_path):
+    pelfs = PelicanFileSystem("pelican://test-discovery-url.org", skip_instance_cache=True)
+    with pytest.raises(InvalidDestinationURL):
         pelfs._check_fspath(input_path)

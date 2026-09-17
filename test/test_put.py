@@ -54,6 +54,49 @@ def test_put(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_
     pelfs.put("test_put.py", "/foo/bar/test.py")
 
 
+def test_put_host_port_url(httpserver: HTTPServer, get_client, get_webdav_client):
+    """
+    put() to a pelican://host:port/... destination, the call form from issue #124.
+
+    fsspec strips the scheme before calling _put_file, leaving "host:port/path", which urlparse reads
+    as scheme "host". This used to be rejected as an unsupported scheme for any federation whose
+    discovery URL carries a port.
+    """
+    federation_url = f"pelican://localhost:{httpserver.port}"
+    new_file_url = httpserver.url_for("/foo/bar/new.txt")
+    base_url = httpserver.url_for("/")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": base_url})
+    httpserver.expect_oneshot_request("/foo/bar/new.txt").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": '<"some.other.url">; rel="duplicate"; pri=1; depth=1',
+            "Location": new_file_url,
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={base_url}",
+        },
+    )
+    httpserver.expect_request("/foo/bar/new.txt/", method="PROPFIND").respond_with_data("not a directory", status=500)
+    httpserver.expect_request("/foo/bar/new.txt", method="PROPFIND").respond_with_data(status=404)
+    httpserver.expect_oneshot_request("/foo/bar/new.txt", method="PUT").respond_with_data(status=200)
+    httpserver.expect_request("/api/v1.0/director/origin/foo/bar/new.txt").respond_with_data(
+        "",
+        status=200,
+        headers={
+            "Location": new_file_url,
+        },
+    )
+
+    pelfs = PelicanFileSystem(
+        federation_url,
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+    pelfs.put("test_put.py", f"{federation_url}/foo/bar/new.txt")
+
+    assert any(req.method == "PUT" and req.path == "/foo/bar/new.txt" for req, _ in httpserver.log)
+
+
 def test_put_dest_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
     foo_bar_url = httpserver.url_for("/foo/bar/")
     base_url = httpserver.url_for("/")

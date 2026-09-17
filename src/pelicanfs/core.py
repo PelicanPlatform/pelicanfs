@@ -1126,9 +1126,7 @@ class PelicanFileSystem(AsyncFileSystem):
             discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
             path = parsed.path
-        elif parsed.scheme != "":
-            raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
-        elif not path.startswith("/"):
+        elif "://" not in path and not path.startswith("/"):
             # When path has no scheme and is not absolute (e.g., "host.example.com/path"),
             # treat it as a pelican URL where the first component is the hostname
             # This is necessary because some upstream libraries (e.g., xarray) will pass in a path and
@@ -1137,6 +1135,8 @@ class PelicanFileSystem(AsyncFileSystem):
             discovery_url = pelican_url._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
             path = pelican_url.path
+        elif parsed.scheme != "":
+            raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
         else:
             # Path has no scheme, so the filesystem object must have a discovery URL
             if not self.discovery_url:
