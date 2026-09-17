@@ -1247,20 +1247,28 @@ class PelicanFileSystem(AsyncFileSystem):
             # so nothing in it is usefully a collection
             return False
 
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
+            return await self._probe_collection(client, _webdav_path(list_url))
+
+    async def _probe_collection(self, client: Client, remote_path: str) -> bool:
+        """
+        Whether `remote_path`, the decoded path of an already-resolved collections url,
+        is a collection. One depth-0 PROPFIND through `client`, which must be rooted at
+        that url's host; the caller has already handled token generation.
+        """
         # Probe the trailing-slash form: origins answer a collection's slash form
         # directly and reject an object's with a 500 -- the same convention _ls_real
         # keys on to tell the two apart
-        probe_path = f"{_webdav_path(list_url).removesuffix('/')}/"
-        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
-            try:
-                return await client.is_collection(probe_path)
-            except (ResponseError, InvalidResponseError) as e:
-                # A 405 is something PROPFIND cannot describe, which is no collection
-                # either. Any other failure must not quietly classify the path as "not
-                # a collection".
-                if _not_a_collection(e) or isinstance(e, MethodNotAllowedError):
-                    return False
-                raise
+        probe_path = f"{remote_path.removesuffix('/')}/"
+        try:
+            return await client.is_collection(probe_path)
+        except (ResponseError, InvalidResponseError) as e:
+            # A 405 is something PROPFIND cannot describe, which is no collection
+            # either. Any other failure must not quietly classify the path as "not
+            # a collection".
+            if _not_a_collection(e) or isinstance(e, MethodNotAllowedError):
+                return False
+            raise
 
     @_traced
     async def _find(self, path: str, maxdepth: int | None = None, withdirs: bool = False, **kwargs: Any) -> Any:
