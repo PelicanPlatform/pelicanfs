@@ -79,6 +79,26 @@ def collection_tree_fs(
     )
 
 
+def test_cat_recursive(collection_tree_fs):
+    """
+    cat(recursive=True) expands to the collection itself, its sub-collections and its files,
+    exactly as fsspec does for a local directory. With the default on_error="raise" the result
+    is IsADirectoryError (as on a local filesystem); with on_error="omit" the collections are
+    dropped and every file is returned.
+    """
+    with pytest.raises(IsADirectoryError):
+        collection_tree_fs.cat("/foo/bar", recursive=True)
+
+    # A collection answer is not a cache fault, so the cache must still be usable afterwards
+    assert collection_tree_fs.cat("/foo/bar", recursive=True, on_error="omit") == {file: f"content of {file}".encode() for file in FILES}
+
+
+def test_cat_file_negative_bounds(collection_tree_fs):
+    """Bounds relative to the end need a size, and a collection must not read as empty."""
+    with pytest.raises(IsADirectoryError):
+        collection_tree_fs.cat_file("/foo/bar", start=-5, end=-1)
+
+
 def test_find_withdirs(collection_tree_fs):
     """
     find(withdirs=True) has to report the collection root as a directory even though the
