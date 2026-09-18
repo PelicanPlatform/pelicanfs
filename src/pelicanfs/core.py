@@ -404,6 +404,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self.http_file_system._ls_real = self._ls_real
         self.http_file_system._ls = self._ls_from_http
 
+        # Caches answer HEAD/GET on a collection with 409, so the httpfs _info call fails on
+        # collections. Wrap it so a collection is reported as a directory.
+        self.http_file_system._info = self._info_from_http
+
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @overload
     @classmethod
@@ -968,6 +972,23 @@ class PelicanFileSystem(AsyncFileSystem):
             out = await self._ls_real(collections_url, detail=detail)
             self.dircache[collections_url] = out
         return out
+
+    async def _info_from_http(self, url, **kwargs):
+        """
+        This _info is called from HTTPFileSystem (e.g. by _find/_expand_path) and receives a cache URL.
+        A cache answers HEAD and GET on a collection with 409, which httpfs turns into a FileNotFoundError.
+        Before giving up, ask the collections endpoint whether the path is a collection and, if so,
+        report it as a directory.
+        """
+        try:
+            # Call the class's own _info: fsspec shares HTTPFileSystem instances, so the instance
+            # attribute may already be another PelicanFileSystem's wrapper rather than the original
+            return await fshttp.HTTPFileSystem._info(self.http_file_system, url, **kwargs)
+        except FileNotFoundError as e:
+            # httpfs chains the failed GET (an aiohttp.ClientResponseError); only a 409 can mean "this is a collection"
+            if getattr(e.__cause__, "status", None) == 409 and await self._is_collection(self._remove_host_from_path(url)):
+                return {"name": url, "size": 0, "type": "directory"}
+            raise
 
     async def _ls_real(self, url, detail=True, client=None):
         """
