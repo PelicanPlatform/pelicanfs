@@ -404,9 +404,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self.http_file_system._ls_real = self._ls_real
         self.http_file_system._ls = self._ls_from_http
 
-        # Caches answer HEAD/GET on a collection with 409, so the httpfs _info call fails on
-        # collections. Wrap it so a collection is reported as a directory.
+        # Caches answer HEAD/GET on a collection with 409, so the httpfs _info and _cat_file calls
+        # fail on collections. Wrap them so a collection is treated as a directory.
         self.http_file_system._info = self._info_from_http
+        self.http_file_system._cat_file = self._cat_file_from_http
 
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @overload
@@ -895,7 +896,8 @@ class PelicanFileSystem(AsyncFileSystem):
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
-        if isinstance(e, FileNotFoundError):
+        # A missing object or a collection is an answer from a healthy cache, not a cache fault
+        if isinstance(e, (FileNotFoundError, IsADirectoryError)):
             return
         logger.debug("Marking cache at %s as bad", url)
         cache_url = urllib.parse.urlparse(url)
@@ -988,6 +990,19 @@ class PelicanFileSystem(AsyncFileSystem):
             # httpfs chains the failed GET (an aiohttp.ClientResponseError); only a 409 can mean "this is a collection"
             if getattr(e.__cause__, "status", None) == 409 and await self._is_collection(self._remove_host_from_path(url)):
                 return {"name": url, "size": 0, "type": "directory"}
+            raise
+
+    async def _cat_file_from_http(self, url, start=None, end=None, **kwargs):
+        """
+        This _cat_file is called from HTTPFileSystem (e.g. by a recursive _cat) and receives a cache URL.
+        A cache answers GET on a collection with 409. Raise IsADirectoryError instead, which is what a
+        local filesystem raises and which cat(on_error="omit") drops cleanly.
+        """
+        try:
+            return await fshttp.HTTPFileSystem._cat_file(self.http_file_system, url, start, end, **kwargs)
+        except aiohttp.ClientResponseError as e:
+            if e.status == 409 and await self._is_collection(self._remove_host_from_path(url)):
+                raise IsADirectoryError(url) from e
             raise
 
     async def _ls_real(self, url, detail=True, client=None):
