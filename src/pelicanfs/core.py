@@ -1147,7 +1147,20 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Compatible path: {path}")
         return path
 
-    async def _put_file(self, lpath, rpath, **kwargs):
+    async def _put_file(self, lpath, rpath, mode="overwrite", **kwargs):
+        """
+        Upload a local file as an object.
+
+        Pelican objects are immutable: the Origin refuses to replace an object that
+        already exists, whatever ``mode`` says. fsspec's ``mode="create"`` (exclusive
+        create) therefore describes what every upload does and is accepted. fsspec's
+        default ``mode="overwrite"`` is accepted for compatibility but does not
+        overwrite. In both modes an upload to an existing name raises FileExistsError,
+        matching fsspec's contract for ``create``.
+        """
+        if mode not in ("overwrite", "create"):
+            raise ValueError(f"Unsupported put mode {mode!r}; expected 'overwrite' or 'create'")
+
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
 
@@ -1157,9 +1170,32 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Running put_file from {lpath} to {data_url}...")
 
         async def upload_file():
-            await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
+            # The http filesystem only knows "overwrite"; the exclusive-create
+            # semantics come from the Origin, not from the request.
+            await self.http_file_system._put_file(lpath, data_url, method="put", mode="overwrite", **kwargs)
 
-        await asyncio.create_task(upload_file())
+        try:
+            await asyncio.create_task(upload_file())
+        except aiohttp.ClientResponseError as e:
+            # The Origin answers 403 both for an object that already exists and for a
+            # token without permission. Only an object that is really there turns the
+            # refusal into FileExistsError; any other outcome keeps the original error.
+            if e.status == 403 and await self._object_exists_after_refusal(path):
+                raise FileExistsError(path) from e
+            raise
+
+    async def _object_exists_after_refusal(self, path: str) -> bool:
+        """
+        Best-effort existence check used only to explain a refused upload.
+
+        A failure here must not hide the refusal itself, so every error is treated as
+        "unknown" and reported as False.
+        """
+        try:
+            return bool(await self._exists(path))
+        except Exception as probe_error:
+            logger.debug(f"Could not check whether {path} exists after a refused upload: {probe_error}")
+            return False
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
