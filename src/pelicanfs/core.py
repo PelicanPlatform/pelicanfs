@@ -389,12 +389,11 @@ class PelicanFileSystem(AsyncFileSystem):
         self.select_timeout = select_timeout
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
-        # They will raise NotImplementedErrors when called
+        # They will raise NotImplementedErrors when called. (mkdir/makedirs are handled by our own
+        # overrides below, because fsspec's defaults for those are silent no-ops rather than errors.)
         self._rm_file = self.http_file_system._rm_file
         self._cp_file = self.http_file_system._cp_file
         self._pipe_file = self.http_file_system._pipe_file
-        self._mkdir = self.http_file_system._mkdir
-        self._makedirs = self.http_file_system._makedirs
 
         # Overwrite the httpsfs _ls_real call with ours with ours
         self.http_file_system._ls_real = self._ls_real
@@ -1268,6 +1267,16 @@ class PelicanFileSystem(AsyncFileSystem):
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
         await asyncio.create_task(upload_file())
+
+    # fsspec's default _mkdir/_makedirs are silent no-ops ("may not have directories").
+    # Pelican has no standalone "create a collection" operation: collections come into
+    # existence when objects are uploaded under a namespace prefix. Raise instead of
+    # pretending the call succeeded so callers do not assume a collection now exists.
+    async def _mkdir(self, path, create_parents=True, **kwargs):
+        raise NotImplementedError("mkdir is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
+
+    async def _makedirs(self, path, exist_ok=False):
+        raise NotImplementedError("makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
