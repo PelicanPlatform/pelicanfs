@@ -25,7 +25,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
@@ -360,6 +360,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self._access_stats = _AccessStats()
 
         self.token = kwargs.get("headers", {}).get("Authorization")
+        # Expiry of a token this filesystem generated itself. None means no expiry is
+        # known, which covers both "no token" and a token the caller supplied in headers;
+        # a caller-supplied token is never re-checked here.
+        self._token_expiry: Optional[datetime] = None
 
         request_options = copy(kwargs)
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
@@ -545,7 +549,15 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
-        # Check if we already have a token from kwargs headers
+        # A token we generated earlier is only good until it expires; once it has, forget
+        # it so a fresh one is generated below instead of being sent until the server
+        # rejects it.
+        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc):
+            logger.debug(f"Remembered token expired at {self._token_expiry}, regenerating for {url}")
+            self.token = None
+            self._token_expiry = None
+
+        # Check if we already have a token, either from kwargs headers or generated earlier
         existing_token = self._get_token()
         if existing_token:
             logger.debug(f"Using existing token from headers for {url}")
@@ -588,6 +600,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 self._set_http_filesystem_token(token)
                 # Also update self.token so _ls_real can use it
                 self.token = f"Bearer {token}"
+                # Remember when it expires so the check above can retire it in time
+                self._token_expiry = token_generator.token.Expiry if token_generator.token else None
             return token
         except Exception as e:
             logger.warning(f"Failed to generate token for {url}: {e}")
