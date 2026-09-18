@@ -483,6 +483,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
         Returns:
             str: The generated token or None if no token is required
+
+        Raises:
+            NoCredentialsException (or another PelicanException) if a token is required
+            but cannot be obtained.
         """
         if not director_response or not director_response.x_pel_ns_hdr:
             return None
@@ -497,46 +501,42 @@ class PelicanFileSystem(AsyncFileSystem):
             self._set_http_filesystem_token(existing_token)
             return existing_token
 
-        try:
-            # Ensure director URL is set (for token generation validation)
-            await self._set_director_url()
+        # Ensure director URL is set (for token generation validation)
+        await self._set_director_url()
 
-            # Construct pelican:// URL for OIDC device flow
-            pelican_url = None
-            if self.discovery_url and url:
-                # Extract federation host from discovery URL
-                parsed_discovery = urllib.parse.urlparse(self.discovery_url)
-                federation_host = parsed_discovery.netloc
+        # Construct pelican:// URL for OIDC device flow
+        pelican_url = None
+        if self.discovery_url and url:
+            # Extract federation host from discovery URL
+            parsed_discovery = urllib.parse.urlparse(self.discovery_url)
+            federation_host = parsed_discovery.netloc
 
-                # Extract path from the data URL
-                parsed_url = urllib.parse.urlparse(url)
-                path = parsed_url.path
+            # Extract path from the data URL
+            parsed_url = urllib.parse.urlparse(url)
+            path = parsed_url.path
 
-                # Construct pelican://<federation-host>/<path>
-                pelican_url = f"pelican://{federation_host}{path}"
-                logger.debug(f"Constructed pelican URL for token generation: {pelican_url}")
+            # Construct pelican://<federation-host>/<path>
+            pelican_url = f"pelican://{federation_host}{path}"
+            logger.debug(f"Constructed pelican URL for token generation: {pelican_url}")
 
-            # Create token generator with OIDC configuration
-            token_generator = TokenGenerator(
-                destination_url=url,
-                dir_resp=director_response,
-                operation=operation,
-                pelican_url=pelican_url,
-                oidc_timeout_seconds=self.oidc_timeout_seconds,
-                pty_buffer_size=self.pty_buffer_size,
-                select_timeout=self.select_timeout,
-            )
+        # Create token generator with OIDC configuration
+        token_generator = TokenGenerator(
+            destination_url=url,
+            dir_resp=director_response,
+            operation=operation,
+            pelican_url=pelican_url,
+            oidc_timeout_seconds=self.oidc_timeout_seconds,
+            pty_buffer_size=self.pty_buffer_size,
+            select_timeout=self.select_timeout,
+        )
 
-            # Get token (TokenContentIterator will automatically discover token location)
-            token = token_generator.get_token()
-            if token:
-                self._set_http_filesystem_token(token)
-                # Also update self.token so _ls_real can use it
-                self.token = f"Bearer {token}"
-            return token
-        except Exception as e:
-            logger.warning(f"Failed to generate token for {url}: {e}")
-            return None
+        # Get token (TokenContentIterator will automatically discover token location)
+        token = token_generator.get_token()
+        if token:
+            self._set_http_filesystem_token(token)
+            # Also update self.token so _ls_real can use it
+            self.token = f"Bearer {token}"
+        return token
 
     def get_access_data(self):
         """

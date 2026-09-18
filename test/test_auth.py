@@ -15,9 +15,53 @@ limitations under the License.
 """
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
+from pelicanfs.exceptions import NoCredentialsException
+from pelicanfs.token_generator import TokenGenerator
+
+
+def test_missing_credential_raises_and_sends_no_request(httpserver: HTTPServer, get_client, monkeypatch):
+    """
+    When the namespace requires a token and none can be obtained, the operation has to fail
+    with NoCredentialsException and no data request may leave the client.
+    """
+    foo_bar_url = httpserver.url_for("/foo/bar")
+
+    def no_credentials(self):
+        raise NoCredentialsException(f"Credential is required for {self.DestinationURL} but was not discovered")
+
+    monkeypatch.setattr(TokenGenerator, "get_token", no_credentials)
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "Location": foo_bar_url,
+            "X-Pelican-Namespace": "namespace=/foo, require-token=true",
+        },
+    )
+    # Anything that reaches the data path is answered the way a token-guarded server would.
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=401)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=401)
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+    assert pelfs.token is None, "this test only means something if the token has to be generated"
+
+    with pytest.raises(NoCredentialsException):
+        pelfs.cat("/foo/bar")
+
+    # The director's own 307 is the only thing allowed to have hit /foo/bar.
+    leaked = [(request.method, response.status_code) for request, response in httpserver.log if request.path == "/foo/bar" and response.status_code != 307]
+    assert not leaked, f"a request went out without a token: {leaked}"
 
 
 def test_authorization_headers(httpserver: HTTPServer, get_client, monkeypatch):
