@@ -14,12 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import itertools
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fsspec.asyn import sync
 
-from pelicanfs.core import PelicanFileSystem
+from pelicanfs.core import TOKEN_REFRESH_MARGIN, PelicanFileSystem
 from pelicanfs.dir_header_parser import DirectorResponse, XPelNs, XPelTokGen
 from pelicanfs.token_generator import TokenGenerator, TokenInfo, TokenOperation
 
@@ -44,21 +45,20 @@ def pelfs():
     return fs
 
 
-def stub_generator(monkeypatch, expiry_for_call):
+def install_generator_stub(monkeypatch, expiry):
     """
     Replace TokenGenerator.get_token with one that hands out "token-<n>" on its n-th call,
-    recording an expiry the way the real get_token does, and reports how often it ran.
+    recording the given expiry the way the real get_token does. The number in the token
+    name is how a test tells whether the generator ran again.
     """
-    calls = []
+    numbers = itertools.count(1)
 
     def get_token(self):
-        calls.append(self.Operation)
-        contents = f"token-{len(calls)}"
-        self.token = TokenInfo(contents, expiry_for_call(len(calls)))
+        contents = f"token-{next(numbers)}"
+        self.token = TokenInfo(contents, expiry)
         return contents
 
     monkeypatch.setattr(TokenGenerator, "get_token", get_token)
-    return calls
 
 
 def handle(pelfs, dir_resp):
@@ -75,27 +75,36 @@ def authorization_header(pelfs):
 
 def test_expired_generated_token_is_regenerated(pelfs, token_required_dir_resp, monkeypatch):
     """
-    A token the filesystem generated is remembered on the instance, and every later call
-    reused it without ever looking at its expiry. Once it had expired the filesystem kept
-    sending it, so requests failed with 401 instead of triggering a fresh generation.
+    Once a generated token has passed its expiry, the next call must generate a new one
+    rather than hand back the remembered token, and the new token must replace the old
+    one both on the instance and in the HTTP filesystem's headers.
     """
-    calls = stub_generator(monkeypatch, lambda n: datetime.now(timezone.utc) - timedelta(seconds=1))
+    install_generator_stub(monkeypatch, datetime.now(timezone.utc) - timedelta(seconds=1))
 
     assert handle(pelfs, token_required_dir_resp) == "token-1"
     assert pelfs.token == "Bearer token-1"
 
     assert handle(pelfs, token_required_dir_resp) == "token-2", "the expired token was reused instead of being regenerated"
-    assert len(calls) == 2
     assert pelfs.token == "Bearer token-2"
     assert authorization_header(pelfs) == "Bearer token-2", "the HTTP filesystem is still sending the expired token"
 
 
-def test_unexpired_generated_token_is_reused(pelfs, token_required_dir_resp, monkeypatch):
-    calls = stub_generator(monkeypatch, lambda n: datetime.now(timezone.utc) + timedelta(hours=1))
+def test_token_about_to_expire_is_regenerated(pelfs, token_required_dir_resp, monkeypatch):
+    """
+    A token still inside the refresh margin would be expired by the time a request
+    carrying it reached the server, so it is retired early.
+    """
+    install_generator_stub(monkeypatch, datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN / 2)
 
     assert handle(pelfs, token_required_dir_resp) == "token-1"
+    assert handle(pelfs, token_required_dir_resp) == "token-2", "a token about to expire was reused instead of being regenerated"
+
+
+def test_unexpired_generated_token_is_reused(pelfs, token_required_dir_resp, monkeypatch):
+    install_generator_stub(monkeypatch, datetime.now(timezone.utc) + timedelta(hours=1))
+
     assert handle(pelfs, token_required_dir_resp) == "token-1"
-    assert len(calls) == 1, "a token that has not expired was generated again"
+    assert handle(pelfs, token_required_dir_resp) == "token-1", "a token that has not expired was generated again"
     assert pelfs.token == "Bearer token-1"
 
 
