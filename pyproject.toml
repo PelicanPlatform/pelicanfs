@@ -30,7 +30,7 @@ classifiers = [
 
 requires-python = ">=3.11, <4"
 dependencies = [
-    "aiohttp >=3.9.4,<4",
+    "aiohttp >=3.9.4,!=3.14.4,<4",
     "aiowebdav2",
     "cachetools >=5.3,<6",
     "fsspec >=2024.3.1",
