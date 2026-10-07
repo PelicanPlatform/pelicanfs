@@ -54,6 +54,46 @@ def test_put(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_
     pelfs.put("test_put.py", "/foo/bar/test.py")
 
 
+def test_put_nonexistent_rpath_listing_response(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    """
+    put() writes to the destination path itself when that path does not exist yet.
+    """
+    base_url = httpserver.url_for("/")
+    new_file_url = httpserver.url_for("/foo/bar/new.txt")
+    wrong_url = httpserver.url_for("/foo/bar/new.txt/test_put.py")
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": base_url})
+    httpserver.expect_oneshot_request("/foo/bar/new.txt").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{new_file_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={base_url}",
+        },
+    )
+    # The origin answers the non-existent path's slash form with the parent's listing, and its
+    # plain form with a 404
+    httpserver.expect_request("/foo/bar/new.txt/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/new.txt", method="PROPFIND").respond_with_data(status=404)
+
+    # Accept the upload at both the right and the wrong path, so a regression shows up as the
+    # wrong path being written rather than as an unrelated error
+    for path, url in (("/foo/bar/new.txt", new_file_url), ("/foo/bar/new.txt/test_put.py", wrong_url)):
+        httpserver.expect_request(f"/api/v1.0/director/origin{path}").respond_with_data("", status=200, headers={"Location": url})
+        httpserver.expect_request(path, method="PUT").respond_with_data(status=200)
+
+    pelfs = PelicanFileSystem(
+        base_url,
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+    pelfs.put("test_put.py", "/foo/bar/new.txt")
+
+    puts = [request.path for request, _ in httpserver.log if request.method == "PUT"]
+    assert puts == ["/foo/bar/new.txt"]
+
+
 def test_put_dest_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
     foo_bar_url = httpserver.url_for("/foo/bar/")
     base_url = httpserver.url_for("/")

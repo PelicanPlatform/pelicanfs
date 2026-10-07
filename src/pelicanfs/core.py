@@ -17,14 +17,16 @@ limitations under the License.
 import asyncio
 import contextvars
 import functools
+import inspect
 import logging
+import os
 import re
 import threading
 import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
@@ -32,7 +34,11 @@ import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav2.client import Client, ClientOptions
-from aiowebdav2.exceptions import RemoteResourceNotFoundError, ResponseErrorCodeError
+from aiowebdav2.exceptions import (
+    MethodNotSupportedError,
+    RemoteResourceNotFoundError,
+    ResponseErrorCodeError,
+)
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -56,6 +62,9 @@ logger = logging.getLogger("fsspec.pelican")
 # call and skip it rather than raising. A ContextVar rather than an instance attribute so that
 # concurrent puts on a shared filesystem cannot see each other's state.
 _put_in_progress: contextvars.ContextVar[bool] = contextvars.ContextVar("pelicanfs_put_in_progress", default=False)
+# How long before a generated token's expiry it is retired and a new one generated. A
+# token sent right at its expiry would be expired by the time it reaches the server.
+TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
 
 
 @dataclass
@@ -278,6 +287,29 @@ async def get_webdav_client(options):
             logger.debug("WebDAV client closed")
 
 
+def _path_arg_splitter(func):
+    """
+    Build a function that pulls `func`'s path argument out of a call, however it was passed.
+
+    The decorators below rewrite that argument into a url before handing the call on, so
+    they need it whether the caller passed it positionally or by name. fsspec's public
+    API allows both -- fs.exists(path="/ns/obj") is as valid as fs.exists("/ns/obj") --
+    so reaching for args[0] raises IndexError on a perfectly legal call.
+    """
+    # The first parameter after self is the path in every function these decorators wrap
+    name = list(inspect.signature(func).parameters)[1]
+
+    def split(args, kwargs):
+        if args:
+            return args[0], args[1:]
+        try:
+            return kwargs.pop(name), ()
+        except KeyError:
+            raise TypeError(f"{func.__name__}() missing required argument: '{name}'") from None
+
+    return split
+
+
 def sync_generator(async_gen_func, obj=None):
     """Wrap an async generator method into a sync generator."""
 
@@ -337,6 +369,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self._access_stats = _AccessStats()
 
         self.token = kwargs.get("headers", {}).get("Authorization")
+        # Expiry of a token this filesystem generated itself. None means no expiry is
+        # known, which covers both "no token" and a token the caller supplied in headers;
+        # a caller-supplied token is never re-checked here.
+        self._token_expiry: Optional[datetime] = None
 
         request_options = copy(kwargs)
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
@@ -372,6 +408,8 @@ class PelicanFileSystem(AsyncFileSystem):
     @classmethod
     def _strip_protocol(cls, path):
         """For HTTP, we always want to keep the full URL"""
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
         if path.startswith("osdf://"):
             path = path[7:]
         elif path.startswith("pelican://"):
@@ -429,6 +467,16 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             return None
 
+    def _webdav_options(self, url: str) -> dict:
+        """
+        Connection options for a webdav client rooted at `url`'s host.
+        """
+        parts = urllib.parse.urlparse(url)
+        return {
+            "hostname": f"{parts.scheme}://{parts.netloc}",
+            "token": self._get_token(),
+        }
+
     def _get_token_operation(self, func_name: str) -> TokenOperation:
         """
         Determine the token operation based on the function being called.
@@ -439,8 +487,22 @@ class PelicanFileSystem(AsyncFileSystem):
         Returns:
             TokenOperation: The appropriate token operation for the function
         """
-        # Read operations
-        read_operations = {"_cat_file", "_exists", "_info", "_get", "_get_file", "get_working_cache", "_cat", "_expand_path", "_ls", "_isdir", "_find", "_isfile", "_walk", "_du", "open", "open_async"}
+        # Read operations. These are the names that actually reach this function --
+        # decorated functions arrive as func.__name__, the rest are passed as literal
+        # strings at their call sites. Unknown names default to read below.
+        read_operations = {
+            "_cat_file",
+            "_exists",
+            "_info",
+            "_get_file_from_cache",
+            "_is_collection",
+            "get_working_cache",
+            "_ls",
+            "_find",
+            "_isfile",
+            "open",
+            "open_async",
+        }
 
         # Write operations (if any are implemented)
         write_operations = {"_put_file"}
@@ -495,7 +557,15 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
-        # Check if we already have a token from kwargs headers
+        # A token we generated earlier is only good until it expires; once it has, or is
+        # about to, forget it so a fresh one is generated below instead of being sent
+        # until the server rejects it.
+        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN:
+            logger.debug(f"Remembered token expires at {self._token_expiry}, regenerating for {url}")
+            self.token = None
+            self._token_expiry = None
+
+        # Check if we already have a token, either from kwargs headers or generated earlier
         existing_token = self._get_token()
         if existing_token:
             logger.debug(f"Using existing token from headers for {url}")
@@ -538,6 +608,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 self._set_http_filesystem_token(token)
                 # Also update self.token so _ls_real can use it
                 self.token = f"Bearer {token}"
+                # Remember when it expires so the check above can retire it in time
+                self._token_expiry = token_generator.token.Expiry if token_generator.token else None
             return token
         except Exception as e:
             logger.warning(f"Failed to generate token for {url}: {e}")
@@ -605,6 +677,12 @@ class PelicanFileSystem(AsyncFileSystem):
         try:
             cached_url, cached_director_response = self._match_namespace(fparsed.path)
             if cached_url:
+                # _CacheManager keeps bare scheme://host entries, so a namespace hit
+                # comes back without the query string the caller asked for. Put it back:
+                # it can carry an authz token, and dropping it turns an authorized
+                # request into an unauthorized one.
+                if fparsed.query:
+                    cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
                 logger.debug(f"Found previously working cache: {cached_url}")
                 return cached_url, cached_director_response
         except NoAvailableSource:
@@ -832,9 +910,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
         This is for functions which need to retrieve information from origin directories such as "find", "ls", "info", etc.
         """
+        split_path_arg = _path_arg_splitter(func)
 
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
+            raw_path, rest = split_path_arg(args, kwargs)
+            path = self._check_fspath(raw_path)
             data_url, director_response = await self.get_dirlist_url(path)
 
             # Handle token generation if required
@@ -842,7 +922,7 @@ class PelicanFileSystem(AsyncFileSystem):
             await self._handle_token_generation(data_url, director_response, operation)
 
             logger.debug(f"Running {func} with url: {data_url}")
-            return await func(self, data_url, *args[1:], **kwargs)
+            return await func(self, data_url, *rest, **kwargs)
 
         return wrapper
 
@@ -897,17 +977,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # If a client is provided, use it; otherwise, create one
         if client is None:
-            # Create the options for the webdavclient
-            if self.token:
-                webdav_token = self.token.removeprefix("Bearer ")
-            else:
-                webdav_token = None
-
-            options = {
-                "hostname": base_url,
-                "token": webdav_token,
-            }
-            async with self.get_webdav_client(options) as client_ctx:
+            async with self.get_webdav_client(self._webdav_options(url)) as client_ctx:
                 return await self._ls_real(url, detail=detail, client=client_ctx)
 
         # Now that we have a client, we can proceed with the listing
@@ -955,10 +1025,49 @@ class PelicanFileSystem(AsyncFileSystem):
         return sorted(set(items))
 
     async def _isdir(self, path):
-        # Don't use @_dirlist_dec here because http_file_system._isdir will call
-        # _ls_from_http which handles the collections URL conversion
-        path = self._check_fspath(path)
-        return await self.http_file_system._isdir(path)
+        """
+        Whether `path` is a collection. Accepts any path a caller may pass; the work is
+        done by _is_collection, which needs a namespace path.
+        """
+        return await self._is_collection(self._check_fspath(path))
+
+    async def _is_collection(self, path):
+        """
+        Whether the namespace path `path` names a collection.
+
+        We ask the resource what it is rather than listing it, because a webdav listing
+        leaves out the collection itself: an empty collection lists as nothing, which
+        is indistinguishable from an object. Asking directly also costs one small
+        request instead of a whole listing.
+        """
+        try:
+            list_url, director_response = await self.get_dirlist_url(path)
+        except NoCollectionsUrl:
+            # No collections endpoint means nothing in this namespace can be listed,
+            # so nothing in it is usefully a collection
+            return False
+
+        operation = self._get_token_operation("_is_collection")
+        await self._handle_token_generation(list_url, director_response, operation)
+
+        parts = urllib.parse.urlparse(list_url)
+        # Probe the trailing-slash form: origins answer a collection's slash form
+        # directly and reject an object's with a 500 -- the same convention _ls_real
+        # keys on to tell the two apart
+        probe_path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
+            try:
+                return await client.is_dir(probe_path)
+            except (RemoteResourceNotFoundError, MethodNotSupportedError):
+                # Missing, or the response carries no resourcetype to judge by --
+                # nothing we can treat as a collection
+                return False
+            except ResponseErrorCodeError as e:
+                # Anything but the object-signalling 500 is a real failure and must
+                # not quietly classify the path as "not a collection"
+                if e.code != 500:
+                    raise
+                return False
 
     @_dirlist_dec
     async def _find(self, path, maxdepth=None, withdirs=False, **kwargs):
@@ -1036,21 +1145,21 @@ class PelicanFileSystem(AsyncFileSystem):
     @_dirlist_dec
     async def _isfile(self, path):
         try:
-            return not bool(await self._ls_real(path, detail=False))
+            items = await self._ls_real(path, detail=False)
         except (FileNotFoundError, ValueError):
             return False
+        if items:
+            # A non-empty listing is a collection
+            return False
+        # An empty listing is an object or an *empty* collection -- a webdav listing
+        # excludes the collection itself -- so ask the resource's own type
+        return not await self._is_collection(urllib.parse.urlparse(path).path)
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
         list_url, director_response = await self.get_dirlist_url(path)
-        parts = urllib.parse.urlparse(list_url)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        options = {
-            "hostname": base_url,
-            "token": self.token.removeprefix("Bearer ") if self.token else None,
-        }
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             async for url, dirs, files in self.http_file_system._walk(
                 list_url,
                 maxdepth=maxdepth,
@@ -1152,11 +1261,19 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug(f"Compatible path: {path}")
         return path
 
+    def _check_fspaths(self, path):
+        """
+        _check_fspath over a single path or a list of paths, preserving which was given.
+        """
+        if isinstance(path, str):
+            return self._check_fspath(path)
+        return [self._check_fspath(p) for p in path]
+
     async def _put_file(self, lpath, rpath, **kwargs):
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
 
-        operation = self._get_token_operation("put_file")
+        operation = self._get_token_operation("_put_file")
         await self._handle_token_generation(data_url, director_response, operation)
 
         logger.debug(f"Running put_file from {lpath} to {data_url}...")
@@ -1248,9 +1365,11 @@ class PelicanFileSystem(AsyncFileSystem):
         via an "ls" call, then that url points to an origin, not the cache. So it cannot be assumed that a valid url points to
         a cache
         """
+        split_path_arg = _path_arg_splitter(func)
 
         async def wrapper(self, *args, **kwargs):
-            path = self._check_fspath(args[0])
+            raw_path, rest = split_path_arg(args, kwargs)
+            path = self._check_fspath(raw_path)
             if self.direct_reads:
                 data_url, director_response = await self.get_origin_url(path)
             else:
@@ -1262,7 +1381,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
             try:
                 logger.debug(f"Calling {func} using the following url: {data_url}")
-                result = await func(self, data_url, *args[1:], **kwargs)
+                result = await func(self, data_url, *rest, **kwargs)
             except Exception as e:
                 if not self.direct_reads:
                     self._bad_cache(data_url, e)
@@ -1274,74 +1393,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return wrapper
 
-    @staticmethod
-    def _cache_multi_dec(func):
-        """
-        Decorator function which, when given a list of namespace location, finds the best working cache that serves the namespace,
-        then calls the sub function with that namespace
-
-
-        Note: If a valid url is provided, it will not call the director to get a cache. This does mean that if a url was created/retrieved via
-        ls and then used for another function, the url will be an origin url and not a cache url. This should be fixed in the future.
-        """
-
-        async def wrapper(self, *args, **kwargs):
-            path = args[0]
-            if isinstance(path, str):
-                path = self._check_fspath(args[0])
-                if self.direct_reads:
-                    data_url, director_response = await self.get_origin_url(path)
-                else:
-                    data_url, director_response = await self.get_working_cache(path)
-
-                # Handle token generation if required (single path)
-                operation = self._get_token_operation(func.__name__)
-                await self._handle_token_generation(data_url, director_response, operation)
-            else:
-                data_url = []
-                # For multiple paths, we'll use the first director_response for token generation
-                # This is a simplification - in practice, all paths should have the same token requirements
-                first_director_response = None
-                for p in path:
-                    p = self._check_fspath(p)
-                    if self.direct_reads:
-                        d_url, director_response = await self.get_origin_url(p)
-                    else:
-                        d_url, director_response = await self.get_working_cache(p)
-                    data_url.append(d_url)
-                    if first_director_response is None:
-                        first_director_response = director_response
-
-                # Handle token generation if required (multiple paths)
-                if first_director_response:
-                    operation = self._get_token_operation(func.__name__)
-                    # Use the first URL for token generation (simplification)
-                    await self._handle_token_generation(data_url[0] if data_url else "", first_director_response, operation)
-
-            try:
-                logger.debug(f"Calling {func} using the following urls: {data_url}")
-                result = await func(self, data_url, *args[1:], **kwargs)
-            except Exception as e:
-                if not self.direct_reads:
-                    if isinstance(data_url, list):
-                        for d_url in data_url:
-                            self._bad_cache(d_url, e)
-                    else:
-                        self._bad_cache(data_url, e)
-                raise
-            if not self.direct_reads:
-                if isinstance(data_url, list):
-                    for d_url in data_url:
-                        ns_path = self._remove_host_from_path(d_url)
-                        ar = _AccessResp(ns_path, True)
-                        self._access_stats.add_response(ns_path, ar)
-                else:
-                    ar = _AccessResp(data_url, True)
-                    self._access_stats.add_response(path, ar)
-            return result
-
-        return wrapper
-
     @_cache_dec
     async def _cat_file(self, path, start=None, end=None, **kwargs):
         return await self.http_file_system._cat_file(path, start, end, **kwargs)
@@ -1349,23 +1400,31 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _exists(self, path, **kwargs):
         parts = urllib.parse.urlparse(path)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        webdav_token = self.token.removeprefix("Bearer ") if self.token else None
-        options = {"hostname": base_url, "token": webdav_token}
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
 
+    async def _get_file(self, rpath, lpath, _collection_roots=None, **kwargs):
+        """
+        Copy a single object to a local file, creating collections rather than fetching them.
+
+        A recursive get asks for every collection it walked through as well as the
+        objects inside them, and a collection just needs to exist on disk.
+        """
+        if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
+            os.makedirs(lpath, exist_ok=True)
+            return
+        if os.path.isdir(lpath) and await self._is_collection(rpath):
+            return
+        return await self._get_file_from_cache(rpath, lpath, **kwargs)
+
     @_cache_dec
-    async def _get_file(self, rpath, lpath, **kwargs):
+    async def _get_file_from_cache(self, rpath, lpath, **kwargs):
         return await self.http_file_system._get_file(rpath, lpath, **kwargs)
 
     @_cache_dec
     async def _info(self, path, **kwargs):
         parts = urllib.parse.urlparse(path)
-        base_url = f"{parts.scheme}://{parts.netloc}"
-        webdav_token = self.token.removeprefix("Bearer ") if self.token else None
-        options = {"hostname": base_url, "token": webdav_token}
-        async with self.get_webdav_client(options) as client:
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
             try:
                 result = await client.info(parts.path)
             except RemoteResourceNotFoundError:
@@ -1379,19 +1438,103 @@ class PelicanFileSystem(AsyncFileSystem):
             }
             return self._remove_host_from_paths(info)
 
-    @_cache_dec
     async def _get(self, rpath, lpath, **kwargs):
-        results = await self.http_file_system._get(rpath, lpath, **kwargs)
-        return self._remove_host_from_paths(results)
+        """
+        Copy an object, or a whole collection, to local files.
 
-    @_cache_multi_dec
+        We expand the source list ourselves, in namespace paths, rather than letting the
+        http filesystem do it. Across two hosts that prefix shrinks to
+        "https:", and the caller ends up with a directory per host:
+
+            get("/foo/bar", "dest")  ->  dest/cache.example.com/foo/bar     (empty)
+                                         dest/origin.example.com/foo/bar/*  (the objects)
+
+        Namespace paths share the prefix "/foo/bar", so the same call gives dest/bar.
+        Each object then picks its own cache in _get_file.
+        """
+        rpath = self._check_fspaths(rpath)
+        await self._warm_namespace_cache(rpath)
+
+        # Work out which of the requested roots are collections, so _get_file can tell
+        # them apart later.
+        if kwargs.get("recursive"):
+            roots = [rpath] if isinstance(rpath, str) else rpath
+            literals = [root for root in roots if not fshttp.has_magic(root)]
+            # return_exceptions so a failing probe doesn't strand its siblings
+            # mid-flight; the first failure is re-raised once all have settled
+            probes = await asyncio.gather(*(self._is_collection(root) for root in literals), return_exceptions=True)
+            for probe in probes:
+                if isinstance(probe, BaseException):
+                    raise probe
+            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes) if is_collection}
+            for pattern in (root for root in roots if fshttp.has_magic(root)):
+                matches = await self._glob(pattern, detail=True, maxdepth=kwargs.get("maxdepth"))
+                collection_roots |= {p.rstrip("/") for p, info in matches.items() if info.get("type") == "directory"}
+            kwargs["_collection_roots"] = collection_roots
+        return await super()._get(rpath, lpath, **kwargs)
+
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
-        results = await self.http_file_system._cat(path, recursive, on_error, batch_size, **kwargs)
-        return self._remove_host_from_paths(results)
+        """
+        Read the contents of one or more objects.
 
-    @_cache_multi_dec
-    async def _expand_path(self, path, recursive=False, maxdepth=None):
-        return await self.http_file_system._expand_path(path, recursive, maxdepth)
+        Expanded here rather than by the http filesystem for the same reason as _get:
+        it would list from the collections endpoint and then read every object from
+        there, never touching a cache. Working in namespace paths lets _cat_file pick a
+        cache per object.
+        """
+        path = self._check_fspaths(path)
+        await self._warm_namespace_cache(path)
+        return await super()._cat(path, recursive=recursive, on_error=on_error, batch_size=batch_size, **kwargs)
+
+    async def _warm_namespace_cache(self, path):
+        """
+        Ask the director about `path` once, before a bulk read fans out.
+
+        Returns nothing: the point is the side effect. get_working_cache stores the
+        caches it is told about in self._namespace_cache, keyed by namespace prefix, and
+        every later lookup for a path under that prefix is answered from memory.
+        """
+        if isinstance(path, (list, tuple)):
+            path = path[0] if len(path) else None
+        if self.direct_reads or not isinstance(path, str) or fshttp.has_magic(path):
+            return
+        try:
+            await self.get_working_cache(path)
+        except Exception as e:
+            # Still best effort, but worth saying out loud: if warming fails
+            # systematically, every object goes back to the director on its own --
+            # exactly the stampede this function exists to prevent.
+            logger.warning(f"Could not pre-resolve a cache for {path}; each object will consult the director individually: {e}")
+
+    async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs):
+        """
+        Turn a path, glob, or list of either into the list of paths it refers to.
+
+        Expansion is a listing operation, so it has to go through our _glob/_find/
+        _exists, which ask the collections endpoint and answer in namespace paths.
+        Handing a cache url to the http filesystem's expansion instead would mix hosts
+        in the result: the root would keep the cache's host while everything found
+        underneath it would come back on the collections endpoint's host. See _get.
+
+        kwargs pass through to fsspec untouched, so newer arguments -- 2026.x expands
+        glob results with assume_literal=True -- keep working against the older
+        releases this package also supports.
+        """
+        paths = self._check_fspaths(path)
+        if isinstance(paths, str):
+            paths = [paths]
+
+        # Decide what counts as a glob the way HTTPFileSystem does -- "*" and "[" only.
+        # fsspec also counts "?", but a pelican path can legitimately carry a query
+        # string (an authz token, say), and treating that as a glob would send a plain
+        # path down the glob route instead of using it as given. Note this only rescues
+        # paths whose "?" is their sole magic: one that also contains "*" or "[" still
+        # globs, and fsspec's pattern translation treats its "?" as a wildcard. That
+        # limitation is inherited from HTTPFileSystem and is not handled here.
+        if not recursive and not any(fshttp.has_magic(p) for p in paths):
+            return sorted(set(paths))
+
+        return await super()._expand_path(paths, recursive=recursive, maxdepth=maxdepth, **kwargs)
 
 
 class OSDFFileSystem(PelicanFileSystem):
