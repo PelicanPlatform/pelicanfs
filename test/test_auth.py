@@ -78,3 +78,40 @@ def test_authz_query(httpserver: HTTPServer, get_client):
     )
 
     assert pelfs.cat("/foo/bar?authz=test") == b"hello, world!"
+
+
+def test_authz_query_survives_namespace_cache(httpserver: HTTPServer, get_client):
+    """
+    A repeat read of the same namespace keeps its query string.
+
+    The first read asks the director and gets back a full url. The second is answered
+    from the namespace cache, which stores only bare scheme://host entries: it used to
+    rebuild the url from those alone, dropping the authz token, so the request went out
+    unauthorized. get_working_cache now puts the caller's query string back on the url
+    it rebuilds, and both reads are authorized.
+    """
+    foo_bar_url = httpserver.url_for("/foo/bar")
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "Location": foo_bar_url,
+            "X-Pelican-Namespace": "namespace=/foo",
+        },
+    )
+
+    # Only an authorized request is answered; anything without the token 500s
+    httpserver.expect_request("/foo/bar", query_string="authz=test", method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/bar", query_string="authz=test", method="GET").respond_with_data("hello, world!")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    assert pelfs.cat("/foo/bar?authz=test") == b"hello, world!"
+    assert pelfs.cat("/foo/bar?authz=test") == b"hello, world!"

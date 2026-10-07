@@ -244,6 +244,36 @@ def test_isdir_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
     assert pelfs.isdir("/foo/bar") is False
 
 
+def test_isdir_noexist_listing_response(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    """
+    Test that a path is not a collection just because the origin answers its slash form with a listing.
+    """
+    new_file_url = httpserver.url_for("foo/bar/new.txt")
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar/new.txt").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{new_file_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={httpserver.url_for('/')}",
+        },
+    )
+    # The origin answers the non-existent path's slash form with the parent's listing, and its
+    # plain form with a 404
+    httpserver.expect_request("/foo/bar/new.txt/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/new.txt", method="PROPFIND").respond_with_data(status=404)
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+
+    assert pelfs.isdir("/foo/bar/new.txt") is False
+
+
 def test_isfile(httpserver: HTTPServer, get_client, get_webdav_client, file1_listing_response):
     foo_bar_file_url = httpserver.url_for("foo/bar/file1.txt")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
