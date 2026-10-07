@@ -104,6 +104,27 @@ def test_open_async_404_does_not_evict_cache(httpserver: HTTPServer, get_client)
     assert len(namespace_info.cache_manager._cache_list) > 0
 
 
+def test_409_head_on_collection_keeps_cache(httpserver: HTTPServer, get_client):
+    """A 409 HEAD (OSDF caches answer this for collections) must count as a working cache."""
+    from fsspec.asyn import sync
+
+    url = _setup_director(httpserver, path="/foo/dir")
+    httpserver.expect_oneshot_request("/foo/dir", method="HEAD").respond_with_data("", status=409)
+
+    pelfs = PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    cache_url, _ = sync(pelfs.loop, pelfs.get_working_cache, "/foo/dir")
+
+    assert cache_url == url
+    namespace_info = pelfs._get_prefix_info("/foo/dir")
+    assert namespace_info is not None
+    assert len(namespace_info.cache_manager._cache_list) > 0
+
+
 def test_double_cache_error_does_not_crash(httpserver: HTTPServer, get_client):
     """Two sequential non-404 failures must not raise ValueError from bad_cache."""
     _setup_director(httpserver)

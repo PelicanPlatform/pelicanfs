@@ -682,7 +682,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Removing the query if need be
         try:
             cached_url, cached_director_response = self._match_namespace(fparsed.path)
-            if cached_url:
+            if cached_url and cached_director_response:
                 # _CacheManager keeps bare scheme://host entries, so a namespace hit
                 # comes back without the query string the caller asked for. Put it back:
                 # it can carry an authz token, and dropping it turns an authorized
@@ -756,7 +756,8 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 logger.debug(f"Checking to see if the cache at {updated_url} is working and returns a valid response code")
                 async with session.head(updated_url, timeout=timeout) as resp:
-                    # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
+                    # Accept successful responses (2xx/3xx), 404 (object doesn't exist) and
+                    # 409 (path is a collection; OSDF caches answer 409 to HEAD on a collection)
                     # as indicators that the cache is working. Other error codes indicate
                     # the cache itself is having problems.
                     if resp.status >= 200 and resp.status < 400:
@@ -764,6 +765,9 @@ class PelicanFileSystem(AsyncFileSystem):
                         break
                     elif resp.status == 404:
                         logger.debug("Cache is working (returned 404 for non-existent object)")
+                        break
+                    elif resp.status == 409:
+                        logger.debug("Cache is working (returned 409 for a collection)")
                         break
             except (
                 aiohttp.client_exceptions.ClientConnectorError,
