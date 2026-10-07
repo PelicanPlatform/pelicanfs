@@ -27,7 +27,7 @@ from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, overload
 
 import aiohttp
 import cachetools
@@ -401,6 +401,16 @@ class PelicanFileSystem(AsyncFileSystem):
         self.http_file_system._ls = self._ls_from_http
 
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
+    @overload
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        ...
+
+    @overload
+    @classmethod
+    def _strip_protocol(cls, path: List[str]) -> List[str]:
+        ...
+
     @classmethod
     def _strip_protocol(cls, path):
         """For HTTP, we always want to keep the full URL"""
