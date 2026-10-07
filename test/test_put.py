@@ -116,6 +116,42 @@ def test_put_dest_dir(httpserver: HTTPServer, get_client, get_webdav_client, top
     pelfs.put("test_put.py", "/foo/bar/")
 
 
+def test_put_recursive(httpserver: HTTPServer, get_client, get_webdav_client, tmp_path):
+    """A recursive put of a local directory tree uploads every object in it.
+
+    fsspec's _put calls _makedirs for each local directory before uploading the objects
+    inside it. PelicanFS raises NotImplementedError for a direct makedirs() call, so this
+    guards against that also breaking recursive uploads.
+    """
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "sub" / "b.txt").write_text("b")
+    remote_paths = [f"/foo/bar/{tmp_path.name}/a.txt", f"/foo/bar/{tmp_path.name}/sub/b.txt"]
+
+    base_url = httpserver.url_for("/")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": base_url})
+    for remote_path in remote_paths:
+        httpserver.expect_request(f"/api/v1.0/director/origin{remote_path}").respond_with_data(
+            "",
+            status=200,
+            headers={
+                "Location": httpserver.url_for(remote_path),
+            },
+        )
+        httpserver.expect_oneshot_request(remote_path, method="PUT").respond_with_data(status=200)
+
+    pelfs = PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+    pelfs.put(str(tmp_path), "/foo/bar/", recursive=True)
+
+    uploaded = sorted(request.path for request, _ in httpserver.log if request.method == "PUT")
+    assert uploaded == sorted(remote_paths)
+
+
 def test_put_no_available_source(httpserver: HTTPServer, get_client, get_webdav_client):
     base_url = httpserver.url_for("/")
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": base_url})

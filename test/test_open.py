@@ -211,6 +211,29 @@ def test_open_write_mode_not_supported(httpserver: HTTPServer, get_client):
         assert "put()" in str(exc_info.value) or "pipe()" in str(exc_info.value)
 
 
+def test_mkdir_and_makedirs_not_supported(httpserver: HTTPServer, get_client):
+    """Test that mkdir() and makedirs() raise NotImplementedError instead of silently succeeding.
+
+    fsspec's defaults for these are no-ops, which would let callers believe a collection
+    had been created. Pelican has no standalone collection-creation operation.
+    """
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+
+    pelfs = PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+    )
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        pelfs.mkdir("/foo/bar")
+    assert "put()" in str(exc_info.value) or "pipe()" in str(exc_info.value)
+
+    with pytest.raises(NotImplementedError) as exc_info:
+        pelfs.makedirs("/foo/bar", exist_ok=True)
+    assert "put()" in str(exc_info.value) or "pipe()" in str(exc_info.value)
+
+
 def test_io_wrapper_error_handling():
     """
     Test that _io_wrapper correctly handles errors during read() without

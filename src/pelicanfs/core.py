@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import asyncio
+import contextvars
 import functools
 import inspect
 import logging
@@ -57,6 +58,10 @@ from .token_generator import TokenGenerator, TokenOperation
 
 logger = logging.getLogger("fsspec.pelican")
 
+# True while PelicanFileSystem._put is running, so _makedirs can recognize fsspec's internal
+# call and skip it rather than raising. A ContextVar rather than an instance attribute so that
+# concurrent puts on a shared filesystem cannot see each other's state.
+_put_in_progress: contextvars.ContextVar[bool] = contextvars.ContextVar("pelicanfs_put_in_progress", default=False)
 # How long before a generated token's expiry it is retired and a new one generated. A
 # token sent right at its expiry would be expired by the time it reaches the server.
 TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
@@ -389,12 +394,11 @@ class PelicanFileSystem(AsyncFileSystem):
         self.select_timeout = select_timeout
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
-        # They will raise NotImplementedErrors when called
+        # They will raise NotImplementedErrors when called. (mkdir/makedirs are handled by our own
+        # overrides below, because fsspec's defaults for those are silent no-ops rather than errors.)
         self._rm_file = self.http_file_system._rm_file
         self._cp_file = self.http_file_system._cp_file
         self._pipe_file = self.http_file_system._pipe_file
-        self._mkdir = self.http_file_system._mkdir
-        self._makedirs = self.http_file_system._makedirs
 
         # Overwrite the httpsfs _ls_real call with ours with ours
         self.http_file_system._ls_real = self._ls_real
@@ -1278,6 +1282,29 @@ class PelicanFileSystem(AsyncFileSystem):
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
         await asyncio.create_task(upload_file())
+
+    async def _put(self, lpath, rpath, *args, **kwargs):
+        # fsspec's _put calls _makedirs for each local directory in a recursive upload before
+        # uploading the objects inside it. Those uploads are what create the collections in
+        # Pelican, so the _makedirs step is redundant here and must not raise. Mark the call so
+        # _makedirs can tell it apart from a caller asking for a collection on its own.
+        token = _put_in_progress.set(True)
+        try:
+            return await super()._put(lpath, rpath, *args, **kwargs)
+        finally:
+            _put_in_progress.reset(token)
+
+    # fsspec's default _mkdir/_makedirs are silent no-ops ("may not have directories").
+    # Pelican has no standalone "create a collection" operation: collections come into
+    # existence when objects are uploaded under a namespace prefix. Raise instead of
+    # pretending the call succeeded so callers do not assume a collection now exists.
+    async def _mkdir(self, path, create_parents=True, **kwargs):
+        raise NotImplementedError("mkdir is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
+
+    async def _makedirs(self, path, exist_ok=False):
+        if _put_in_progress.get():
+            return
+        raise NotImplementedError("makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)

@@ -78,8 +78,8 @@ For comprehensive tutorials and real-world examples using PelicanFS with geoscie
 PelicanFS is built on top of the HTTP fsspec implementation. As such, any functionality that isn't available in the HTTP implementation is also *not* available in PelicanFS. Specifically:
 - `rm` (remove objects)
 - `cp` (copy objects within the federation - note that downloading objects via `get()` to local files works normally)
-- `mkdir` (create collections)
-- `makedirs` (create collection trees)
+- `mkdir` (create collections - Pelican has no standalone collection-creation operation; collections come into existence when objects are uploaded under them with `put()` or `pipe()`)
+- `makedirs` (create collection trees - same as `mkdir`)
 - `open()` with write modes (`"w"`, `"wb"`, `"a"`, `"x"`, `"+"`, etc.) - use `put()` or `pipe()` to write files instead
 
 These operations will raise a `NotImplementedError` if called.
