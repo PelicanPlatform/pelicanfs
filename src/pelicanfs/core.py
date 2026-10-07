@@ -25,7 +25,7 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
@@ -56,6 +56,10 @@ from .exceptions import (
 from .token_generator import TokenGenerator, TokenOperation
 
 logger = logging.getLogger("fsspec.pelican")
+
+# How long before a generated token's expiry it is retired and a new one generated. A
+# token sent right at its expiry would be expired by the time it reaches the server.
+TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
 
 
 @dataclass
@@ -549,11 +553,11 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
-        # A token we generated earlier is only good until it expires; once it has, forget
-        # it so a fresh one is generated below instead of being sent until the server
-        # rejects it.
-        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc):
-            logger.debug(f"Remembered token expired at {self._token_expiry}, regenerating for {url}")
+        # A token we generated earlier is only good until it expires; once it has, or is
+        # about to, forget it so a fresh one is generated below instead of being sent
+        # until the server rejects it.
+        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN:
+            logger.debug(f"Remembered token expires at {self._token_expiry}, regenerating for {url}")
             self.token = None
             self._token_expiry = None
 
