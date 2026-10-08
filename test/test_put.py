@@ -19,6 +19,7 @@ from pytest_httpserver import HTTPServer
 
 from pelicanfs.core import PelicanFileSystem
 from pelicanfs.exceptions import NoAvailableSource
+from pelicanfs.token_generator import TokenGenerator
 
 
 def test_put(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
@@ -157,3 +158,52 @@ def test_put_permission_denied(httpserver: HTTPServer, get_client, get_webdav_cl
     )
     with pytest.raises(ClientResponseError):
         pelfs.put("test_put.py", "/foo/bar/")
+
+
+def test_put_sends_generated_token(httpserver: HTTPServer, get_client, get_webdav_client, monkeypatch):
+    """
+    A token pelicanfs generates itself must reach the PUT, not only one given at construction.
+
+    Only the token flow is stubbed; the director exchange, the listing check and the upload
+    are the real thing. The tokened PUT is registered first, so an untokened PUT falls
+    through to the 401 below and the server is what decides whether the token was applied.
+    """
+    monkeypatch.setattr(TokenGenerator, "get_token", lambda self: "generated-token")
+    foo_bar_url = httpserver.url_for("/foo/bar/test.py")
+    base_url = httpserver.url_for("/")
+    namespace = f"namespace=/foo, collections-url={base_url}, require-token=true"
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": base_url})
+    httpserver.expect_oneshot_request("/foo/bar/test.py").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": '<"some.other.url">; rel="duplicate"; pri=1; depth=1',
+            "Location": foo_bar_url,
+            "X-Pelican-Namespace": namespace,
+        },
+    )
+    httpserver.expect_request("/foo/bar/test.py/", method="PROPFIND").respond_with_data("not a directory", status=500)
+    httpserver.expect_request("/foo/bar/test.py", method="PROPFIND").respond_with_data(status=404)
+    httpserver.expect_request("/api/v1.0/director/origin/foo/bar/test.py").respond_with_data(
+        "",
+        status=200,
+        headers={
+            "Location": foo_bar_url,
+            "X-Pelican-Namespace": namespace,
+        },
+    )
+    httpserver.expect_request("/foo/bar/test.py", method="PUT", headers={"Authorization": "Bearer generated-token"}).respond_with_data(status=200)
+    httpserver.expect_request("/foo/bar/test.py", method="PUT").respond_with_data(status=401)
+
+    pelfs = PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+    assert pelfs.token is None, "this test only means something if the token has to be generated"
+
+    pelfs.put("test_put.py", "/foo/bar/test.py")
+
+    puts = [response.status_code for request, response in httpserver.log if request.path == "/foo/bar/test.py" and request.method == "PUT"]
+    assert puts == [200]

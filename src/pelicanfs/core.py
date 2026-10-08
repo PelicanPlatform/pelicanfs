@@ -392,7 +392,6 @@ class PelicanFileSystem(AsyncFileSystem):
         # They will raise NotImplementedErrors when called
         self._rm_file = self.http_file_system._rm_file
         self._cp_file = self.http_file_system._cp_file
-        self._pipe_file = self.http_file_system._pipe_file
         self._mkdir = self.http_file_system._mkdir
         self._makedirs = self.http_file_system._makedirs
 
@@ -511,7 +510,7 @@ class PelicanFileSystem(AsyncFileSystem):
         }
 
         # Write operations (if any are implemented)
-        write_operations = {"_put_file"}
+        write_operations = {"_put_file", "_pipe_file"}
 
         if func_name in read_operations:
             return TokenOperation.TokenRead
@@ -523,23 +522,25 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _set_http_filesystem_token(self, token: str, session=None) -> None:
         """
-        Set the Authorization header in the HTTP filesystem's session.
+        Make every request the HTTP filesystem sends carry the token.
+
+        The token goes into the HTTP filesystem's request options, the same place a
+        ``headers=`` argument given at construction ends up. fsspec merges those options
+        into each request it makes (cat, get, put, ...), so this is the one path that
+        reaches all of them. The HTTP filesystem keeps its aiohttp session private, so
+        it cannot be reached here directly.
 
         Args:
             token: The token to set (without "Bearer " prefix)
-            session: Optional specific session to set token in (in addition to HTTP filesystem session)
+            session: Optional specific session to also set the token on
         """
         if not token:
             return
 
-        # Set the token in the HTTP filesystem's session headers
-        if hasattr(self.http_file_system, "session") and self.http_file_system.session:
-            self.http_file_system.session.headers.update({"Authorization": f"Bearer {token}"})
-        else:
-            # If session doesn't exist yet, set it in the default headers
-            if not hasattr(self.http_file_system, "_default_headers"):
-                self.http_file_system._default_headers = {}
-            self.http_file_system._default_headers["Authorization"] = f"Bearer {token}"
+        # Copy rather than mutate: the existing dict may be the caller's own headers
+        headers = dict(self.http_file_system.kwargs.get("headers", {}))
+        headers["Authorization"] = f"Bearer {token}"
+        self.http_file_system.kwargs["headers"] = headers
 
         # Also set token in the specific session if provided
         if session:
@@ -1288,6 +1289,40 @@ class PelicanFileSystem(AsyncFileSystem):
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
         await asyncio.create_task(upload_file())
+
+    async def _pipe_file(self, path, value, mode="overwrite", **kwargs):
+        """
+        Write bytes as a whole object. Writes always go to the Origin (caches are
+        read-only), resolved through the Director's /origin/ endpoint, and a write
+        token is generated if the namespace requires one, exactly as for put().
+
+        Pelican objects are immutable: the Origin refuses to replace an object that
+        already exists, whatever ``mode`` says. fsspec's ``mode="create"`` (exclusive
+        create) therefore describes what every write does and is accepted. fsspec's
+        default ``mode="overwrite"`` is accepted for compatibility but does not
+        overwrite. There is no append: ``value`` is the entire object, and any other
+        mode is rejected before a request is made.
+        """
+        if mode not in ("overwrite", "create"):
+            raise ValueError(f"Unsupported pipe mode {mode!r}; expected 'overwrite' or 'create'")
+
+        path = self._check_fspath(path)
+        data_url, director_response = await self.get_origin_url(path)
+
+        operation = self._get_token_operation("_pipe_file")
+        await self._handle_token_generation(data_url, director_response, operation)
+
+        logger.debug(f"Running pipe_file to {data_url}...")
+        # fsspec's http _pipe_file, unlike its _put_file, ignores the filesystem-level
+        # request options, so merge them here or a token given at construction is
+        # dropped. The headers are copied because the http layer adds Content-Length
+        # to the dict it is handed.
+        request_options = self.http_file_system.kwargs.copy()
+        request_options["headers"] = {**request_options.get("headers", {}), **kwargs.pop("headers", {})}
+        request_options.update(kwargs)
+        # The http filesystem only knows "overwrite"; the exclusive-create
+        # semantics come from the Origin, not from the request.
+        await self.http_file_system._pipe_file(data_url, value, mode="overwrite", **request_options)
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)

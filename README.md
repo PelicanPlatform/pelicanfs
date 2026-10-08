@@ -265,7 +265,12 @@ from pelicanfs.core import PelicanFileSystem
 pelfs = PelicanFileSystem("pelican://osg-htc.org",
                           headers={"Authorization": "Bearer YOUR_TOKEN"})
 pelfs.put('/local/path/file.txt', '/namespace/remote/path/object.txt')
+
+# Write bytes already in memory as an object, with the same authorization as put()
+fs.pipe('/namespace/remote/path/object.txt', b'file contents')
 ```
+
+Objects are immutable: neither `put()` nor `pipe()` can replace an object that already exists, and `pipe()` always writes the whole object (there is no append).
 
 ### Downloading Objects
 
@@ -708,10 +713,11 @@ Main class for interacting with Pelican federations.
 
 - `ls(path, detail=True, **kwargs)` - List objects in a collection
 - `cat(path, recursive=False, on_error="raise", **kwargs)` - Read object contents
-- `open(path, mode, **kwargs)` - Open an object for reading (write modes not supported; use `put()` instead)
+- `open(path, mode, **kwargs)` - Open an object for reading (write modes not supported; use `put()` or `pipe()` instead)
 - `glob(path, maxdepth=None, **kwargs)` - Find objects matching a pattern
 - `find(path, maxdepth=None, withdirs=False, **kwargs)` - Recursively list all objects
 - `put(lpath, rpath, recursive=False, **kwargs)` - Upload local file(s) as remote object(s)
+- `pipe(path, value, **kwargs)` - Write in-memory bytes as a remote object
 - `get(rpath, lpath, recursive=False, **kwargs)` - Download remote object(s) to local file(s)
 
 ##### Utility Methods
