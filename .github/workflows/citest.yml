@@ -1,6 +1,11 @@
-name: Python testing
+name: Test
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
 
 jobs:
   lint:
@@ -11,21 +16,26 @@ jobs:
       - uses: j178/prek-action@v2
 
   build:
+    name: 🐍 ${{ matrix.python-version}} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest]
         python-version:
+          - "3.11"
           - "3.12"
           - "3.13"
+          - "3.14"
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
+    - parallel:
+      - name: Setup Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Download uv
+        uses: astral-sh/setup-uv@v9.0.0
     - name: Install Dependencies
-      run: |
-        python -m pip install . --group testing
+      run: uv pip install . --group testing --system
     - name: Test with pytest
       run: pytest
