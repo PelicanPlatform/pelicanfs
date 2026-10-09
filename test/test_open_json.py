@@ -55,7 +55,8 @@ def test_get_token_from_file_plain_token(monkeypatch):
 
 def test_get_token_from_file_io_error(monkeypatch):
     def raise_io(*args, **kwargs):
-        raise OSError("Permission denied")
+        msg = "Permission denied"
+        raise OSError(msg)
 
     monkeypatch.setattr("builtins.open", raise_io)
     with pytest.raises(OSError, match="Permission denied"):
