@@ -173,7 +173,7 @@ class _CacheManager:
         """
         with self._lock:
             if not self._cache_list:
-                raise NoAvailableSource()
+                raise NoAvailableSource
 
             return urllib.parse.urljoin(self._cache_list[0], obj_name)
 
@@ -300,7 +300,8 @@ def _path_arg_splitter(func):
         try:
             return kwargs.pop(name), ()
         except KeyError:
-            raise TypeError(f"{func.__name__}() missing required argument: '{name}'") from None
+            msg = f"{func.__name__}() missing required argument: '{name}'"
+            raise TypeError(msg) from None
 
     return split
 
@@ -468,8 +469,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         if self.token:
             return self.token.removeprefix("Bearer ")
-        else:
-            return None
+        return None
 
     def _webdav_options(self, url: str) -> dict:
         """
@@ -513,11 +513,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if func_name in read_operations:
             return TokenOperation.TokenRead
-        elif func_name in write_operations:
+        if func_name in write_operations:
             return TokenOperation.TokenWrite
-        else:
-            # Default to read for unknown operations
-            return TokenOperation.TokenRead
+        # Default to read for unknown operations
+        return TokenOperation.TokenRead
 
     def _set_http_filesystem_token(self, token: str, session=None) -> None:
         """
@@ -638,7 +637,7 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
                 logger.error(f"Failed to get metadata from {discovery_url.geturl()}")
-                raise InvalidMetadata()
+                raise InvalidMetadata
             return await resp.json(content_type="")
 
     async def get_director_headers(self, fileloc, origin=False) -> dict[str, str]:
@@ -655,17 +654,14 @@ class PelicanFileSystem(AsyncFileSystem):
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
                 logger.error("No director endpoint found in metadata")
-                raise InvalidMetadata()
+                raise InvalidMetadata
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
             self.director_url = director_url
 
         logger.debug(f"Getting headers from director: {self.director_url}")
-        if origin:
-            url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc
-        else:
-            url = urllib.parse.urljoin(self.director_url, fileloc)
+        url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc if origin else urllib.parse.urljoin(self.director_url, fileloc)
         session = await self.http_file_system.set_session()
         async with session.get(url, allow_redirects=False) as resp:
             return resp.headers
@@ -760,7 +756,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     if resp.status >= 200 and resp.status < 400:
                         logger.debug("Cache found")
                         break
-                    elif resp.status == 404:
+                    if resp.status == 404:
                         logger.debug("Cache is working (returned 404 for non-existent object)")
                         break
             except (TimeoutError, aiohttp.client_exceptions.ClientConnectorError, asyncio.exceptions.TimeoutError):
@@ -769,7 +765,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if not cache_list:
             logger.error("No working cache found")
-            raise NoAvailableSource()
+            raise NoAvailableSource
 
         working_url = cache_list[0]
         with self._namespace_lock:
@@ -784,7 +780,7 @@ class PelicanFileSystem(AsyncFileSystem):
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
-            raise NoAvailableSource()
+            raise NoAvailableSource
 
         # Parse the headers to get the full director response
         director_response = parse_director_response(headers)
@@ -797,7 +793,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                raise InvalidMetadata()
+                raise InvalidMetadata
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
@@ -827,7 +823,7 @@ class PelicanFileSystem(AsyncFileSystem):
             session = await self.http_file_system.set_session()
             async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
                 if "Link" not in resp.headers:
-                    raise BadDirectorResponse()
+                    raise BadDirectorResponse
                 collections_url = get_collections_url(resp.headers)
 
                 # Parse the headers to get the full director response
@@ -844,7 +840,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if not collections_url:
             logger.error(f"No collections endpoint found for {fileloc}")
-            raise NoCollectionsUrl()
+            raise NoCollectionsUrl
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
         director_response.location = dirlist_url
@@ -862,8 +858,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 if path.startswith(prefix):
                     cache_manager = self._namespace_cache.get(prefix)
                     if cache_manager:
-                        namespace_info = NamespaceInfo(cache_manager, cache_manager.director_response)
-                        return namespace_info
+                        return NamespaceInfo(cache_manager, cache_manager.director_response)
                     break
         return None
 
@@ -982,23 +977,18 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Now that we have a client, we can proceed with the listing
         remote_dir = parts.path
-        if detail:
-            list_files = client.list_with_infos
-        else:
-            list_files = client.list_files
+        list_files = client.list_with_infos if detail else client.list_files
         try:
             items = await list_files(remote_dir)
         except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
             if isinstance(e, ResponseErrorCodeError) and e.code != 500:
                 raise
 
-            if remote_dir.endswith("/"):
-                remote_dir = remote_dir[:-1]
+            remote_dir = remote_dir.removesuffix("/")
             exists = await client.check(remote_dir)
             if exists:
                 return set()
-            else:
-                raise FileNotFoundError from e
+            raise FileNotFoundError from e
 
         if detail:
 
@@ -1007,13 +997,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 isdir = item.get("isdir") == "True"
                 if isdir and not full_path.endswith("/"):
                     full_path += "/"
-                if (modtimestr := item.get("modified")) == "None":
-                    modtime = None
-                else:
-                    modtime = datetime.strptime(
-                        modtimestr,
-                        "%a, %d %b %Y %H:%M:%S %Z",
-                    )
+                modtimestr = item.get("modified")
+                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
                 return {
                     "name": full_path,
                     "size": int(item["size"]),
@@ -1084,7 +1069,8 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         logger.debug("Starting glob...")
         if maxdepth is not None and maxdepth < 1:
-            raise ValueError("maxdepth must be at least 1")
+            msg = "maxdepth must be at least 1"
+            raise ValueError(msg)
 
         ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
         path = self._strip_protocol(path)
@@ -1100,14 +1086,11 @@ class PelicanFileSystem(AsyncFileSystem):
             if await self._exists(path, **kwargs):
                 if not detail:
                     return [path]
-                else:
-                    return {path: await self._info(path, **kwargs)}
-            else:
-                if not detail:
-                    return []  # glob of non-existent returns empty
-                else:
-                    return {}
-        elif "/" in path[:min_idx]:
+                return {path: await self._info(path, **kwargs)}
+            if not detail:
+                return []  # glob of non-existent returns empty
+            return {}
+        if "/" in path[:min_idx]:
             min_idx = path[:min_idx].rindex("/")
             root = path[: min_idx + 1]
             depth = path[min_idx + 1 :].count("/") + 1
@@ -1158,7 +1141,7 @@ class PelicanFileSystem(AsyncFileSystem):
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
-        list_url, director_response = await self.get_dirlist_url(path)
+        list_url, _director_response = await self.get_dirlist_url(path)
         async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             async for url, dirs, files in self.http_file_system._walk(
                 list_url,
@@ -1215,7 +1198,7 @@ class PelicanFileSystem(AsyncFileSystem):
             self.discovery_url = discovery_str
         elif self.discovery_url != discovery_str:
             logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
-            raise InvalidMetadata()
+            raise InvalidMetadata
 
     def _check_fspath(self, path: str) -> str:
         """
@@ -1241,7 +1224,8 @@ class PelicanFileSystem(AsyncFileSystem):
             self._validate_discovery_url(discovery_url)
             path = parsed.path
         elif parsed.scheme != "":
-            raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
+            msg = f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported"
+            raise InvalidDestinationURL(msg)
         elif not path.startswith("/"):
             # When path has no scheme and is not absolute (e.g., "host.example.com/path"),
             # treat it as a pelican URL where the first component is the hostname
@@ -1254,9 +1238,9 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             # Path has no scheme, so the filesystem object must have a discovery URL
             if not self.discovery_url:
-                raise InvalidMetadata("No discovery URL set")
-            else:
-                discovery_url = self.discovery_url
+                msg = "No discovery URL set"
+                raise InvalidMetadata(msg)
+            discovery_url = self.discovery_url
 
         logger.debug(f"Compatible path: {path}")
         return path
@@ -1288,7 +1272,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
         if any(char in mode for char in ["w", "a", "x", "+"]):
-            raise NotImplementedError("Write mode is not supported for open(). Use put() or pipe() to write files.")
+            msg = "Write mode is not supported for open(). Use put() or pipe() to write files."
+            raise NotImplementedError(msg)
 
         if self.direct_reads:
             data_url, director_response = sync(self.loop, self.get_origin_url, path)  # type: ignore[misc]
@@ -1312,7 +1297,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
         if any(char in mode for char in ["w", "a", "x", "+"]):
-            raise NotImplementedError("Write mode is not supported for open_async(). Use put() or pipe() to write files.")
+            msg = "Write mode is not supported for open_async(). Use put() or pipe() to write files."
+            raise NotImplementedError(msg)
 
         if self.direct_reads:
             data_url, director_response = await self.get_origin_url(path)
@@ -1389,9 +1375,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
             os.makedirs(lpath, exist_ok=True)
-            return
+            return None
         if os.path.isdir(lpath) and await self._is_collection(rpath):
-            return
+            return None
         return await self._get_file_from_cache(rpath, lpath, **kwargs)
 
     @_cache_dec

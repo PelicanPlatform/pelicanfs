@@ -192,9 +192,8 @@ def test_oidc_device_flow_binary_not_found(mock_which, caplog):
     iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
 
     # Iterator should exhaust naturally after OIDC_DEVICE_FLOW case runs
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(StopIteration):
-            next(iterator)
+    with caplog.at_level(logging.WARNING), pytest.raises(StopIteration):
+        next(iterator)
 
     # Verify OIDC_DEVICE_FLOW case was executed and logged the expected warning
     assert any("pelican' binary is installed" in record.message for record in caplog.records)

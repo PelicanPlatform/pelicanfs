@@ -60,7 +60,8 @@ def get_token_from_file(token_location: str) -> str:
     # Check if the token is empty or whitespace only
     if not token_str:
         logger.warning(f"Token file {token_location} is empty or contains only whitespace")
-        raise ValueError(f"Token file {token_location} is empty")
+        msg = f"Token file {token_location} is empty"
+        raise ValueError(msg)
 
     if token_str.startswith("{"):
         try:
@@ -68,9 +69,8 @@ def get_token_from_file(token_location: str) -> str:
             access_key = token_parsed.get("access_token")
             if access_key:
                 return access_key
-            else:
-                logger.debug("JSON token does not contain 'access_token' key, returning full token string")
-                return token_str
+            logger.debug("JSON token does not contain 'access_token' key, returning full token string")
+            return token_str
         except json.JSONDecodeError as err:
             logger.debug(f"Unable to unmarshal file {token_location} as JSON (assuming it is a token instead): {err}")
             return token_str
@@ -184,7 +184,7 @@ class TokenContentIterator:
             return None
 
         flags = self._get_pelican_flag()
-        cmd = ["pelican"] + ["token", "fetch", self.pelican_url] + flags
+        cmd = ["pelican", "token", "fetch", self.pelican_url, *flags]
 
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
@@ -223,7 +223,6 @@ class TokenContentIterator:
 
                 def write_to_pty(data):
                     """Not used on Windows with inherited stdin"""
-                    pass
 
                 def is_alive():
                     """Check if process is still running"""
@@ -356,14 +355,13 @@ class TokenContentIterator:
                     # Handle stdin forwarding (Unix only - Windows uses simpler approach)
                     # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
                     # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
-                    if not _IS_WINDOWS:
-                        if stdin_data_to_send:
-                            # Redirected stdin - send buffered data once
-                            try:
-                                write_to_pty(stdin_data_to_send.encode("utf-8"))
-                                stdin_data_to_send = None  # Only send once
-                            except OSError as e:
-                                logger.debug(f"Error writing redirected stdin to PTY: {e}")
+                    if not _IS_WINDOWS and stdin_data_to_send:
+                        # Redirected stdin - send buffered data once
+                        try:
+                            write_to_pty(stdin_data_to_send.encode("utf-8"))
+                            stdin_data_to_send = None  # Only send once
+                        except OSError as e:
+                            logger.debug(f"Error writing redirected stdin to PTY: {e}")
             finally:
                 # Cleanup platform-specific resources
                 if not _IS_WINDOWS:
@@ -387,10 +385,9 @@ class TokenContentIterator:
                 token = matches[-1]
                 logger.info("Successfully acquired token via OIDC device flow")
                 return token
-            else:
-                logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output}")
-                return None
+            logger.warning("Could not extract JWT token from pelican binary output")
+            logger.debug(f"Output was: {full_output}")
+            return None
 
         except Exception as err:
             logger.debug(f"Error invoking pelican binary: {err}")
@@ -442,8 +439,8 @@ class TokenContentIterator:
                         try:
                             if os.path.exists(self.location) and os.access(self.location, os.R_OK):
                                 return get_token_from_file(self.location)
-                            else:
-                                raise OSError(f"File {self.location} is not readable")
+                            msg = f"File {self.location} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
                             logger.warning(f"Token file at {self.location} is not readable: {err}")
 
@@ -460,8 +457,8 @@ class TokenContentIterator:
                         try:
                             if os.path.exists(token_file) and os.access(token_file, os.R_OK):
                                 return get_token_from_file(token_file)
-                            else:
-                                raise OSError(f"File {token_file} is not readable")
+                            msg = f"File {token_file} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
                             logger.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
 

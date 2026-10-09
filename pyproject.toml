@@ -72,4 +72,4 @@ line-length = 200
 show-fixes = true
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "B", "I", "PT", "UP"]
+select = ["E", "F", "W", "B", "C4", "EM", "EXE", "FURB", "I", "ICN", "ISC", "LOG", "PERF", "PGH", "PIE", "PT", "RET", "RSE", "RUF", "SIM", "UP", "YTT"]
