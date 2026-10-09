@@ -50,7 +50,7 @@ testing = [
     "pytest-httpserver",
     "trustme",
 ]
-dev = { include-group = "testing" }
+dev = [{ include-group = "testing" }]
 
 
 [tool.pytest.ini_options]
