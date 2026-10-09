@@ -113,11 +113,11 @@ from pelicanfs import PelicanFileSystem
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
 
 # List objects in a namespace
-objects = pelfs.ls('/pelicanplatform/test/')
+objects = pelfs.ls("/pelicanplatform/test/")
 print(objects)
 
 # Read an object
-content = pelfs.cat('/pelicanplatform/test/hello-world.txt')
+content = pelfs.cat("/pelicanplatform/test/hello-world.txt")
 print(content)
 ```
 
@@ -133,10 +133,10 @@ import fsspec
 
 # Using OSDFFileSystem (automatically connects to osg-htc.org)
 osdf = OSDFFileSystem()
-objects = osdf.ls('/pelicanplatform/test/')
+objects = osdf.ls("/pelicanplatform/test/")
 
 # Or use fsspec directly with the osdf:// scheme
-with fsspec.open('osdf:///pelicanplatform/test/hello-world.txt', 'r') as f:
+with fsspec.open("osdf:///pelicanplatform/test/hello-world.txt", "r") as f:
     content = f.read()
     print(content)
 ```
@@ -175,21 +175,21 @@ from pelicanfs import PelicanFileSystem
 import fsspec
 
 # Method 1: Using fsspec.filesystem() with schemes (recommended)
-fs = fsspec.filesystem('osdf')
-objects = fs.ls('/pelicanplatform/test/')
+fs = fsspec.filesystem("osdf")
+objects = fs.ls("/pelicanplatform/test/")
 
 # List with details (size, type, etc.)
-objects_detailed = fs.ls('/pelicanplatform/test/', detail=True)
+objects_detailed = fs.ls("/pelicanplatform/test/", detail=True)
 
 # Recursively find all objects
-all_objects = fs.find('/pelicanplatform/test/')
+all_objects = fs.find("/pelicanplatform/test/")
 
 # Find objects with depth limit
-objects = fs.find('/pelicanplatform/test/', maxdepth=2)
+objects = fs.find("/pelicanplatform/test/", maxdepth=2)
 
 # Method 2: Using PelicanFileSystem directly (for more control)
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-objects = pelfs.ls('/pelicanplatform/test/')
+objects = pelfs.ls("/pelicanplatform/test/")
 ```
 
 ### Pattern Matching with Glob
@@ -201,18 +201,19 @@ objects = pelfs.ls('/pelicanplatform/test/')
 import fsspec
 
 # Method 1: Using fsspec.filesystem() with schemes (recommended)
-fs = fsspec.filesystem('osdf')
+fs = fsspec.filesystem("osdf")
 
 # Find all text files in the namespace
-txt_objects = fs.glob('/pelicanplatform/**/*.txt')
+txt_objects = fs.glob("/pelicanplatform/**/*.txt")
 
 # Find objects with depth limit
-objects = fs.glob('/pelicanplatform/**/*', maxdepth=2)
+objects = fs.glob("/pelicanplatform/**/*", maxdepth=2)
 
 # Method 2: Using PelicanFileSystem directly
 from pelicanfs.core import PelicanFileSystem
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-txt_objects = pelfs.glob('/pelicanplatform/**/*.txt')
+txt_objects = pelfs.glob("/pelicanplatform/**/*.txt")
 ```
 
 ### Reading Objects
@@ -221,25 +222,25 @@ txt_objects = pelfs.glob('/pelicanplatform/**/*.txt')
 import fsspec
 
 # Method 1: Using fsspec.open with schemes (recommended)
-with fsspec.open('osdf:///pelicanplatform/test/hello-world.txt', 'r') as f:
+with fsspec.open("osdf:///pelicanplatform/test/hello-world.txt", "r") as f:
     data = f.read()
     print(data)
 
 # Method 2: Using fsspec.filesystem() for cat operations
-fs = fsspec.filesystem('osdf')
+fs = fsspec.filesystem("osdf")
 
 # Read entire object
-content = fs.cat('/pelicanplatform/test/hello-world.txt')
+content = fs.cat("/pelicanplatform/test/hello-world.txt")
 print(content)
 
 # Read multiple objects
-contents = fs.cat(['/pelicanplatform/test/hello-world.txt',
-                   '/pelicanplatform/test/testfile-64M'])
+contents = fs.cat(["/pelicanplatform/test/hello-world.txt", "/pelicanplatform/test/testfile-64M"])
 
 # Method 3: Using PelicanFileSystem directly (for more control)
 from pelicanfs.core import PelicanFileSystem
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-content = pelfs.cat('/pelicanplatform/test/hello-world.txt')
+content = pelfs.cat("/pelicanplatform/test/hello-world.txt")
 print(content)
 ```
 
@@ -252,19 +253,19 @@ To upload local files as objects, you need proper authorization (see [Authorizat
 import fsspec
 
 # Method 1: Using fsspec.filesystem() with authorization (recommended)
-fs = fsspec.filesystem('osdf', headers={"Authorization": "Bearer YOUR_TOKEN"})
+fs = fsspec.filesystem("osdf", headers={"Authorization": "Bearer YOUR_TOKEN"})
 
 # Upload a single file
-fs.put('/local/path/file.txt', '/namespace/remote/path/object.txt')
+fs.put("/local/path/file.txt", "/namespace/remote/path/object.txt")
 
 # Upload multiple files
-fs.put('/local/directory/', '/namespace/remote/path/', recursive=True)
+fs.put("/local/directory/", "/namespace/remote/path/", recursive=True)
 
 # Method 2: Using PelicanFileSystem directly (for more control)
 from pelicanfs.core import PelicanFileSystem
-pelfs = PelicanFileSystem("pelican://osg-htc.org",
-                          headers={"Authorization": "Bearer YOUR_TOKEN"})
-pelfs.put('/local/path/file.txt', '/namespace/remote/path/object.txt')
+
+pelfs = PelicanFileSystem("pelican://osg-htc.org", headers={"Authorization": "Bearer YOUR_TOKEN"})
+pelfs.put("/local/path/file.txt", "/namespace/remote/path/object.txt")
 ```
 
 ### Downloading Objects
@@ -276,18 +277,19 @@ pelfs.put('/local/path/file.txt', '/namespace/remote/path/object.txt')
 import fsspec
 
 # Method 1: Using fsspec.filesystem() (recommended)
-fs = fsspec.filesystem('osdf')
+fs = fsspec.filesystem("osdf")
 
 # Download an object to a local file
-fs.get('/pelicanplatform/test/hello-world.txt', '/local/path/file.txt')
+fs.get("/pelicanplatform/test/hello-world.txt", "/local/path/file.txt")
 
 # Download multiple objects (note: no trailing slash on source path)
-fs.get('/pelicanplatform/test', '/local/directory/', recursive=True)
+fs.get("/pelicanplatform/test", "/local/directory/", recursive=True)
 
 # Method 2: Using PelicanFileSystem directly
 from pelicanfs.core import PelicanFileSystem
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-pelfs.get('/pelicanplatform/test/hello-world.txt', '/local/path/file.txt')
+pelfs.get("/pelicanplatform/test/hello-world.txt", "/local/path/file.txt")
 ```
 
 ## Advanced Configuration
@@ -318,10 +320,7 @@ Specify one or more preferred caches to use:
 ```python
 # Note: Replace example cache URLs with actual Cache server URLs from your federation
 # Use a single preferred cache
-pelfs = PelicanFileSystem(
-    "pelican://osg-htc.org",
-    preferred_caches=["https://cache.example.com"]
-)
+pelfs = PelicanFileSystem("pelican://osg-htc.org", preferred_caches=["https://cache.example.com"])
 
 # Use multiple preferred caches with fallback to Director's list
 pelfs = PelicanFileSystem(
@@ -329,8 +328,8 @@ pelfs = PelicanFileSystem(
     preferred_caches=[
         "https://cache1.example.com",
         "https://cache2.example.com",
-        "+"  # Special value: append Director's caches
-    ]
+        "+",  # Special value: append Director's caches
+    ],
 )
 ```
 
@@ -351,10 +350,7 @@ Tokens can be provided in multiple ways, checked in the following order of prece
 You can explicitly provide an authorization token when creating the filesystem:
 
 ```python
-pelfs = PelicanFileSystem(
-    "pelican://osg-htc.org",
-    headers={"Authorization": "Bearer YOUR_TOKEN_HERE"}
-)
+pelfs = PelicanFileSystem("pelican://osg-htc.org", headers={"Authorization": "Bearer YOUR_TOKEN_HERE"})
 ```
 
 Or when using fsspec directly:
@@ -362,10 +358,7 @@ Or when using fsspec directly:
 ```python
 import fsspec
 
-with fsspec.open(
-    'osdf:///namespace/path/file.txt',
-    headers={"Authorization": "Bearer YOUR_TOKEN_HERE"}
-) as f:
+with fsspec.open("osdf:///namespace/path/file.txt", headers={"Authorization": "Bearer YOUR_TOKEN_HERE"}) as f:
     data = f.read()
 ```
 
@@ -417,15 +410,15 @@ import fsspec
 
 # Using PelicanFileSystem directly
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-content = pelfs.cat('/protected/namespace/file.txt')
+content = pelfs.cat("/protected/namespace/file.txt")
 
 # Using fsspec with the osdf:// scheme
-with fsspec.open('osdf:///protected/namespace/file.txt', 'r') as f:
+with fsspec.open("osdf:///protected/namespace/file.txt", "r") as f:
     data = f.read()
 
 # Using fsspec.filesystem()
-fs = fsspec.filesystem('osdf')
-content = fs.cat('/protected/namespace/file.txt')
+fs = fsspec.filesystem("osdf")
+content = fs.cat("/protected/namespace/file.txt")
 ```
 
 When the device flow is triggered, you will see output similar to:
@@ -522,18 +515,19 @@ PelicanFS works with xarray for reading Zarr datasets:
 import xarray as xr
 
 # Method 1: Using the scheme directly (recommended - simplest)
-ds = xr.open_dataset('osdf:///namespace/remote/path/dataset.zarr', engine='zarr')
+ds = xr.open_dataset("osdf:///namespace/remote/path/dataset.zarr", engine="zarr")
 
 # Method 2: Using PelicanMap (useful for multiple datasets or custom configurations)
 from pelicanfs.core import PelicanFileSystem, PelicanMap
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-zarr_store = PelicanMap('/namespace/remote/path/dataset.zarr', pelfs=pelfs)
-ds = xr.open_dataset(zarr_store, engine='zarr')
+zarr_store = PelicanMap("/namespace/remote/path/dataset.zarr", pelfs=pelfs)
+ds = xr.open_dataset(zarr_store, engine="zarr")
 
 # Method 3: Opening multiple datasets with PelicanMap
 file1 = PelicanMap("/namespace/remote/path/file1.zarr", pelfs=pelfs)
 file2 = PelicanMap("/namespace/remote/path/file2.zarr", pelfs=pelfs)
-ds = xr.open_mfdataset([file1, file2], engine='zarr')
+ds = xr.open_mfdataset([file1, file2], engine="zarr")
 ```
 
 ### Using with PyTorch
@@ -545,6 +539,7 @@ PelicanFS can be used to load training data for PyTorch:
 import torch
 from torch.utils.data import Dataset
 import fsspec
+
 
 class PelicanDataset(Dataset):
     def __init__(self, file_paths, fs):
@@ -560,16 +555,18 @@ class PelicanDataset(Dataset):
         # Process your data here
         return data
 
+
 # Method 1: Using fsspec.filesystem() (recommended)
-fs = fsspec.filesystem('osdf')
-files = fs.glob('/namespace/remote/path/**/*.bin')
+fs = fsspec.filesystem("osdf")
+files = fs.glob("/namespace/remote/path/**/*.bin")
 dataset = PelicanDataset(files, fs)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=32)
 
 # Method 2: Using PelicanFileSystem directly (for more control)
 from pelicanfs.core import PelicanFileSystem
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-files = pelfs.glob('/namespace/remote/path/**/*.bin')
+files = pelfs.glob("/namespace/remote/path/**/*.bin")
 dataset = PelicanDataset(files, pelfs)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=32)
 ```
@@ -584,16 +581,17 @@ import pandas as pd
 import fsspec
 
 # Method 1: Using fsspec.open with schemes (recommended)
-with fsspec.open('osdf:///namespace/remote/path/data.csv', 'r') as f:
+with fsspec.open("osdf:///namespace/remote/path/data.csv", "r") as f:
     df = pd.read_csv(f)
 
 # Method 2: Read directly with pandas (pandas will use fsspec internally)
-df = pd.read_csv('osdf:///namespace/remote/path/data.csv')
+df = pd.read_csv("osdf:///namespace/remote/path/data.csv")
 
 # Method 3: Using PelicanFileSystem directly
 from pelicanfs.core import PelicanFileSystem
+
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
-with pelfs.open('/namespace/remote/path/data.csv', 'r') as f:
+with pelfs.open("/namespace/remote/path/data.csv", "r") as f:
     df = pd.read_csv(f)
 ```
 
@@ -610,7 +608,8 @@ mapper = PelicanMap("/namespace/remote/path/dataset.zarr", pelfs=pelfs)
 
 # Use with xarray
 import xarray as xr
-ds = xr.open_dataset(mapper, engine='zarr')
+
+ds = xr.open_dataset(mapper, engine="zarr")
 ```
 
 **Note:** Use `PelicanMap` instead of fsspec's `get_mapper()` for better compatibility with Pelican's architecture.
@@ -639,15 +638,15 @@ from pelicanfs.core import PelicanFileSystem
 pelfs = PelicanFileSystem("pelican://osg-htc.org")
 
 # Perform some operations
-pelfs.cat('/pelicanplatform/test/hello-world.txt')
-pelfs.cat('/pelicanplatform/test/hello-world.txt')  # Second access
-pelfs.cat('/pelicanplatform/test/hello-world.txt')  # Third access
+pelfs.cat("/pelicanplatform/test/hello-world.txt")
+pelfs.cat("/pelicanplatform/test/hello-world.txt")  # Second access
+pelfs.cat("/pelicanplatform/test/hello-world.txt")  # Third access
 
 # Get access statistics object
 stats = pelfs.get_access_data()
 
 # Get responses for a specific path
-responses, has_data = stats.get_responses('/pelicanplatform/test/hello-world.txt')
+responses, has_data = stats.get_responses("/pelicanplatform/test/hello-world.txt")
 
 if has_data:
     for resp in responses:

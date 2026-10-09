@@ -403,13 +403,11 @@ class PelicanFileSystem(AsyncFileSystem):
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @overload
     @classmethod
-    def _strip_protocol(cls, path: str) -> str:
-        ...
+    def _strip_protocol(cls, path: str) -> str: ...
 
     @overload
     @classmethod
-    def _strip_protocol(cls, path: List[str]) -> List[str]:
-        ...
+    def _strip_protocol(cls, path: List[str]) -> List[str]: ...
 
     @classmethod
     def _strip_protocol(cls, path):
