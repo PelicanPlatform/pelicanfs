@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import pytest
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -117,8 +118,5 @@ def test_ls_directory_not_found(httpserver: HTTPServer, get_client, get_webdav_c
     )
 
     # Should raise FileNotFoundError for non-existent directory
-    try:
+    with pytest.raises(FileNotFoundError):
         pelfs.ls("/foo/bar", detail=False)
-        assert False, "Expected FileNotFoundError"
-    except FileNotFoundError:
-        pass  # Expected

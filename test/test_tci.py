@@ -31,8 +31,6 @@ def isolated_env(monkeypatch):
     # Fully isolate environment, keeping SYSTEMROOT, which Windows needs
     env = {"SYSTEMROOT": os.environ["SYSTEMROOT"]} if "SYSTEMROOT" in os.environ else {}
     monkeypatch.setattr("os.environ", env, raising=False)
-    yield
-    # monkeypatch automatically restores os.environ after the test
 
 
 def test_next_uses_bearer_token_env(monkeypatch):
@@ -177,7 +175,7 @@ def test_htcondor_fallback_all_fail_raises_stopiteration(mock_access, mock_exist
     iterator.method = TokenDiscoveryMethod.HTCONDOR_DISCOVERY
 
     # First next(): triggers discovery and appends fallback
-    with pytest.raises(StopIteration):
+    with pytest.raises(StopIteration):  # noqa: PT012
         while True:
             next(iterator)
 

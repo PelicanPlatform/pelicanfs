@@ -998,7 +998,7 @@ class PelicanFileSystem(AsyncFileSystem):
             if exists:
                 return set()
             else:
-                raise FileNotFoundError
+                raise FileNotFoundError from e
 
         if detail:
 
@@ -1405,7 +1405,7 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 result = await client.info(parts.path)
             except RemoteResourceNotFoundError:
-                raise FileNotFoundError(path)
+                raise FileNotFoundError(path) from None
             info = {
                 "name": path,
                 "type": "file",
@@ -1443,7 +1443,7 @@ class PelicanFileSystem(AsyncFileSystem):
             for probe in probes:
                 if isinstance(probe, BaseException):
                     raise probe
-            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes) if is_collection}
+            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes, strict=True) if is_collection}
             for pattern in (root for root in roots if fshttp.has_magic(root)):
                 matches = await self._glob(pattern, detail=True, maxdepth=kwargs.get("maxdepth"))
                 collection_roots |= {p.rstrip("/") for p, info in matches.items() if info.get("type") == "directory"}
