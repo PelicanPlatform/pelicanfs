@@ -403,7 +403,7 @@ def test_walk(
             assert "file2.md" in filenames
             assert len(filenames) == 2
         else:
-            assert False, "Should not have reached this point, too many subdirectories"
+            pytest.fail("Should not have reached this point, too many subdirectories")
 
         sentinel += 1
 

@@ -363,9 +363,9 @@ def test_get_stale_local_directory_fails_loudly(two_host_federation, tmp_path):
     dest = tmp_path / "dest"
     (dest / "bar" / "file1.txt").mkdir(parents=True)
 
-    # Which OSError depends on the platform: IsADirectoryError on POSIX,
-    # PermissionError on Windows. What matters is that it raises rather than skipping
-    with pytest.raises(OSError):
+    # IsADirectoryError on POSIX, PermissionError on Windows. What matters is
+    # that it raises rather than skipping
+    with pytest.raises((IsADirectoryError, PermissionError)):
         two_host_federation.get("/foo/bar", str(dest), recursive=True)
 
 

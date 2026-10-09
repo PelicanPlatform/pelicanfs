@@ -26,7 +26,7 @@ def test_remove_hostname():
 
     # Test a list
     paths = ["https://test-url.org/namespace/path", "osdf://test-url.org/namespace/path2"]
-    PelicanFileSystem._remove_host_from_paths(paths) == ["/namespace/path", "namespace/pathe2"]
+    assert PelicanFileSystem._remove_host_from_paths(paths) == ["/namespace/path", "/namespace/path2"]
 
     # Test an info-return
     paths = [
@@ -52,7 +52,7 @@ def test_remove_hostname():
 
 
 @pytest.mark.parametrize(
-    "discovery_url,input_path,expected_path,expected_discovery",
+    ("discovery_url", "input_path", "expected_path", "expected_discovery"),
     [
         # Absolute paths pass through unchanged
         ("pelican://test-discovery-url.org", "/absolute/path", "/absolute/path", "pelican://test-discovery-url.org/"),
@@ -75,7 +75,7 @@ def test_fspath(discovery_url, input_path, expected_path, expected_discovery):
 
 
 @pytest.mark.parametrize(
-    "discovery_url,input_path",
+    ("discovery_url", "input_path"),
     [
         # pelican:// URL with mismatched discovery
         ("pelican://test-discovery-url.org", "pelican://diff-disc/path"),
