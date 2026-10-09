@@ -46,17 +46,20 @@ Bug-Reports = "https://github.com/PelicanPlatform/pelicanfs/issues"
 
 [dependency-groups]
 testing = [
-    "pytest",
+    "pytest>=9",
     "pytest-httpserver",
     "trustme",
 ]
 dev = [{ include-group = "testing" }]
 
 
-[tool.pytest.ini_options]
-addopts = [
-    "--import-mode=importlib",
-]
+[tool.pytest]
+minversion = "9.0"
+addopts = ["-ra", "--showlocals", "--import-mode=importlib"]
+strict = true
+filterwarnings = ["error"]
+log_level = "INFO"
+testpaths = ["test"]
 markers = [
     "integration: marks tests as integration tests (require live OSDF infrastructure)",
 ]
