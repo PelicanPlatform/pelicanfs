@@ -421,7 +421,7 @@ def test_ls_from_http_awaits_token_generation(httpserver: HTTPServer, get_client
     _handle_token_generation and the WebDAV listing are all the real thing.
     """
     collections_url = httpserver.url_for("/foo/bar")
-    monkeypatch.setattr(TokenGenerator, "get_token", lambda self: "generated-token")
+    monkeypatch.setattr(TokenGenerator, "get_token", lambda _self: "generated-token")
 
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
