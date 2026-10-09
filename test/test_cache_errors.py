@@ -18,6 +18,7 @@ import pytest
 from pytest_httpserver import HTTPServer
 
 from pelicanfs.core import PelicanFileSystem
+from pelicanfs.exceptions import NoAvailableSource
 
 
 def _setup_director(httpserver, path="/foo/bar"):
@@ -122,8 +123,8 @@ def test_double_cache_error_does_not_crash(httpserver: HTTPServer, get_client):
         skip_instance_cache=True,
     )
 
-    with pytest.raises(Exception):
+    with pytest.raises(NoAvailableSource):
         pelfs.cat("/foo/bar")
     # Second call must not crash with ValueError even though the cache is already evicted
-    with pytest.raises(Exception):
+    with pytest.raises(NoAvailableSource):
         pelfs.cat("/foo/bar")
