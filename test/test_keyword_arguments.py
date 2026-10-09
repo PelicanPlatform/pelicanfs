@@ -72,7 +72,7 @@ def fixture_keyword_fs(httpserver: HTTPServer, get_client, get_webdav_client):
 # Each entry is a read method and the keyword its path argument is named after, which is
 # what fsspec's public signatures let a caller use.
 @pytest.mark.parametrize(
-    "method, keyword",
+    ("method", "keyword"),
     [
         ("cat", "path"),
         ("cat_file", "path"),

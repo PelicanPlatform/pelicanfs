@@ -226,7 +226,8 @@ def test_io_wrapper_error_handling():
     pelfs._bad_cache = lambda path, e: None
 
     def failing_read(*args, **kwargs):
-        raise IOError("Simulated read failure")
+        msg = "Simulated read failure"
+        raise OSError(msg)
 
     # Call _io_wrapper with a path argument - the fix adds this parameter
     wrapped_read = pelfs._io_wrapper(failing_read, "/test/path")

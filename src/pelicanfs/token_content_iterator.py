@@ -26,7 +26,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
@@ -48,20 +47,21 @@ DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 
 def get_token_from_file(token_location: str) -> str:
-    logger.debug(f"Opening token file: {token_location}")
+    logger.debug("Opening token file: %s", token_location)
     try:
-        with open(token_location, "r") as f:
+        with open(token_location) as f:
             token_contents = f.read()
     except Exception as err:
-        logger.error(f"Error reading from token file: {err}")
+        logger.error("Error reading from token file: %s", err)
         raise
 
     token_str = token_contents.strip()
 
     # Check if the token is empty or whitespace only
     if not token_str:
-        logger.warning(f"Token file {token_location} is empty or contains only whitespace")
-        raise ValueError(f"Token file {token_location} is empty")
+        logger.warning("Token file %s is empty or contains only whitespace", token_location)
+        msg = f"Token file {token_location} is empty"
+        raise ValueError(msg)
 
     if token_str.startswith("{"):
         try:
@@ -69,11 +69,10 @@ def get_token_from_file(token_location: str) -> str:
             access_key = token_parsed.get("access_token")
             if access_key:
                 return access_key
-            else:
-                logger.debug("JSON token does not contain 'access_token' key, returning full token string")
-                return token_str
+            logger.debug("JSON token does not contain 'access_token' key, returning full token string")
+            return token_str
         except json.JSONDecodeError as err:
-            logger.debug(f"Unable to unmarshal file {token_location} as JSON (assuming it is a token instead): {err}")
+            logger.debug("Unable to unmarshal file %s as JSON (assuming it is a token instead): %s", token_location, err)
             return token_str
     else:
         return token_str
@@ -114,25 +113,25 @@ class TokenContentIterator:
         pty_buffer_size (int): Buffer size for PTY I/O (default: 1024).
         select_timeout (float): Timeout in seconds for select() calls (default: 0.1).
         method_index (int): Internal index of the current discovery method.
-        cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
+        cred_locations (list[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
     """
 
-    location: Optional[str] = None
-    name: Optional[str] = None
-    operation: Optional[object] = None
-    destination_url: Optional[str] = None
-    pelican_url: Optional[str] = None
+    location: str | None = None
+    name: str | None = None
+    operation: object | None = None
+    destination_url: str | None = None
+    pelican_url: str | None = None
     oidc_timeout_seconds: int = DEFAULT_OIDC_TIMEOUT_SECONDS
     pty_buffer_size: int = DEFAULT_PTY_BUFFER_SIZE
     select_timeout: float = DEFAULT_SELECT_TIMEOUT
     method_index: int = 0
-    cred_locations: List[str] = field(default_factory=list)
+    cred_locations: list[str] = field(default_factory=list)
     fallback_index: int = 0
 
     def _pelican_binary_exists(self) -> bool:
         """Check if pelican binary exists in PATH"""
-        logger.debug(f"Checking for pelican binary in PATH: {os.environ.get('PATH', '(not set)')}")
+        logger.debug("Checking for pelican binary in PATH: %s", os.environ.get("PATH", "(not set)"))
         result = shutil.which("pelican")
         return result is not None
 
@@ -168,7 +167,7 @@ class TokenContentIterator:
 
         return flags
 
-    def _get_token_from_pelican_binary(self) -> Optional[str]:
+    def _get_token_from_pelican_binary(self) -> str | None:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
@@ -185,9 +184,9 @@ class TokenContentIterator:
             return None
 
         flags = self._get_pelican_flag()
-        cmd = ["pelican"] + ["token", "fetch", self.pelican_url] + flags
+        cmd = ["pelican", "token", "fetch", self.pelican_url, *flags]
 
-        logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
+        logger.info("Invoking OIDC device flow via pelican binary: %s", " ".join(cmd))
 
         try:
             # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
@@ -224,7 +223,6 @@ class TokenContentIterator:
 
                 def write_to_pty(data):
                     """Not used on Windows with inherited stdin"""
-                    pass
 
                 def is_alive():
                     """Check if process is still running"""
@@ -258,7 +256,7 @@ class TokenContentIterator:
                         attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
                         termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
                     except Exception as e:
-                        logger.debug(f"Could not disable echo on PTY: {e}")
+                        logger.debug("Could not disable echo on PTY: %s", e)
 
                     process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
                 os.close(slave_fd)
@@ -293,18 +291,18 @@ class TokenContentIterator:
                         try:
                             stdin_data_to_send = sys.stdin.read()
                             if stdin_data_to_send:
-                                logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
+                                logger.debug("Read %s chars from redirected stdin", len(stdin_data_to_send))
                         except Exception as e:
-                            logger.debug(f"Could not read from redirected stdin: {e}")
+                            logger.debug("Could not read from redirected stdin: %s", e)
                             stdin_data_to_send = None
                 except (AttributeError, io.UnsupportedOperation):
                     # stdin doesn't have fileno() - likely redirected (e.g., Jupyter)
                     try:
                         stdin_data_to_send = sys.stdin.read()
                         if stdin_data_to_send:
-                            logger.debug(f"Read {len(stdin_data_to_send)} chars from redirected stdin")
+                            logger.debug("Read %s chars from redirected stdin", len(stdin_data_to_send))
                     except Exception as e:
-                        logger.debug(f"Could not read from redirected stdin: {e}")
+                        logger.debug("Could not read from redirected stdin: %s", e)
                         stdin_data_to_send = None
 
             def read_and_echo_output():
@@ -339,7 +337,7 @@ class TokenContentIterator:
                     # Check timeout
                     if time.time() - start_time > self.oidc_timeout_seconds:
                         process.kill()
-                        logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
+                        logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
                         return None
 
                     # Check if process is still running
@@ -357,14 +355,13 @@ class TokenContentIterator:
                     # Handle stdin forwarding (Unix only - Windows uses simpler approach)
                     # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
                     # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
-                    if not _IS_WINDOWS:
-                        if stdin_data_to_send:
-                            # Redirected stdin - send buffered data once
-                            try:
-                                write_to_pty(stdin_data_to_send.encode("utf-8"))
-                                stdin_data_to_send = None  # Only send once
-                            except OSError as e:
-                                logger.debug(f"Error writing redirected stdin to PTY: {e}")
+                    if not _IS_WINDOWS and stdin_data_to_send:
+                        # Redirected stdin - send buffered data once
+                        try:
+                            write_to_pty(stdin_data_to_send.encode("utf-8"))
+                            stdin_data_to_send = None  # Only send once
+                        except OSError as e:
+                            logger.debug("Error writing redirected stdin to PTY: %s", e)
             finally:
                 # Cleanup platform-specific resources
                 if not _IS_WINDOWS:
@@ -376,7 +373,7 @@ class TokenContentIterator:
             returncode = process.returncode
 
             if returncode != 0:
-                logger.debug(f"Pelican binary exited with code {returncode}")
+                logger.debug("Pelican binary exited with code %s", returncode)
                 return None
 
             # Extract JWT token from captured output
@@ -388,13 +385,12 @@ class TokenContentIterator:
                 token = matches[-1]
                 logger.info("Successfully acquired token via OIDC device flow")
                 return token
-            else:
-                logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output}")
-                return None
+            logger.warning("Could not extract JWT token from pelican binary output")
+            logger.debug("Output was: %s", full_output)
+            return None
 
         except Exception as err:
-            logger.debug(f"Error invoking pelican binary: {err}")
+            logger.debug("Error invoking pelican binary: %s", err)
             import traceback
 
             logger.debug(traceback.format_exc())
@@ -434,19 +430,19 @@ class TokenContentIterator:
         while self.method_index < len(self.methods):
             method = self.methods[self.method_index]
             self.method_index += 1
-            logger.debug(f"Trying token discovery method: {method}")
+            logger.debug("Trying token discovery method: %s", method)
 
             match method:
                 case TokenDiscoveryMethod.LOCATION:
                     if self.location:
-                        logger.debug(f"Using API-specified token location: {self.location}")
+                        logger.debug("Using API-specified token location: %s", self.location)
                         try:
                             if os.path.exists(self.location) and os.access(self.location, os.R_OK):
                                 return get_token_from_file(self.location)
-                            else:
-                                raise OSError(f"File {self.location} is not readable")
+                            msg = f"File {self.location} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
-                            logger.warning(f"Token file at {self.location} is not readable: {err}")
+                            logger.warning("Token file at %s is not readable: %s", self.location, err)
 
                 case TokenDiscoveryMethod.ENV_BEARER_TOKEN:
                     token = os.getenv("BEARER_TOKEN")
@@ -461,33 +457,33 @@ class TokenContentIterator:
                         try:
                             if os.path.exists(token_file) and os.access(token_file, os.R_OK):
                                 return get_token_from_file(token_file)
-                            else:
-                                raise OSError(f"File {token_file} is not readable")
+                            msg = f"File {token_file} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
-                            logger.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
+                            logger.warning("Could not read BEARER_TOKEN_FILE: %s", err)
 
                 case TokenDiscoveryMethod.DEFAULT_BEARER_TOKEN:
                     token_file = default_bearer_token_file()
                     if os.path.exists(token_file):
-                        logger.debug(f"Using token from default bearer token file: {token_file}")
+                        logger.debug("Using token from default bearer token file: %s", token_file)
                         try:
                             token = get_token_from_file(token_file)
-                            logger.debug(f"Successfully read token from default file: {token[:30] if token else 'None'}...")
+                            logger.debug("Successfully read token from default file: %s...", token[:30] if token else "None")
                             return token
                         except Exception as err:
-                            logger.warning(f"Could not read default bearer token: {err}")
+                            logger.warning("Could not read default bearer token: %s", err)
 
                 case TokenDiscoveryMethod.ENV_TOKEN_PATH:
                     token_path = os.getenv("TOKEN")
                     if token_path:
                         if not os.path.exists(token_path):
-                            logger.warning(f"Environment variable TOKEN is set, but file does not exist: {token_path}")
+                            logger.warning("Environment variable TOKEN is set, but file does not exist: %s", token_path)
                         else:
                             try:
                                 logger.debug("Using token from TOKEN environment variable")
                                 return get_token_from_file(token_path)
                             except Exception as err:
-                                logger.warning(f"Error reading token from {token_path}: {err}")
+                                logger.warning("Error reading token from %s: %s", token_path, err)
 
                 case TokenDiscoveryMethod.HTCONDOR_DISCOVERY:
                     if self.name:
@@ -502,7 +498,7 @@ class TokenContentIterator:
                             try:
                                 return get_token_from_file(token_path)
                             except Exception as err:
-                                logger.warning(f"Failed to read fallback token at {token_path}: {err}")
+                                logger.warning("Failed to read fallback token at %s: %s", token_path, err)
                     else:
                         logger.debug("No cred_locations found for HTCONDOR_FALLBACK")
                     # No fallback tokens left to try
@@ -522,7 +518,7 @@ class TokenContentIterator:
         logger.debug("No more token sources to try")
         raise StopIteration
 
-    def discoverHTCondorTokenLocations(self, tokenName: str) -> List[str]:
+    def discoverHTCondorTokenLocations(self, tokenName: str) -> list[str]:
         """
         Discover possible HTCondor token file locations based on a logical token name.
 
@@ -534,7 +530,7 @@ class TokenContentIterator:
             tokenName (str): Logical name of the token.
 
         Returns:
-            List[str]: List of possible token file paths to try.
+            list[str]: List of possible token file paths to try.
         """
         tokenLocations = []
 
@@ -551,7 +547,7 @@ class TokenContentIterator:
             tokenPath = os.path.join(credsDir, tokenName)
             tokenUsePath = os.path.join(credsDir, f"{tokenName}.use")
             if not os.path.exists(tokenPath):
-                logger.warning(f"Environment variable _CONDOR_CREDS is set, but the credential file is not readable: {tokenPath}")
+                logger.warning("Environment variable _CONDOR_CREDS is set, but the credential file is not readable: %s", tokenPath)
             else:
                 tokenLocations.append(tokenUsePath)
                 return tokenLocations
@@ -571,6 +567,6 @@ class TokenContentIterator:
                         continue
                     tokenLocations.append(str(token_path))
         except Exception as err:
-            logger.warning(f"Failure when iterating through directory to look through tokens: {err}")
+            logger.warning("Failure when iterating through directory to look through tokens: %s", err)
 
         return tokenLocations
