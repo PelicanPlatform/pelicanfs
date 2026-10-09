@@ -13,7 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-import os
+from pathlib import Path
 
 import pytest
 from aiowebdav2.exceptions import ResponseErrorCodeError
@@ -192,13 +192,8 @@ def fixture_two_host_federation(two_host_fs_factory):
 
 def local_tree(root):
     """Every path under `root`, relative and posix-style, collections marked with a /."""
-    out = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        for name in dirnames:
-            out.add(os.path.relpath(os.path.join(dirpath, name), root) + "/")
-        for name in filenames:
-            out.add(os.path.relpath(os.path.join(dirpath, name), root))
-    return out
+    root = Path(root)
+    return {p.relative_to(root).as_posix() + ("/" if p.is_dir() else "") for p in root.rglob("*")}
 
 
 def object_gets(server):
