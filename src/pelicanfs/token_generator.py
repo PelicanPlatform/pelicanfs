@@ -128,7 +128,7 @@ class TokenGenerator:
                     msg = "URL path is empty"
                     raise InvalidDestinationURL(msg)
             except Exception as e:
-                logger.error(f"Invalid DestinationURL: {self.DestinationURL} ({e})")
+                logger.error("Invalid DestinationURL: %s (%s)", self.DestinationURL, e)
                 msg = f"Invalid DestinationURL: {self.DestinationURL}"
                 raise InvalidDestinationURL(msg) from e
 
@@ -147,16 +147,16 @@ class TokenGenerator:
                 )
 
             logger.debug("About to enter token validation loop")
-            logger.debug(f"self.Iterator at validation loop: {self.Iterator}")
+            logger.debug("self.Iterator at validation loop: %s", self.Iterator)
             try:
                 # Use next() to get tokens one at a time from the iterator
                 while True:
                     try:
                         contents = next(self.Iterator)
                         # Check if the token is valid and acceptable
-                        logger.debug(f"Validating token for operation: {operation}")
+                        logger.debug("Validating token for operation: %s", operation)
                         valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, operation)
-                        logger.debug(f"Token validation result: valid={valid}, expiry={expiry}")
+                        logger.debug("Token validation result: valid=%s, expiry=%s", valid, expiry)
                         if valid:
                             self.token = TokenInfo(contents, expiry)
                             return contents
@@ -166,7 +166,7 @@ class TokenGenerator:
                         logger.debug("Token iterator reached StopIteration")
                         break
             except Exception as e:
-                logger.error(f"Error iterating tokens: {e}")
+                logger.error("Error iterating tokens: %s", e)
                 msg = "Failed to fetch tokens due to iterator error"
                 raise TokenIteratorException(msg) from e
 
@@ -222,7 +222,7 @@ def token_is_valid_and_acceptable(
     Returns:
         Tuple (is_valid, expiry_datetime)
     """
-    logger.debug(f"token_is_valid_and_acceptable called with operation: {operation}")
+    logger.debug("token_is_valid_and_acceptable called with operation: %s", operation)
 
     try:
         # Try to deserialize the token without SSL verification
@@ -230,7 +230,7 @@ def token_is_valid_and_acceptable(
         token: SciToken = SciToken.deserialize(jwt_serialized)
         logger.debug("Successfully deserialized token")
     except (ValueError, Exception) as e:
-        logger.debug(f"Failed to deserialize token: {jwt_serialized[:30]}... Error: {e}")
+        logger.debug("Failed to deserialize token: %s... Error: %s", jwt_serialized[:30], e)
         return False, datetime.fromtimestamp(0, tz=UTC)
 
     # Check if the token is expired
@@ -240,17 +240,17 @@ def token_is_valid_and_acceptable(
         return False, datetime.fromtimestamp(0, tz=UTC)
 
     expiry_dt: datetime = datetime.fromtimestamp(exp, tz=UTC)
-    logger.debug(f"Token expiry: {expiry_dt}")
+    logger.debug("Token expiry: %s", expiry_dt)
     if expiry_dt <= datetime.now(UTC):
-        logger.debug(f"Token expired at {expiry_dt}")
+        logger.debug("Token expired at %s", expiry_dt)
         return False, expiry_dt
 
     # Get the allowed issuers from the director response and check if the token issuer is in the list
     issuers: list[str] = []
     if dir_resp and hasattr(dir_resp, "x_pel_tok_gen_hdr") and dir_resp.x_pel_tok_gen_hdr:
         issuers = dir_resp.x_pel_tok_gen_hdr.issuers or []
-    logger.debug(f"Allowed issuers: {issuers}")
-    logger.debug(f"Token issuer: {dict(token._verified_claims).get('iss')}")
+    logger.debug("Allowed issuers: %s", issuers)
+    logger.debug("Token issuer: %s", dict(token._verified_claims).get("iss"))
 
     # Get the operation type and set the required scopes
     if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
@@ -260,8 +260,8 @@ def token_is_valid_and_acceptable(
     else:
         ok_scopes = []
 
-    logger.debug(f"Required scopes for operation '{operation}': {ok_scopes}")
-    logger.debug(f"Token scopes: {token.get('scope')}")
+    logger.debug("Required scopes for operation '%s': %s", operation, ok_scopes)
+    logger.debug("Token scopes: %s", token.get("scope"))
 
     token_scopes = token.get("scope") or ""
     scope_list = token_scopes.split()
@@ -324,21 +324,21 @@ def is_valid_token(
         exp_dt = datetime.fromtimestamp(exp, tz=UTC)
         if exp_dt <= datetime.now(UTC) + timedelta(seconds=timeleft):
             if warn:
-                logger.warning(f"Token expired or about to expire at {exp_dt}")
+                logger.warning("Token expired or about to expire at %s", exp_dt)
             return False
 
     # Check if the token issuer is in the allowed list
     tok_issuer = dict(token._verified_claims).get("iss")
     if issuer and tok_issuer not in issuer:
         if warn:
-            logger.warning(f"Token issuer {tok_issuer} not in allowed list: {issuer}")
+            logger.warning("Token issuer %s not in allowed list: %s", tok_issuer, issuer)
         return False
 
     # Check if the token scope matches the required scope
     tok_scope = token.get("scope")
     if scope and (not tok_scope or scope not in tok_scope.split()):
         if warn:
-            logger.warning(f"Token missing required scope: {scope} in {tok_scope}")
+            logger.warning("Token missing required scope: %s in %s", scope, tok_scope)
         return False
 
     return True
