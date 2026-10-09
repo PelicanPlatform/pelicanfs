@@ -20,12 +20,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version:
           - "3.11"
-          - "3.12"
-          - "3.13"
           - "3.14"
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
     steps:
     - uses: actions/checkout@v4
     - parallel:
