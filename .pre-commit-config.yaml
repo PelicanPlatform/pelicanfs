@@ -38,9 +38,17 @@ repos:
         language_version: python3.12
         args: ["--line-length=200"]
 -   repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.391
+    rev: v1.1.414
     hooks:
     -   id: pyright
+        pass_filenames: false
+        additional_dependencies:
+          - aiohttp
+          - aiowebdav2
+          - cachetools>=5.3,<6
+          - fsspec
+          - igwn-auth-utils
+          - types-cachetools
 
 # Global exclusion for all hooks
 exclude: ^examples/
