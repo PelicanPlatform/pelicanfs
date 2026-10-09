@@ -29,11 +29,13 @@ limitations under the License.
 # plugin looks them up when it builds its own `httpserver` fixture, so overriding them
 # here is what makes `httpserver` an https server the test clients can talk to.
 #
+import asyncio
 import os
 import ssl
 from contextlib import asynccontextmanager
 
 import aiohttp
+import fsspec.asyn
 import pytest
 import trustme
 from pytest_httpserver import HTTPServer
@@ -139,7 +141,7 @@ def fixture_threaded_httpserver(httpserver_listen_address, httpserver_ssl_contex
         server.stop()
 
 
-@pytest.fixture(scope="session", name="get_client")
+@pytest.fixture(name="get_client")
 def fixture_get_client(httpclient_ssl_context):
     """
     Builds the aiohttp session pelicanfs uses for ordinary http requests.
@@ -148,13 +150,24 @@ def fixture_get_client(httpclient_ssl_context):
     HTTPFileSystem underneath; fsspec calls it when it needs a session. The only thing
     special about the session is that its connector trusts the test authority, so
     requests to the test servers don't fail certificate verification.
+
+    Sessions are closed at teardown, on the loop that owns them. Otherwise fsspec closes
+    them when the filesystem is garbage collected, which on Windows leaves the sockets
+    unclosed and raises ResourceWarning.
     """
+    sessions = []
 
     async def client_factory(**kwargs):
         connector = aiohttp.TCPConnector(ssl=httpclient_ssl_context)
-        return aiohttp.ClientSession(connector=connector, **kwargs)
+        session = aiohttp.ClientSession(connector=connector, **kwargs)
+        sessions.append((asyncio.get_running_loop(), session))
+        return session
 
-    return client_factory
+    yield client_factory
+
+    for loop, session in sessions:
+        if not session.closed and loop.is_running():
+            fsspec.asyn.sync(loop, session.close)
 
 
 @pytest.fixture(scope="session", name="get_webdav_client")
