@@ -223,10 +223,11 @@ def test_io_wrapper_error_handling():
     # Create a minimal PelicanFileSystem without full initialization
     pelfs = pelicanfs.core.PelicanFileSystem.__new__(pelicanfs.core.PelicanFileSystem)
     # Patch _bad_cache to avoid side effects
-    pelfs._bad_cache = lambda path, e: None
+    pelfs._bad_cache = lambda _path, _e: None
 
     def failing_read(*args, **kwargs):
-        raise IOError("Simulated read failure")
+        msg = "Simulated read failure"
+        raise OSError(msg)
 
     # Call _io_wrapper with a path argument - the fix adds this parameter
     wrapped_read = pelfs._io_wrapper(failing_read, "/test/path")

@@ -31,9 +31,9 @@ limitations under the License.
 # here is what makes `httpserver` an https server the test clients can talk to.
 #
 import asyncio
-import os
 import ssl
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import aiohttp
 import fsspec.asyn
@@ -42,6 +42,8 @@ import trustme
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
+
+RESOURCES = Path(__file__).parent / "resources"
 
 
 @pytest.fixture(scope="session", name="ca")
@@ -230,86 +232,64 @@ def fixture_get_webdav_client(httpclient_ssl_context):
 @pytest.fixture
 def top_listing_response():
     """Listing of /foo/bar/: three objects plus folder1 and folder2."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "top_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "top_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def f1_listing_response():
     """Listing of /foo/bar/folder1/: file1.txt plus subfolder1."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "f1_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "f1_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def f2_listing_response():
     """Listing of /foo/bar/folder2/: file1.md and file2.md."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "f2_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def sf_listing_response():
     """Listing of /foo/bar/folder1/subfolder1/: one object, file1.txt."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "sf_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "sf_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def file1_listing_response():
     """The single object /foo/bar/file1.txt."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "file1_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "file1_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def file2_listing_response():
     """The single object /foo/bar/file2.md."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "file2_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "file2_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def file3_listing_response():
     """The single object /foo/bar/file3.txt."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "file3_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "file3_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def f1_file1_listing_response():
     """The single object /foo/bar/folder1/file1.txt."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "f1_file1_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "f1_file1_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def sf_file_listing_response():
     """The single object /foo/bar/folder1/subfolder1/file1.txt."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "sf_file_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "sf_file_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def f2_file1_listing_response():
     """The single object /foo/bar/folder2/file1.md."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_file1_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "f2_file1_xml_response.xml").read_text()
 
 
 @pytest.fixture
 def f2_file2_listing_response():
     """The single object /foo/bar/folder2/file2.md."""
-    file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_file2_xml_response.xml")
-    with open(file_path, "r") as f:
-        return f.read()
+    return (RESOURCES / "f2_file2_xml_response.xml").read_text()

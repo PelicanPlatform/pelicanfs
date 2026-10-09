@@ -10,8 +10,8 @@ Run with: pytest -m integration
 Skip with: pytest -m "not integration"
 """
 
-import os
 import tempfile
+from pathlib import Path
 
 import fsspec
 import pytest
@@ -139,24 +139,23 @@ class TestObjectOperations:
             fs = fsspec.filesystem("osdf")
 
             # Download an object to a local file
-            local_file = os.path.join(tmpdir, "file.txt")
-            fs.get("/pelicanplatform/test/hello-world.txt", local_file)
-            assert os.path.exists(local_file)
+            local_file = Path(tmpdir) / "file.txt"
+            fs.get("/pelicanplatform/test/hello-world.txt", str(local_file))
+            assert local_file.exists()
 
             # Verify content was downloaded
-            with open(local_file, "r") as f:
-                content = f.read()
-                assert len(content) > 0
-                print(f"Downloaded file content: {content[:100]}")
+            content = local_file.read_text()
+            assert len(content) > 0
+            print(f"Downloaded file content: {content[:100]}")
 
             # Download multiple objects
-            local_dir = os.path.join(tmpdir, "test_files")
-            os.makedirs(local_dir, exist_ok=True)
-            fs.get("/pelicanplatform/test", local_dir, recursive=True)
-            assert os.path.exists(local_dir)
+            local_dir = Path(tmpdir) / "test_files"
+            local_dir.mkdir()
+            fs.get("/pelicanplatform/test", str(local_dir), recursive=True)
+            assert local_dir.exists()
 
             # Check that files were downloaded
-            downloaded_files = os.listdir(local_dir)
+            downloaded_files = list(local_dir.iterdir())
             assert len(downloaded_files) > 0
             print(f"Downloaded {len(downloaded_files)} files")
 
@@ -164,14 +163,13 @@ class TestObjectOperations:
             from pelicanfs.core import PelicanFileSystem
 
             pelfs = PelicanFileSystem("pelican://osg-htc.org")
-            local_file2 = os.path.join(tmpdir, "file2.txt")
-            pelfs.get("/pelicanplatform/test/hello-world.txt", local_file2)
-            assert os.path.exists(local_file2)
+            local_file2 = Path(tmpdir) / "file2.txt"
+            pelfs.get("/pelicanplatform/test/hello-world.txt", str(local_file2))
+            assert local_file2.exists()
 
             # Verify content was downloaded
-            with open(local_file2, "r") as f:
-                content = f.read()
-                assert len(content) > 0
+            content = local_file2.read_text()
+            assert len(content) > 0
 
 
 class TestAdvancedConfiguration:

@@ -377,8 +377,7 @@ def test_walk(
         get_webdav_client=get_webdav_client,
     )
 
-    sentinel = 0
-    for root, dirnames, filenames in getattr(pelfs, walk_impl)("/foo/bar"):
+    for sentinel, (root, dirnames, filenames) in enumerate(getattr(pelfs, walk_impl)("/foo/bar")):
         if sentinel == 0:
             assert root == "/foo/bar"
             assert dirnames == ["folder1", "folder2"]
@@ -403,9 +402,7 @@ def test_walk(
             assert "file2.md" in filenames
             assert len(filenames) == 2
         else:
-            assert False, "Should not have reached this point, too many subdirectories"
-
-        sentinel += 1
+            pytest.fail("Should not have reached this point, too many subdirectories")
 
 
 def test_ls_from_http_awaits_token_generation(httpserver: HTTPServer, get_client, get_webdav_client, f2_listing_response, monkeypatch):
@@ -424,7 +421,7 @@ def test_ls_from_http_awaits_token_generation(httpserver: HTTPServer, get_client
     _handle_token_generation and the WebDAV listing are all the real thing.
     """
     collections_url = httpserver.url_for("/foo/bar")
-    monkeypatch.setattr(TokenGenerator, "get_token", lambda self: "generated-token")
+    monkeypatch.setattr(TokenGenerator, "get_token", lambda _self: "generated-token")
 
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(

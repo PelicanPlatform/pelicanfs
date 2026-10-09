@@ -16,7 +16,7 @@ limitations under the License.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -80,7 +80,7 @@ def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
     # Let's rely on serialize for iss and exp, so only set sub, aud, scope here
 
     # Serialize with issuer and lifetime to set exp and iat automatically
-    token_bytes = token.serialize(issuer=issuer, lifetime=exp_offset_sec)
+    return token.serialize(issuer=issuer, lifetime=exp_offset_sec)
 
     # If you want to return the token object, deserialize it to reflect verified claims
     # decoded_token = SciToken.deserialize(token_bytes)
@@ -88,8 +88,6 @@ def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
     # For your tests, you may want to return token_bytes (serialized token as bytes)
     # or return the deserialized token. Adjust as needed.
     # Here, return token_bytes for is_valid_token() compatibility
-
-    return token_bytes
 
 
 # ------------------------
@@ -183,7 +181,7 @@ def test_token_is_acceptable_read_scope(ec_keys, issuer):
 
     valid, expiry = token_is_valid_and_acceptable(token, object_name="namespace/file.txt", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
-    assert expiry > datetime.now(timezone.utc)
+    assert expiry > datetime.now(UTC)
 
 
 def test_token_scope_mismatch_for_write(ec_keys, issuer):
