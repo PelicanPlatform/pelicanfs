@@ -14,17 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import json
+import os
+import sys
 from unittest.mock import mock_open, patch
 
 import pytest
 
 from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod
 
+needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
+
 
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch):
-    # Fully isolate environment: clear all environment variables
-    monkeypatch.setattr("os.environ", {}, raising=False)
+    # Fully isolate environment, keeping SYSTEMROOT, which Windows needs
+    env = {"SYSTEMROOT": os.environ["SYSTEMROOT"]} if "SYSTEMROOT" in os.environ else {}
+    monkeypatch.setattr("os.environ", env, raising=False)
     yield
     # monkeypatch automatically restores os.environ after the test
 
@@ -196,6 +201,7 @@ def test_oidc_device_flow_binary_not_found(mock_which, caplog):
     assert any("pelican' binary is installed" in record.message for record in caplog.records)
 
 
+@needs_pty
 @patch("shutil.which", return_value="/usr/bin/pelican")
 @patch("pty.openpty")
 @patch("subprocess.Popen")
@@ -243,6 +249,7 @@ def test_oidc_device_flow_successful_token_acquisition(mock_select, mock_close, 
     assert "-r" in call_args
 
 
+@needs_pty
 @patch("shutil.which", return_value="/usr/bin/pelican")
 @patch("pty.openpty")
 @patch("subprocess.Popen")
@@ -277,6 +284,7 @@ def test_oidc_device_flow_with_warning_prefix(mock_select, mock_close, mock_writ
     assert token == fake_jwt
 
 
+@needs_pty
 @patch("shutil.which", return_value="/usr/bin/pelican")
 @patch("pty.openpty")
 @patch("subprocess.Popen")
@@ -315,6 +323,7 @@ def test_oidc_device_flow_write_operation(mock_select, mock_close, mock_write, m
     assert token == fake_jwt
 
 
+@needs_pty
 @patch("shutil.which", return_value="/usr/bin/pelican")
 @patch("pty.openpty")
 @patch("subprocess.Popen")
@@ -343,6 +352,7 @@ def test_oidc_device_flow_binary_fails(mock_select, mock_close, mock_write, mock
         next(iterator)
 
 
+@needs_pty
 @patch("shutil.which", return_value="/usr/bin/pelican")
 @patch("pty.openpty")
 @patch("subprocess.Popen")

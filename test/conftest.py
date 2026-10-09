@@ -59,18 +59,18 @@ def fixture_httpserver_listen_address():
     one, so parallel runs and leftover sockets can't collide; use `url_for()` rather than
     hardcoding a port.
     """
-    return ("localhost", 0)
+    return ("127.0.0.1", 0)
 
 
 @pytest.fixture(scope="session", name="httpserver_ssl_context")
 def fixture_httpserver_ssl_context(ca):
     """
-    The server side of the TLS setup: a context holding a certificate for "localhost"
+    The server side of the TLS setup: a context holding a certificate for 127.0.0.1
     signed by `ca`. pytest-httpserver picks this up automatically, which is what makes
     `httpserver` (and `httpserver2` below) serve https rather than http.
     """
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    localhost_cert = ca.issue_cert("localhost")
+    localhost_cert = ca.issue_cert("localhost", "127.0.0.1")
     localhost_cert.configure_cert(context)
     return context
 
