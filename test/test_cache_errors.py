@@ -94,7 +94,10 @@ def test_open_async_404_does_not_evict_cache(httpserver: HTTPServer, get_client)
 
     async def _read():
         fp = await pelfs.open_async("/foo/bar")
-        return await fp.read()
+        try:
+            return await fp.read()
+        finally:
+            await fp.close()
 
     with pytest.raises(FileNotFoundError):
         sync(pelfs.loop, _read)
