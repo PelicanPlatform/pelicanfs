@@ -23,7 +23,7 @@ repos:
     rev: v0.16.10
     hooks:
     -   id: ruff-check
-        args: ["--fix", "--show-fixes"]
+        args: ["--fix"]
     -   id: ruff-format
 -   repo: https://github.com/RobertCraigie/pyright-python
     rev: v1.1.414
