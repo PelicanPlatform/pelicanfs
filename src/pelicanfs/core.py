@@ -682,7 +682,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Removing the query if need be
         try:
             cached_url, cached_director_response = self._match_namespace(fparsed.path)
-            if cached_url:
+            if cached_url and cached_director_response is not None:
                 # _CacheManager keeps bare scheme://host entries, so a namespace hit
                 # comes back without the query string the caller asked for. Put it back:
                 # it can carry an authz token, and dropping it turns an authorized

@@ -14,8 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from .core import (
-    OSDFFileSystem,
-    PelicanFileSystem,
-    PelicanMap,
-)
+from .core import OSDFFileSystem, PelicanFileSystem, PelicanMap
+
+__all__ = ["OSDFFileSystem", "PelicanFileSystem", "PelicanMap"]
