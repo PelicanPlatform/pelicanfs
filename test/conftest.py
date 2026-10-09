@@ -231,7 +231,7 @@ def fixture_get_webdav_client(httpclient_ssl_context):
 def top_listing_response():
     """Listing of /foo/bar/: three objects plus folder1 and folder2."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "top_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -239,7 +239,7 @@ def top_listing_response():
 def f1_listing_response():
     """Listing of /foo/bar/folder1/: file1.txt plus subfolder1."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "f1_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -247,7 +247,7 @@ def f1_listing_response():
 def f2_listing_response():
     """Listing of /foo/bar/folder2/: file1.md and file2.md."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -255,7 +255,7 @@ def f2_listing_response():
 def sf_listing_response():
     """Listing of /foo/bar/folder1/subfolder1/: one object, file1.txt."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "sf_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -263,7 +263,7 @@ def sf_listing_response():
 def file1_listing_response():
     """The single object /foo/bar/file1.txt."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "file1_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -271,7 +271,7 @@ def file1_listing_response():
 def file2_listing_response():
     """The single object /foo/bar/file2.md."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "file2_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -279,7 +279,7 @@ def file2_listing_response():
 def file3_listing_response():
     """The single object /foo/bar/file3.txt."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "file3_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -287,7 +287,7 @@ def file3_listing_response():
 def f1_file1_listing_response():
     """The single object /foo/bar/folder1/file1.txt."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "f1_file1_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -295,7 +295,7 @@ def f1_file1_listing_response():
 def sf_file_listing_response():
     """The single object /foo/bar/folder1/subfolder1/file1.txt."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "sf_file_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -303,7 +303,7 @@ def sf_file_listing_response():
 def f2_file1_listing_response():
     """The single object /foo/bar/folder2/file1.md."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_file1_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()
 
 
@@ -311,5 +311,5 @@ def f2_file1_listing_response():
 def f2_file2_listing_response():
     """The single object /foo/bar/folder2/file2.md."""
     file_path = os.path.join(os.path.dirname(__file__), "resources", "f2_file2_xml_response.xml")
-    with open(file_path, "r") as f:
+    with open(file_path) as f:
         return f.read()

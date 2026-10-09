@@ -26,7 +26,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
@@ -50,7 +49,7 @@ DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 def get_token_from_file(token_location: str) -> str:
     logger.debug(f"Opening token file: {token_location}")
     try:
-        with open(token_location, "r") as f:
+        with open(token_location) as f:
             token_contents = f.read()
     except Exception as err:
         logger.error(f"Error reading from token file: {err}")
@@ -114,20 +113,20 @@ class TokenContentIterator:
         pty_buffer_size (int): Buffer size for PTY I/O (default: 1024).
         select_timeout (float): Timeout in seconds for select() calls (default: 0.1).
         method_index (int): Internal index of the current discovery method.
-        cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
+        cred_locations (list[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
     """
 
-    location: Optional[str] = None
-    name: Optional[str] = None
-    operation: Optional[object] = None
-    destination_url: Optional[str] = None
-    pelican_url: Optional[str] = None
+    location: str | None = None
+    name: str | None = None
+    operation: object | None = None
+    destination_url: str | None = None
+    pelican_url: str | None = None
     oidc_timeout_seconds: int = DEFAULT_OIDC_TIMEOUT_SECONDS
     pty_buffer_size: int = DEFAULT_PTY_BUFFER_SIZE
     select_timeout: float = DEFAULT_SELECT_TIMEOUT
     method_index: int = 0
-    cred_locations: List[str] = field(default_factory=list)
+    cred_locations: list[str] = field(default_factory=list)
     fallback_index: int = 0
 
     def _pelican_binary_exists(self) -> bool:
@@ -168,7 +167,7 @@ class TokenContentIterator:
 
         return flags
 
-    def _get_token_from_pelican_binary(self) -> Optional[str]:
+    def _get_token_from_pelican_binary(self) -> str | None:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
@@ -522,7 +521,7 @@ class TokenContentIterator:
         logger.debug("No more token sources to try")
         raise StopIteration
 
-    def discoverHTCondorTokenLocations(self, tokenName: str) -> List[str]:
+    def discoverHTCondorTokenLocations(self, tokenName: str) -> list[str]:
         """
         Discover possible HTCondor token file locations based on a logical token name.
 
@@ -534,7 +533,7 @@ class TokenContentIterator:
             tokenName (str): Logical name of the token.
 
         Returns:
-            List[str]: List of possible token file paths to try.
+            list[str]: List of possible token file paths to try.
         """
         tokenLocations = []
 

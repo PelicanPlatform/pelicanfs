@@ -58,13 +58,12 @@ def test_get_token_from_file_io_error(monkeypatch):
         raise OSError("Permission denied")
 
     monkeypatch.setattr("builtins.open", raise_io)
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match="Permission denied"):
         get_token_from_file("/fake/path")
 
 
 def test_get_token_from_file_empty_file(monkeypatch):
     # Simulate an empty file by returning an empty string
     monkeypatch.setattr("builtins.open", mock_open(read_data=""))
-    with pytest.raises(ValueError) as e:
+    with pytest.raises(ValueError, match="Token file /fake/path is empty"):
         get_token_from_file("/fake/path")
-    assert "Token file /fake/path is empty" in str(e.value)
