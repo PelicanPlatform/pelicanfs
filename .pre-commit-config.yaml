@@ -19,24 +19,12 @@ repos:
     -   id: trailing-whitespace
     -   id: end-of-file-fixer
     -   id: check-yaml
--   repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+-   repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
     hooks:
-    -   id: isort
-        args: ["--profile=black"]
--   repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
-    hooks:
-    -   id: flake8
-        args:
-          - --max-line-length=200
-          - --ignore=E203,W503
--   repo: https://github.com/psf/black
-    rev: 22.3.0
-    hooks:
-    -   id: black
-        language_version: python3.12
-        args: ["--line-length=200"]
+    -   id: ruff-check
+        args: ["--fix", "--show-fixes"]
+    -   id: ruff-format
 -   repo: https://github.com/RobertCraigie/pyright-python
     rev: v1.1.414
     hooks:

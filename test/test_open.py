@@ -13,6 +13,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import aiohttp
 import pytest
 from pytest_httpserver import HTTPServer
@@ -77,7 +78,7 @@ def test_open_fallback(httpserver: HTTPServer, httpserver2: HTTPServer, get_clie
         "",
         status=307,
         headers={
-            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1, ' f'<{foo_bar_url2}>; rel="duplicate"; pri=2; depth=1',
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1, <{foo_bar_url2}>; rel="duplicate"; pri=2; depth=1',
             "Location": foo_bar_url,
             "X-Pelican-Namespace": "namespace=/foo",
         },
