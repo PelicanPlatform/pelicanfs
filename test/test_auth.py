@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from pytest_httpserver import HTTPServer
 
@@ -27,7 +27,7 @@ def test_authorization_headers(httpserver: HTTPServer, get_client, monkeypatch):
 
     # Mock token validation to accept the test token
     def mock_token_validation(*args, **kwargs):
-        return True, datetime.now(timezone.utc) + timedelta(hours=1)
+        return True, datetime.now(UTC) + timedelta(hours=1)
 
     monkeypatch.setattr("pelicanfs.token_generator.token_is_valid_and_acceptable", mock_token_validation)
 

@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
 from urllib.parse import urlparse
 
 from .exceptions import BadDirectorResponse
@@ -34,7 +33,7 @@ class XPelNs:
     """X-Pelican-Namespace header data"""
 
     namespace: str
-    collections_url: Optional[str] = None
+    collections_url: str | None = None
     require_token: bool = False
 
 
@@ -42,7 +41,7 @@ class XPelNs:
 class XPelTokGen:
     """X-Pelican-Token-Generation header data"""
 
-    issuers: List[str] = field(default_factory=list)
+    issuers: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         # Validate and filter issuers to ensure they are valid URLs
@@ -62,11 +61,11 @@ class XPelTokGen:
 class DirectorResponse:
     """Represents a director response with all parsed headers and data"""
 
-    object_servers: List[str]  # List of server URLs from Link header
-    location: Optional[str]  # URL from Location header
-    x_pel_auth_hdr: Optional[XPelAuth] = None
-    x_pel_ns_hdr: Optional[XPelNs] = None
-    x_pel_tok_gen_hdr: Optional[XPelTokGen] = None
+    object_servers: list[str]  # List of server URLs from Link header
+    location: str | None  # URL from Location header
+    x_pel_auth_hdr: XPelAuth | None = None
+    x_pel_ns_hdr: XPelNs | None = None
+    x_pel_tok_gen_hdr: XPelTokGen | None = None
 
 
 def parse_director_response(headers: dict) -> DirectorResponse:
@@ -162,7 +161,7 @@ def parse_director_response(headers: dict) -> DirectorResponse:
     return DirectorResponse(object_servers=object_servers, location=location, x_pel_auth_hdr=x_pel_auth_hdr, x_pel_ns_hdr=x_pel_ns_hdr, x_pel_tok_gen_hdr=x_pel_tok_gen_hdr)
 
 
-def get_collections_url(headers: dict[str, str]) -> Optional[str]:
+def get_collections_url(headers: dict[str, str]) -> str | None:
     """
     Get the collections URL from the director response headers
     """

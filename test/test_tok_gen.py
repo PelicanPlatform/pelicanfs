@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -221,7 +221,7 @@ def test_token_is_valid_and_acceptable_with_real_token(dummy_dir_resp, monkeypat
     valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, TokenOperation.TokenRead)
 
     assert valid
-    assert expiry > datetime.now(timezone.utc)
+    assert expiry > datetime.now(UTC)
 
 
 def test_token_is_valid_and_acceptable_expired_token(dummy_dir_resp, monkeypatch):
@@ -237,7 +237,7 @@ def test_token_is_valid_and_acceptable_expired_token(dummy_dir_resp, monkeypatch
 
     valid, expiry = token_is_valid_and_acceptable(web_token, "/namespace/prefix/file.txt", dummy_dir_resp, TokenOperation.TokenRead)
     assert not valid
-    assert expiry <= datetime.now(timezone.utc)
+    assert expiry <= datetime.now(UTC)
 
 
 def test_token_generator_get_token_returns_valid_token(token_generator_factory, dummy_dir_resp, monkeypatch):
@@ -273,7 +273,7 @@ def test_token_generator_get_token_fallback(token_generator_factory, dummy_dir_r
     tg.DirResp = dummy_dir_resp
     tg.Operation = TokenOperation.TokenRead
 
-    expired = datetime.now(timezone.utc) - timedelta(seconds=10)
+    expired = datetime.now(UTC) - timedelta(seconds=10)
     tg.token = TokenInfo("expired", expired)
 
     web_token, public_key = create_es256_scitoken_with_public_key(exp_offset_seconds=3600, scopes=["storage.read"], issuer="https://trusted-issuer.example.com")

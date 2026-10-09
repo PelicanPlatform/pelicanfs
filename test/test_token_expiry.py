@@ -15,7 +15,7 @@ limitations under the License.
 """
 
 import itertools
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fsspec.asyn import sync
@@ -79,7 +79,7 @@ def test_expired_generated_token_is_regenerated(pelfs, token_required_dir_resp, 
     rather than hand back the remembered token, and the new token must replace the old
     one both on the instance and in the HTTP filesystem's headers.
     """
-    install_generator_stub(monkeypatch, datetime.now(timezone.utc) - timedelta(seconds=1))
+    install_generator_stub(monkeypatch, datetime.now(UTC) - timedelta(seconds=1))
 
     assert handle(pelfs, token_required_dir_resp) == "token-1"
     assert pelfs.token == "Bearer token-1"
@@ -94,14 +94,14 @@ def test_token_about_to_expire_is_regenerated(pelfs, token_required_dir_resp, mo
     A token still inside the refresh margin would be expired by the time a request
     carrying it reached the server, so it is retired early.
     """
-    install_generator_stub(monkeypatch, datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN / 2)
+    install_generator_stub(monkeypatch, datetime.now(UTC) + TOKEN_REFRESH_MARGIN / 2)
 
     assert handle(pelfs, token_required_dir_resp) == "token-1"
     assert handle(pelfs, token_required_dir_resp) == "token-2", "a token about to expire was reused instead of being regenerated"
 
 
 def test_unexpired_generated_token_is_reused(pelfs, token_required_dir_resp, monkeypatch):
-    install_generator_stub(monkeypatch, datetime.now(timezone.utc) + timedelta(hours=1))
+    install_generator_stub(monkeypatch, datetime.now(UTC) + timedelta(hours=1))
 
     assert handle(pelfs, token_required_dir_resp) == "token-1"
     assert handle(pelfs, token_required_dir_resp) == "token-1", "a token that has not expired was generated again"

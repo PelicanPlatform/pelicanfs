@@ -144,7 +144,7 @@ class TestObjectOperations:
             assert os.path.exists(local_file)
 
             # Verify content was downloaded
-            with open(local_file, "r") as f:
+            with open(local_file) as f:
                 content = f.read()
                 assert len(content) > 0
                 print(f"Downloaded file content: {content[:100]}")
@@ -169,7 +169,7 @@ class TestObjectOperations:
             assert os.path.exists(local_file2)
 
             # Verify content was downloaded
-            with open(local_file2, "r") as f:
+            with open(local_file2) as f:
                 content = f.read()
                 assert len(content) > 0
 
