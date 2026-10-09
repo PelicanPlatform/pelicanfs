@@ -1,10 +1,5 @@
-# -- project metadata
-
 [build-system]
-requires = [
-    "setuptools >=61.0",
-    "wheel"
-]
+requires = ["setuptools >=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -28,7 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
 ]
 
-requires-python = ">=3.11, <4"
+requires-python = ">=3.11"
 dependencies = [
     "aiohttp >=3.9.4,!=3.14.4,<4",
     "aiowebdav2",
@@ -47,14 +42,15 @@ Source = "https://github.com/PelicanPlatform/pelicanfs"
 Pelican-Source = "https://github.com/PelicanPlatform/pelican"
 Bug-Reports = "https://github.com/PelicanPlatform/pelicanfs/issues"
 
+
 [dependency-groups]
 testing = [
     "pytest",
     "pytest-httpserver",
     "trustme",
 ]
+dev = { include-group = "testing" }
 
-# -- tools
 
 [tool.pytest.ini_options]
 addopts = [
