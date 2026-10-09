@@ -26,7 +26,6 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List, Optional
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
@@ -50,7 +49,7 @@ DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 def get_token_from_file(token_location: str) -> str:
     logger.debug(f"Opening token file: {token_location}")
     try:
-        with open(token_location, "r") as f:
+        with open(token_location) as f:
             token_contents = f.read()
     except Exception as err:
         logger.error(f"Error reading from token file: {err}")
@@ -61,7 +60,8 @@ def get_token_from_file(token_location: str) -> str:
     # Check if the token is empty or whitespace only
     if not token_str:
         logger.warning(f"Token file {token_location} is empty or contains only whitespace")
-        raise ValueError(f"Token file {token_location} is empty")
+        msg = f"Token file {token_location} is empty"
+        raise ValueError(msg)
 
     if token_str.startswith("{"):
         try:
@@ -69,9 +69,8 @@ def get_token_from_file(token_location: str) -> str:
             access_key = token_parsed.get("access_token")
             if access_key:
                 return access_key
-            else:
-                logger.debug("JSON token does not contain 'access_token' key, returning full token string")
-                return token_str
+            logger.debug("JSON token does not contain 'access_token' key, returning full token string")
+            return token_str
         except json.JSONDecodeError as err:
             logger.debug(f"Unable to unmarshal file {token_location} as JSON (assuming it is a token instead): {err}")
             return token_str
@@ -114,20 +113,20 @@ class TokenContentIterator:
         pty_buffer_size (int): Buffer size for PTY I/O (default: 1024).
         select_timeout (float): Timeout in seconds for select() calls (default: 0.1).
         method_index (int): Internal index of the current discovery method.
-        cred_locations (List[str]): Token file paths discovered via HTCondor fallback.
+        cred_locations (list[str]): Token file paths discovered via HTCondor fallback.
         index (int): Internal index of the current fallback cred_location
     """
 
-    location: Optional[str] = None
-    name: Optional[str] = None
-    operation: Optional[object] = None
-    destination_url: Optional[str] = None
-    pelican_url: Optional[str] = None
+    location: str | None = None
+    name: str | None = None
+    operation: object | None = None
+    destination_url: str | None = None
+    pelican_url: str | None = None
     oidc_timeout_seconds: int = DEFAULT_OIDC_TIMEOUT_SECONDS
     pty_buffer_size: int = DEFAULT_PTY_BUFFER_SIZE
     select_timeout: float = DEFAULT_SELECT_TIMEOUT
     method_index: int = 0
-    cred_locations: List[str] = field(default_factory=list)
+    cred_locations: list[str] = field(default_factory=list)
     fallback_index: int = 0
 
     def _pelican_binary_exists(self) -> bool:
@@ -168,7 +167,7 @@ class TokenContentIterator:
 
         return flags
 
-    def _get_token_from_pelican_binary(self) -> Optional[str]:
+    def _get_token_from_pelican_binary(self) -> str | None:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
@@ -185,7 +184,7 @@ class TokenContentIterator:
             return None
 
         flags = self._get_pelican_flag()
-        cmd = ["pelican"] + ["token", "fetch", self.pelican_url] + flags
+        cmd = ["pelican", "token", "fetch", self.pelican_url, *flags]
 
         logger.info(f"Invoking OIDC device flow via pelican binary: {' '.join(cmd)}")
 
@@ -224,7 +223,6 @@ class TokenContentIterator:
 
                 def write_to_pty(data):
                     """Not used on Windows with inherited stdin"""
-                    pass
 
                 def is_alive():
                     """Check if process is still running"""
@@ -357,14 +355,13 @@ class TokenContentIterator:
                     # Handle stdin forwarding (Unix only - Windows uses simpler approach)
                     # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
                     # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
-                    if not _IS_WINDOWS:
-                        if stdin_data_to_send:
-                            # Redirected stdin - send buffered data once
-                            try:
-                                write_to_pty(stdin_data_to_send.encode("utf-8"))
-                                stdin_data_to_send = None  # Only send once
-                            except OSError as e:
-                                logger.debug(f"Error writing redirected stdin to PTY: {e}")
+                    if not _IS_WINDOWS and stdin_data_to_send:
+                        # Redirected stdin - send buffered data once
+                        try:
+                            write_to_pty(stdin_data_to_send.encode("utf-8"))
+                            stdin_data_to_send = None  # Only send once
+                        except OSError as e:
+                            logger.debug(f"Error writing redirected stdin to PTY: {e}")
             finally:
                 # Cleanup platform-specific resources
                 if not _IS_WINDOWS:
@@ -388,10 +385,9 @@ class TokenContentIterator:
                 token = matches[-1]
                 logger.info("Successfully acquired token via OIDC device flow")
                 return token
-            else:
-                logger.warning("Could not extract JWT token from pelican binary output")
-                logger.debug(f"Output was: {full_output}")
-                return None
+            logger.warning("Could not extract JWT token from pelican binary output")
+            logger.debug(f"Output was: {full_output}")
+            return None
 
         except Exception as err:
             logger.debug(f"Error invoking pelican binary: {err}")
@@ -443,8 +439,8 @@ class TokenContentIterator:
                         try:
                             if os.path.exists(self.location) and os.access(self.location, os.R_OK):
                                 return get_token_from_file(self.location)
-                            else:
-                                raise OSError(f"File {self.location} is not readable")
+                            msg = f"File {self.location} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
                             logger.warning(f"Token file at {self.location} is not readable: {err}")
 
@@ -461,8 +457,8 @@ class TokenContentIterator:
                         try:
                             if os.path.exists(token_file) and os.access(token_file, os.R_OK):
                                 return get_token_from_file(token_file)
-                            else:
-                                raise OSError(f"File {token_file} is not readable")
+                            msg = f"File {token_file} is not readable"
+                            raise OSError(msg)
                         except Exception as err:
                             logger.warning(f"Could not read BEARER_TOKEN_FILE: {err}")
 
@@ -522,7 +518,7 @@ class TokenContentIterator:
         logger.debug("No more token sources to try")
         raise StopIteration
 
-    def discoverHTCondorTokenLocations(self, tokenName: str) -> List[str]:
+    def discoverHTCondorTokenLocations(self, tokenName: str) -> list[str]:
         """
         Discover possible HTCondor token file locations based on a logical token name.
 
@@ -534,7 +530,7 @@ class TokenContentIterator:
             tokenName (str): Logical name of the token.
 
         Returns:
-            List[str]: List of possible token file paths to try.
+            list[str]: List of possible token file paths to try.
         """
         tokenLocations = []
 

@@ -25,9 +25,9 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional, Tuple, overload
+from typing import overload
 
 import aiohttp
 import cachetools
@@ -67,7 +67,7 @@ class NamespaceInfo:
     """Information about a namespace including cache manager and director response"""
 
     cache_manager: "_CacheManager"
-    director_response: Optional[DirectorResponse] = None
+    director_response: DirectorResponse | None = None
 
 
 class _AccessResp:
@@ -79,7 +79,7 @@ class _AccessResp:
     an error string if it exists
     """
 
-    def __init__(self, path: str, success: bool, error: Optional[str] = None):
+    def __init__(self, path: str, success: bool, error: str | None = None):
         self.access_path = path
         self.success = success
         self.error = error
@@ -99,7 +99,7 @@ class _AccessStats:
         full cache url plus the object path, a boolean which is true if the access was
         successful and false otherwise, and an optional error string if the access returned an error
         """
-        self.data: Dict[str, List[_AccessResp]] = {}
+        self.data: dict[str, list[_AccessResp]] = {}
 
     def add_response(self, namespace_path: str, response: _AccessResp) -> None:
         """
@@ -114,7 +114,7 @@ class _AccessStats:
 
         self.data[namespace_path].append(response)
 
-    def get_responses(self, namespace_path: str) -> Tuple[List[_AccessResp], bool]:
+    def get_responses(self, namespace_path: str) -> tuple[list[_AccessResp], bool]:
         """
         Get the last three responses to requests for this object
         """
@@ -130,7 +130,7 @@ class _AccessStats:
             print(f"{key}: {' '.join(map(str, value))}")
 
 
-class _CacheManager(object):
+class _CacheManager:
     """
     Manage a list of caches.
 
@@ -173,7 +173,7 @@ class _CacheManager(object):
         """
         with self._lock:
             if not self._cache_list:
-                raise NoAvailableSource()
+                raise NoAvailableSource
 
             return urllib.parse.urljoin(self._cache_list[0], obj_name)
 
@@ -189,7 +189,7 @@ class _CacheManager(object):
                 self._cache_list.remove(bad_cache_url)
 
 
-def _recycle_responses(responses: List[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
+def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
     """
     Return a trace config that keeps a session from holding on to its responses.
 
@@ -232,7 +232,7 @@ def _recycle_responses(responses: List[aiohttp.ClientResponse]) -> aiohttp.Trace
     return trace_config
 
 
-def _release_responses(responses: List[aiohttp.ClientResponse]) -> None:
+def _release_responses(responses: list[aiohttp.ClientResponse]) -> None:
     """
     Release the recorded responses, freeing the connections they hold, and forget them.
 
@@ -263,7 +263,7 @@ async def get_webdav_client(options):
     base_url = options["hostname"]
     token = options["token"]
 
-    responses: List[aiohttp.ClientResponse] = []
+    responses: list[aiohttp.ClientResponse] = []
     session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses)])
     clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
     client = Client(url=base_url, username="", password="", options=clientopts)
@@ -300,7 +300,8 @@ def _path_arg_splitter(func):
         try:
             return kwargs.pop(name), ()
         except KeyError:
-            raise TypeError(f"{func.__name__}() missing required argument: '{name}'") from None
+            msg = f"{func.__name__}() missing required argument: '{name}'"
+            raise TypeError(msg) from None
 
     return split
 
@@ -367,7 +368,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Expiry of a token this filesystem generated itself. None means no expiry is
         # known, which covers both "no token" and a token the caller supplied in headers;
         # a caller-supplied token is never re-checked here.
-        self._token_expiry: Optional[datetime] = None
+        self._token_expiry: datetime | None = None
 
         request_options = copy(kwargs)
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
@@ -407,7 +408,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @overload
     @classmethod
-    def _strip_protocol(cls, path: List[str]) -> List[str]: ...
+    def _strip_protocol(cls, path: list[str]) -> list[str]: ...
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -468,8 +469,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         if self.token:
             return self.token.removeprefix("Bearer ")
-        else:
-            return None
+        return None
 
     def _webdav_options(self, url: str) -> dict:
         """
@@ -513,11 +513,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if func_name in read_operations:
             return TokenOperation.TokenRead
-        elif func_name in write_operations:
+        if func_name in write_operations:
             return TokenOperation.TokenWrite
-        else:
-            # Default to read for unknown operations
-            return TokenOperation.TokenRead
+        # Default to read for unknown operations
+        return TokenOperation.TokenRead
 
     def _set_http_filesystem_token(self, token: str, session=None) -> None:
         """
@@ -543,7 +542,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if session:
             session.headers["Authorization"] = f"Bearer {token}"
 
-    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> Optional[str]:
+    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
         Handle token generation if required by the director response.
 
@@ -564,7 +563,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # A token we generated earlier is only good until it expires; once it has, or is
         # about to, forget it so a fresh one is generated below instead of being sent
         # until the server rejects it.
-        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN:
+        if self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN:
             logger.debug(f"Remembered token expires at {self._token_expiry}, regenerating for {url}")
             self.token = None
             self._token_expiry = None
@@ -638,7 +637,7 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
                 logger.error(f"Failed to get metadata from {discovery_url.geturl()}")
-                raise InvalidMetadata()
+                raise InvalidMetadata
             return await resp.json(content_type="")
 
     async def get_director_headers(self, fileloc, origin=False) -> dict[str, str]:
@@ -655,22 +654,19 @@ class PelicanFileSystem(AsyncFileSystem):
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
                 logger.error("No director endpoint found in metadata")
-                raise InvalidMetadata()
+                raise InvalidMetadata
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
             self.director_url = director_url
 
         logger.debug(f"Getting headers from director: {self.director_url}")
-        if origin:
-            url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc
-        else:
-            url = urllib.parse.urljoin(self.director_url, fileloc)
+        url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc if origin else urllib.parse.urljoin(self.director_url, fileloc)
         session = await self.http_file_system.set_session()
         async with session.get(url, allow_redirects=False) as resp:
             return resp.headers
 
-    async def get_working_cache(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_working_cache(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (cache url, director_response) for the given namespace location
         """
@@ -760,20 +756,16 @@ class PelicanFileSystem(AsyncFileSystem):
                     if resp.status >= 200 and resp.status < 400:
                         logger.debug("Cache found")
                         break
-                    elif resp.status == 404:
+                    if resp.status == 404:
                         logger.debug("Cache is working (returned 404 for non-existent object)")
                         break
-            except (
-                aiohttp.client_exceptions.ClientConnectorError,
-                asyncio.TimeoutError,
-                asyncio.exceptions.TimeoutError,
-            ):
+            except (TimeoutError, aiohttp.client_exceptions.ClientConnectorError, asyncio.exceptions.TimeoutError):
                 pass
             cache_list = cache_list[1:]
 
         if not cache_list:
             logger.error("No working cache found")
-            raise NoAvailableSource()
+            raise NoAvailableSource
 
         working_url = cache_list[0]
         with self._namespace_lock:
@@ -781,14 +773,14 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return working_url, director_response
 
-    async def get_origin_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_origin_url(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (origin url, director_response) for the given namespace location
         """
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
-            raise NoAvailableSource()
+            raise NoAvailableSource
 
         # Parse the headers to get the full director response
         director_response = parse_director_response(headers)
@@ -801,13 +793,13 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                raise InvalidMetadata()
+                raise InvalidMetadata
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
             self.director_url = director_url
 
-    async def get_dirlist_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_dirlist_url(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (dirlist url, director_response) for the given namespace location
         """
@@ -831,7 +823,7 @@ class PelicanFileSystem(AsyncFileSystem):
             session = await self.http_file_system.set_session()
             async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
                 if "Link" not in resp.headers:
-                    raise BadDirectorResponse()
+                    raise BadDirectorResponse
                 collections_url = get_collections_url(resp.headers)
 
                 # Parse the headers to get the full director response
@@ -848,14 +840,14 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if not collections_url:
             logger.error(f"No collections endpoint found for {fileloc}")
-            raise NoCollectionsUrl()
+            raise NoCollectionsUrl
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
         director_response.location = dirlist_url
 
         return dirlist_url, director_response
 
-    def _get_prefix_info(self, path: str) -> Optional[NamespaceInfo]:
+    def _get_prefix_info(self, path: str) -> NamespaceInfo | None:
         """
         Get information about the namespace for a given path.
         Returns None if no namespace information is available.
@@ -866,12 +858,11 @@ class PelicanFileSystem(AsyncFileSystem):
                 if path.startswith(prefix):
                     cache_manager = self._namespace_cache.get(prefix)
                     if cache_manager:
-                        namespace_info = NamespaceInfo(cache_manager, cache_manager.director_response)
-                        return namespace_info
+                        return NamespaceInfo(cache_manager, cache_manager.director_response)
                     break
         return None
 
-    def _match_namespace(self, fileloc: str) -> Tuple[Optional[str], Optional[DirectorResponse]]:
+    def _match_namespace(self, fileloc: str) -> tuple[str | None, DirectorResponse | None]:
         """
         Search for a matching namespace and return both the cache URL and requires_token status
         """
@@ -986,23 +977,18 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Now that we have a client, we can proceed with the listing
         remote_dir = parts.path
-        if detail:
-            list_files = client.list_with_infos
-        else:
-            list_files = client.list_files
+        list_files = client.list_with_infos if detail else client.list_files
         try:
             items = await list_files(remote_dir)
         except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
             if isinstance(e, ResponseErrorCodeError) and e.code != 500:
                 raise
 
-            if remote_dir.endswith("/"):
-                remote_dir = remote_dir[:-1]
+            remote_dir = remote_dir.removesuffix("/")
             exists = await client.check(remote_dir)
             if exists:
                 return set()
-            else:
-                raise FileNotFoundError
+            raise FileNotFoundError from e
 
         if detail:
 
@@ -1011,13 +997,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 isdir = item.get("isdir") == "True"
                 if isdir and not full_path.endswith("/"):
                     full_path += "/"
-                if (modtimestr := item.get("modified")) == "None":
-                    modtime = None
-                else:
-                    modtime = datetime.strptime(
-                        modtimestr,
-                        "%a, %d %b %Y %H:%M:%S %Z",
-                    )
+                modtimestr = item.get("modified")
+                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
                 return {
                     "name": full_path,
                     "size": int(item["size"]),
@@ -1088,7 +1069,8 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         logger.debug("Starting glob...")
         if maxdepth is not None and maxdepth < 1:
-            raise ValueError("maxdepth must be at least 1")
+            msg = "maxdepth must be at least 1"
+            raise ValueError(msg)
 
         ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
         path = self._strip_protocol(path)
@@ -1104,14 +1086,11 @@ class PelicanFileSystem(AsyncFileSystem):
             if await self._exists(path, **kwargs):
                 if not detail:
                     return [path]
-                else:
-                    return {path: await self._info(path, **kwargs)}
-            else:
-                if not detail:
-                    return []  # glob of non-existent returns empty
-                else:
-                    return {}
-        elif "/" in path[:min_idx]:
+                return {path: await self._info(path, **kwargs)}
+            if not detail:
+                return []  # glob of non-existent returns empty
+            return {}
+        if "/" in path[:min_idx]:
             min_idx = path[:min_idx].rindex("/")
             root = path[: min_idx + 1]
             depth = path[min_idx + 1 :].count("/") + 1
@@ -1162,7 +1141,7 @@ class PelicanFileSystem(AsyncFileSystem):
     # Not using a decorator because it requires a yield
     async def _walk(self, path, maxdepth=None, on_error="omit", **kwargs):
         path = self._check_fspath(path)
-        list_url, director_response = await self.get_dirlist_url(path)
+        list_url, _director_response = await self.get_dirlist_url(path)
         async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             async for url, dirs, files in self.http_file_system._walk(
                 list_url,
@@ -1219,7 +1198,7 @@ class PelicanFileSystem(AsyncFileSystem):
             self.discovery_url = discovery_str
         elif self.discovery_url != discovery_str:
             logger.error(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
-            raise InvalidMetadata()
+            raise InvalidMetadata
 
     def _check_fspath(self, path: str) -> str:
         """
@@ -1245,7 +1224,8 @@ class PelicanFileSystem(AsyncFileSystem):
             self._validate_discovery_url(discovery_url)
             path = parsed.path
         elif parsed.scheme != "":
-            raise InvalidDestinationURL(f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported")
+            msg = f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported"
+            raise InvalidDestinationURL(msg)
         elif not path.startswith("/"):
             # When path has no scheme and is not absolute (e.g., "host.example.com/path"),
             # treat it as a pelican URL where the first component is the hostname
@@ -1258,9 +1238,9 @@ class PelicanFileSystem(AsyncFileSystem):
         else:
             # Path has no scheme, so the filesystem object must have a discovery URL
             if not self.discovery_url:
-                raise InvalidMetadata("No discovery URL set")
-            else:
-                discovery_url = self.discovery_url
+                msg = "No discovery URL set"
+                raise InvalidMetadata(msg)
+            discovery_url = self.discovery_url
 
         logger.debug(f"Compatible path: {path}")
         return path
@@ -1292,7 +1272,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
         if any(char in mode for char in ["w", "a", "x", "+"]):
-            raise NotImplementedError("Write mode is not supported for open(). Use put() or pipe() to write files.")
+            msg = "Write mode is not supported for open(). Use put() or pipe() to write files."
+            raise NotImplementedError(msg)
 
         if self.direct_reads:
             data_url, director_response = sync(self.loop, self.get_origin_url, path)  # type: ignore[misc]
@@ -1316,7 +1297,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
         if any(char in mode for char in ["w", "a", "x", "+"]):
-            raise NotImplementedError("Write mode is not supported for open_async(). Use put() or pipe() to write files.")
+            msg = "Write mode is not supported for open_async(). Use put() or pipe() to write files."
+            raise NotImplementedError(msg)
 
         if self.direct_reads:
             data_url, director_response = await self.get_origin_url(path)
@@ -1393,9 +1375,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
             os.makedirs(lpath, exist_ok=True)
-            return
+            return None
         if os.path.isdir(lpath) and await self._is_collection(rpath):
-            return
+            return None
         return await self._get_file_from_cache(rpath, lpath, **kwargs)
 
     @_cache_dec
@@ -1409,7 +1391,7 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 result = await client.info(parts.path)
             except RemoteResourceNotFoundError:
-                raise FileNotFoundError(path)
+                raise FileNotFoundError(path) from None
             info = {
                 "name": path,
                 "type": "file",
@@ -1447,7 +1429,7 @@ class PelicanFileSystem(AsyncFileSystem):
             for probe in probes:
                 if isinstance(probe, BaseException):
                     raise probe
-            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes) if is_collection}
+            collection_roots = {root.rstrip("/") for root, is_collection in zip(literals, probes, strict=True) if is_collection}
             for pattern in (root for root in roots if fshttp.has_magic(root)):
                 matches = await self._glob(pattern, detail=True, maxdepth=kwargs.get("maxdepth"))
                 collection_roots |= {p.rstrip("/") for p, info in matches.items() if info.get("type") == "directory"}
