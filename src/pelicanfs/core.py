@@ -25,9 +25,9 @@ import urllib.parse
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Dict, List, Optional, Tuple, overload
+from typing import overload
 
 import aiohttp
 import cachetools
@@ -67,7 +67,7 @@ class NamespaceInfo:
     """Information about a namespace including cache manager and director response"""
 
     cache_manager: "_CacheManager"
-    director_response: Optional[DirectorResponse] = None
+    director_response: DirectorResponse | None = None
 
 
 class _AccessResp:
@@ -79,7 +79,7 @@ class _AccessResp:
     an error string if it exists
     """
 
-    def __init__(self, path: str, success: bool, error: Optional[str] = None):
+    def __init__(self, path: str, success: bool, error: str | None = None):
         self.access_path = path
         self.success = success
         self.error = error
@@ -99,7 +99,7 @@ class _AccessStats:
         full cache url plus the object path, a boolean which is true if the access was
         successful and false otherwise, and an optional error string if the access returned an error
         """
-        self.data: Dict[str, List[_AccessResp]] = {}
+        self.data: dict[str, list[_AccessResp]] = {}
 
     def add_response(self, namespace_path: str, response: _AccessResp) -> None:
         """
@@ -114,7 +114,7 @@ class _AccessStats:
 
         self.data[namespace_path].append(response)
 
-    def get_responses(self, namespace_path: str) -> Tuple[List[_AccessResp], bool]:
+    def get_responses(self, namespace_path: str) -> tuple[list[_AccessResp], bool]:
         """
         Get the last three responses to requests for this object
         """
@@ -130,7 +130,7 @@ class _AccessStats:
             print(f"{key}: {' '.join(map(str, value))}")
 
 
-class _CacheManager(object):
+class _CacheManager:
     """
     Manage a list of caches.
 
@@ -189,7 +189,7 @@ class _CacheManager(object):
                 self._cache_list.remove(bad_cache_url)
 
 
-def _recycle_responses(responses: List[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
+def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
     """
     Return a trace config that keeps a session from holding on to its responses.
 
@@ -232,7 +232,7 @@ def _recycle_responses(responses: List[aiohttp.ClientResponse]) -> aiohttp.Trace
     return trace_config
 
 
-def _release_responses(responses: List[aiohttp.ClientResponse]) -> None:
+def _release_responses(responses: list[aiohttp.ClientResponse]) -> None:
     """
     Release the recorded responses, freeing the connections they hold, and forget them.
 
@@ -263,7 +263,7 @@ async def get_webdav_client(options):
     base_url = options["hostname"]
     token = options["token"]
 
-    responses: List[aiohttp.ClientResponse] = []
+    responses: list[aiohttp.ClientResponse] = []
     session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses)])
     clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
     client = Client(url=base_url, username="", password="", options=clientopts)
@@ -367,7 +367,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Expiry of a token this filesystem generated itself. None means no expiry is
         # known, which covers both "no token" and a token the caller supplied in headers;
         # a caller-supplied token is never re-checked here.
-        self._token_expiry: Optional[datetime] = None
+        self._token_expiry: datetime | None = None
 
         request_options = copy(kwargs)
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
@@ -407,7 +407,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @overload
     @classmethod
-    def _strip_protocol(cls, path: List[str]) -> List[str]: ...
+    def _strip_protocol(cls, path: list[str]) -> list[str]: ...
 
     @classmethod
     def _strip_protocol(cls, path):
@@ -543,7 +543,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if session:
             session.headers["Authorization"] = f"Bearer {token}"
 
-    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> Optional[str]:
+    async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
         Handle token generation if required by the director response.
 
@@ -564,7 +564,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # A token we generated earlier is only good until it expires; once it has, or is
         # about to, forget it so a fresh one is generated below instead of being sent
         # until the server rejects it.
-        if self._token_expiry is not None and self._token_expiry <= datetime.now(timezone.utc) + TOKEN_REFRESH_MARGIN:
+        if self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN:
             logger.debug(f"Remembered token expires at {self._token_expiry}, regenerating for {url}")
             self.token = None
             self._token_expiry = None
@@ -670,7 +670,7 @@ class PelicanFileSystem(AsyncFileSystem):
         async with session.get(url, allow_redirects=False) as resp:
             return resp.headers
 
-    async def get_working_cache(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_working_cache(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (cache url, director_response) for the given namespace location
         """
@@ -763,11 +763,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     elif resp.status == 404:
                         logger.debug("Cache is working (returned 404 for non-existent object)")
                         break
-            except (
-                aiohttp.client_exceptions.ClientConnectorError,
-                asyncio.TimeoutError,
-                asyncio.exceptions.TimeoutError,
-            ):
+            except (TimeoutError, aiohttp.client_exceptions.ClientConnectorError, asyncio.exceptions.TimeoutError):
                 pass
             cache_list = cache_list[1:]
 
@@ -781,7 +777,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return working_url, director_response
 
-    async def get_origin_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_origin_url(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (origin url, director_response) for the given namespace location
         """
@@ -807,7 +803,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 director_url = director_url + "/"
             self.director_url = director_url
 
-    async def get_dirlist_url(self, fileloc: str) -> Tuple[str, DirectorResponse]:
+    async def get_dirlist_url(self, fileloc: str) -> tuple[str, DirectorResponse]:
         """
         Returns a tuple of (dirlist url, director_response) for the given namespace location
         """
@@ -855,7 +851,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return dirlist_url, director_response
 
-    def _get_prefix_info(self, path: str) -> Optional[NamespaceInfo]:
+    def _get_prefix_info(self, path: str) -> NamespaceInfo | None:
         """
         Get information about the namespace for a given path.
         Returns None if no namespace information is available.
@@ -871,7 +867,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     break
         return None
 
-    def _match_namespace(self, fileloc: str) -> Tuple[Optional[str], Optional[DirectorResponse]]:
+    def _match_namespace(self, fileloc: str) -> tuple[str | None, DirectorResponse | None]:
         """
         Search for a matching namespace and return both the cache URL and requires_token status
         """

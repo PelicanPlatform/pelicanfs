@@ -16,7 +16,7 @@ limitations under the License.
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -183,7 +183,7 @@ def test_token_is_acceptable_read_scope(ec_keys, issuer):
 
     valid, expiry = token_is_valid_and_acceptable(token, object_name="namespace/file.txt", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
-    assert expiry > datetime.now(timezone.utc)
+    assert expiry > datetime.now(UTC)
 
 
 def test_token_scope_mismatch_for_write(ec_keys, issuer):
