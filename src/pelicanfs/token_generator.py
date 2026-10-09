@@ -229,7 +229,7 @@ def token_is_valid_and_acceptable(
         # The SSL issue is likely happening when SciToken tries to fetch the public key
         token: SciToken = SciToken.deserialize(jwt_serialized)
         logger.debug("Successfully deserialized token")
-    except (ValueError, Exception) as e:
+    except Exception as e:
         logger.debug("Failed to deserialize token: %s... Error: %s", jwt_serialized[:30], e)
         return False, datetime.fromtimestamp(0, tz=UTC)
 

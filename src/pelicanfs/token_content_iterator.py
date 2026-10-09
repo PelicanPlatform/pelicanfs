@@ -156,7 +156,7 @@ class TokenContentIterator:
             flags.append("-r")  # default to read
         else:
             # Import TokenOperation here to avoid circular import
-            from pelicanfs.token_generator import TokenOperation
+            from pelicanfs.token_generator import TokenOperation  # noqa: PLC0415
 
             if self.operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
                 flags.append("-r")
@@ -213,7 +213,7 @@ class TokenContentIterator:
                     """Read available data from subprocess stdout"""
                     try:
                         # Non-blocking read with timeout
-                        import msvcrt
+                        import msvcrt  # noqa: PLC0415
 
                         if process.stdout and (msvcrt.kbhit() or process.stdout):
                             return process.stdout.read(self.pty_buffer_size)
@@ -231,7 +231,7 @@ class TokenContentIterator:
                 stdin_data_to_send = None
             else:
                 # Unix: use pty module
-                import termios
+                import termios  # noqa: PLC0415
 
                 master_fd, slave_fd = pty.openpty()
 
@@ -390,10 +390,7 @@ class TokenContentIterator:
             return None
 
         except Exception as err:
-            logger.debug("Error invoking pelican binary: %s", err)
-            import traceback
-
-            logger.debug(traceback.format_exc())
+            logger.debug("Error invoking pelican binary: %s", err, exc_info=True)
             return None
 
     def get_method_index(self, method: TokenDiscoveryMethod) -> int:

@@ -18,7 +18,6 @@ import asyncio
 import functools
 import inspect
 import logging
-import os
 import re
 import threading
 import urllib.parse
@@ -26,7 +25,7 @@ from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import overload
 
 import aiohttp
@@ -127,7 +126,7 @@ class _AccessStats:
         Print the Access Stats in a readable format
         """
         for key, value in self.data.items():
-            print(f"{key}: {' '.join(map(str, value))}")
+            print(f"{key}: {' '.join(map(str, value))}")  # noqa: T201
 
 
 class _CacheManager:
@@ -221,10 +220,10 @@ def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.Trace
     """
     trace_config = aiohttp.TraceConfig()
 
-    async def on_request_start(session, context, params):
+    async def on_request_start(_session, _context, _params):
         _release_responses(responses)
 
-    async def on_request_end(session, context, params):
+    async def on_request_end(_session, _context, params):
         responses.append(params.response)
 
     trace_config.on_request_start.append(on_request_start)
@@ -998,7 +997,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 if isdir and not full_path.endswith("/"):
                     full_path += "/"
                 modtimestr = item.get("modified")
-                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
+                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")  # noqa: DTZ007
                 return {
                     "name": full_path,
                     "size": int(item["size"]),
@@ -1374,9 +1373,9 @@ class PelicanFileSystem(AsyncFileSystem):
         objects inside them, and a collection just needs to exist on disk.
         """
         if rpath.endswith("/") or (_collection_roots and rpath.rstrip("/") in _collection_roots):
-            os.makedirs(lpath, exist_ok=True)
+            Path(lpath).mkdir(parents=True, exist_ok=True)
             return None
-        if os.path.isdir(lpath) and await self._is_collection(rpath):
+        if Path(lpath).is_dir() and await self._is_collection(rpath):
             return None
         return await self._get_file_from_cache(rpath, lpath, **kwargs)
 

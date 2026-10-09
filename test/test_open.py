@@ -223,7 +223,7 @@ def test_io_wrapper_error_handling():
     # Create a minimal PelicanFileSystem without full initialization
     pelfs = pelicanfs.core.PelicanFileSystem.__new__(pelicanfs.core.PelicanFileSystem)
     # Patch _bad_cache to avoid side effects
-    pelfs._bad_cache = lambda path, e: None
+    pelfs._bad_cache = lambda _path, _e: None
 
     def failing_read(*args, **kwargs):
         msg = "Simulated read failure"

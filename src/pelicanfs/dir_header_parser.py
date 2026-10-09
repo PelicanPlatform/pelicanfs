@@ -51,7 +51,7 @@ class XPelTokGen:
                 parsed = urlparse(issuer)
                 if parsed.scheme and parsed.netloc:
                     validated_issuers.append(issuer)
-            except Exception:
+            except ValueError:
                 # ignore malformed URLs for now
                 continue
         self.issuers = validated_issuers
@@ -167,8 +167,8 @@ def get_collections_url(headers: dict[str, str]) -> str | None:
     if "X-Pelican-Namespace" not in headers:
         raise BadDirectorResponse
 
-    for info in headers.get("X-Pelican-Namespace", "").split(","):
-        info = info.strip()
+    for raw_info in headers.get("X-Pelican-Namespace", "").split(","):
+        info = raw_info.strip()
         pair = info.split("=", 1)
         if len(pair) < 2:
             continue
