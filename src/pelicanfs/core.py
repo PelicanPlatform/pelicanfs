@@ -359,7 +359,7 @@ class PelicanFileSystem(AsyncFileSystem):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
 
         self.get_webdav_client = get_webdav_client
-        self._namespace_cache = cachetools.TTLCache(maxsize=50, ttl=15 * 60)
+        self._namespace_cache: cachetools.TTLCache[str, _CacheManager] = cachetools.TTLCache(maxsize=50, ttl=15 * 60)
         self._namespace_lock = threading.Lock()
         self._access_stats = _AccessStats()
 
