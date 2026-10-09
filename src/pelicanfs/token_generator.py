@@ -125,10 +125,12 @@ class TokenGenerator:
                 parsed_url: ParseResult = urlparse(self.DestinationURL)
                 object_path: str = parsed_url.path
                 if not object_path:
-                    raise InvalidDestinationURL("URL path is empty")
+                    msg = "URL path is empty"
+                    raise InvalidDestinationURL(msg)
             except Exception as e:
                 logger.error(f"Invalid DestinationURL: {self.DestinationURL} ({e})")
-                raise InvalidDestinationURL(f"Invalid DestinationURL: {self.DestinationURL}") from e
+                msg = f"Invalid DestinationURL: {self.DestinationURL}"
+                raise InvalidDestinationURL(msg) from e
 
             # Initialize iterator if not already set
             # The iterator will iterate and yield all potential tokens in the token location
@@ -158,14 +160,15 @@ class TokenGenerator:
                         if valid:
                             self.token = TokenInfo(contents, expiry)
                             return contents
-                        elif contents and expiry > datetime.now(UTC):
+                        if contents and expiry > datetime.now(UTC):
                             potential_tokens.append(TokenInfo(contents, expiry))
                     except StopIteration:
                         logger.debug("Token iterator reached StopIteration")
                         break
             except Exception as e:
                 logger.error(f"Error iterating tokens: {e}")
-                raise TokenIteratorException("Failed to fetch tokens due to iterator error") from e
+                msg = "Failed to fetch tokens due to iterator error"
+                raise TokenIteratorException(msg) from e
 
             if potential_tokens:
                 logger.warning("Using fallback token even though it may not be fully acceptable")
@@ -173,7 +176,8 @@ class TokenGenerator:
                 return potential_tokens[0].Contents
 
             logger.error("Credential is required, but currently missing")
-            raise NoCredentialsException(f"Credential is required for {self.DestinationURL} but was not discovered")
+            msg = f"Credential is required for {self.DestinationURL} but was not discovered"
+            raise NoCredentialsException(msg)
 
     def get(self) -> str:
         """Alias for get_token()."""

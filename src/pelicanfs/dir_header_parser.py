@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -25,7 +26,6 @@ class XPelAuth:
     """X-Pelican-Authorization header data"""
 
     # Add fields as needed based on the actual header structure
-    pass
 
 
 @dataclass
@@ -102,10 +102,8 @@ def parse_director_response(headers: dict) -> DirectorResponse:
 
                 # Get priority from attributes
                 if "pri" in attributes:
-                    try:
+                    with contextlib.suppress(ValueError, IndexError):
                         priority = int(attributes["pri"])
-                    except (ValueError, IndexError):
-                        pass
 
                 link_entries.append((url, priority))
 
@@ -167,7 +165,7 @@ def get_collections_url(headers: dict[str, str]) -> str | None:
     """
 
     if "X-Pelican-Namespace" not in headers:
-        raise BadDirectorResponse()
+        raise BadDirectorResponse
 
     for info in headers.get("X-Pelican-Namespace", "").split(","):
         info = info.strip()
