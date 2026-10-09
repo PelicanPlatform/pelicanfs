@@ -8,6 +8,13 @@ on:
       - main
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: j178/prek-action@v2
+
   build:
     name: 🐍 ${{ matrix.python-version}} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

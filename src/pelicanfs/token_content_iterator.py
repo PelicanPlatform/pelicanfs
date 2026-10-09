@@ -209,7 +209,7 @@ class TokenContentIterator:
                     bufsize=0,  # Unbuffered for real-time output
                 )
 
-                def read_from_pty():
+                def read_from_pty() -> bytes:
                     """Read available data from subprocess stdout"""
                     try:
                         # Non-blocking read with timeout
@@ -262,7 +262,7 @@ class TokenContentIterator:
                     process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
                 os.close(slave_fd)
 
-                def read_from_pty():
+                def read_from_pty() -> bytes:
                     """Read available data from Unix PTY"""
                     ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
                     if ready:
