@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools >=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling >=1.27"]
+build-backend = "hatchling.build"
 
 [project]
 name = "pelicanfs"
@@ -42,6 +42,9 @@ osdf = "pelicanfs.core:OSDFFileSystem"
 Source = "https://github.com/PelicanPlatform/pelicanfs"
 Pelican-Source = "https://github.com/PelicanPlatform/pelican"
 Bug-Reports = "https://github.com/PelicanPlatform/pelicanfs/issues"
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.github"]
 
 
 [dependency-groups]
