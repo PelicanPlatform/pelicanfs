@@ -52,7 +52,7 @@ def test_put(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_
         skip_instance_cache=True,
         get_webdav_client=get_webdav_client,
     )
-    pelfs.put("test_put.py", "/foo/bar/test.py")
+    pelfs.put(__file__, "/foo/bar/test.py")
 
 
 def test_put_nonexistent_rpath_listing_response(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
@@ -89,7 +89,7 @@ def test_put_nonexistent_rpath_listing_response(httpserver: HTTPServer, get_clie
         skip_instance_cache=True,
         get_webdav_client=get_webdav_client,
     )
-    pelfs.put("test_put.py", "/foo/bar/new.txt")
+    pelfs.put(__file__, "/foo/bar/new.txt")
 
     puts = [request.path for request, _ in httpserver.log if request.method == "PUT"]
     assert puts == ["/foo/bar/new.txt"]
@@ -114,7 +114,7 @@ def test_put_dest_dir(httpserver: HTTPServer, get_client, get_webdav_client, top
         skip_instance_cache=True,
         get_webdav_client=get_webdav_client,
     )
-    pelfs.put("test_put.py", "/foo/bar/")
+    pelfs.put(__file__, "/foo/bar/")
 
 
 def test_put_no_available_source(httpserver: HTTPServer, get_client, get_webdav_client):
@@ -134,7 +134,7 @@ def test_put_no_available_source(httpserver: HTTPServer, get_client, get_webdav_
         get_webdav_client=get_webdav_client,
     )
     with pytest.raises(NoAvailableSource):
-        pelfs.put("test_put.py", "/foo/bar/")
+        pelfs.put(__file__, "/foo/bar/")
 
 
 def test_put_permission_denied(httpserver: HTTPServer, get_client, get_webdav_client):
@@ -157,4 +157,4 @@ def test_put_permission_denied(httpserver: HTTPServer, get_client, get_webdav_cl
         get_webdav_client=get_webdav_client,
     )
     with pytest.raises(ClientResponseError):
-        pelfs.put("test_put.py", "/foo/bar/")
+        pelfs.put(__file__, "/foo/bar/")
