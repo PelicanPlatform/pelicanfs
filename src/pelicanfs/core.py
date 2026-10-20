@@ -763,7 +763,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     elif resp.status == 404:
                         logger.debug("Cache is working (returned 404 for non-existent object)")
                         break
-            except (TimeoutError, aiohttp.client_exceptions.ClientConnectorError, asyncio.exceptions.TimeoutError):
+            except (TimeoutError, aiohttp.client_exceptions.ClientConnectorError):
                 pass
             cache_list = cache_list[1:]
 
