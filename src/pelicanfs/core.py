@@ -661,7 +661,10 @@ class PelicanFileSystem(AsyncFileSystem):
             self.director_url = director_url
 
         logger.debug(f"Getting headers from director: {self.director_url}")
-        url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc if origin else urllib.parse.urljoin(self.director_url, fileloc)
+        if origin:  # noqa: SIM108
+            url = urllib.parse.urljoin(self.director_url, "/api/v1.0/director/origin/") + fileloc
+        else:
+            url = urllib.parse.urljoin(self.director_url, fileloc)
         session = await self.http_file_system.set_session()
         async with session.get(url, allow_redirects=False) as resp:
             return resp.headers
