@@ -1000,7 +1000,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 if isdir and not full_path.endswith("/"):
                     full_path += "/"
                 modtimestr = item.get("modified")
-                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")  # noqa: DTZ007
+                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
                 return {
                     "name": full_path,
                     "size": int(item["size"]),
