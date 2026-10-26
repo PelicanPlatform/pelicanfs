@@ -55,6 +55,8 @@ testing = [
 ]
 dev = [{ include-group = "testing" }]
 
+[tool.uv]
+exclude-newer = "3 days"
 
 [tool.pytest]
 minversion = "9.0"

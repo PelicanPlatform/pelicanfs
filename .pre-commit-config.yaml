@@ -14,19 +14,19 @@
 
 repos:
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
     hooks:
     -   id: trailing-whitespace
     -   id: end-of-file-fixer
     -   id: check-yaml
 -   repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.10
+    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253  # frozen: v0.16.10
     hooks:
     -   id: ruff-check
         args: ["--fix"]
     -   id: ruff-format
 -   repo: https://github.com/RobertCraigie/pyright-python
-    rev: v1.1.414
+    rev: 1aa6dfeb849ae43fb6f16fc17228bcbd358a19c3  # frozen: v1.1.414
     hooks:
     -   id: pyright
         pass_filenames: false
@@ -37,6 +37,12 @@ repos:
           - fsspec
           - igwn-auth-utils
           - types-cachetools
+-   repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: c92afdf2c6ca336aaa8f39e2bd8d48f62dbd8e1f  # frozen: v1.31.1
+    hooks:
+    -   id: zizmor
+        files: "^\\.github"
+        args: [--persona=pedantic]
 
 # Global exclusion for all hooks
 exclude: ^examples/
