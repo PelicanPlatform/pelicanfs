@@ -1288,13 +1288,15 @@ class PelicanFileSystem(AsyncFileSystem):
     # Pelican has no standalone "create a collection" operation: collections come into
     # existence when objects are uploaded under a namespace prefix. Raise instead of
     # pretending the call succeeded so callers do not assume a collection now exists.
-    async def _mkdir(self, path, create_parents=True, **kwargs):
-        raise NotImplementedError("mkdir is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
+    async def _mkdir(self, *args, **kwargs):
+        msg = "mkdir is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe()."
+        raise NotImplementedError(msg)
 
-    async def _makedirs(self, path, exist_ok=False):
+    async def _makedirs(self, *args, **kwargs):
         if _put_in_progress.get():
             return
-        raise NotImplementedError("makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe().")
+        msg = "makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe()."
+        raise NotImplementedError(msg)
 
     def open(self, path, mode, **kwargs):
         path = self._check_fspath(path)
