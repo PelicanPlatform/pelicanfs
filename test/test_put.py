@@ -133,7 +133,7 @@ def test_put_host_port_url(httpserver: HTTPServer, get_client, get_webdav_client
         skip_instance_cache=True,
         get_webdav_client=get_webdav_client,
     )
-    pelfs.put("test_put.py", f"{federation_url}/foo/bar/new.txt")
+    pelfs.put(__file__, f"{federation_url}/foo/bar/new.txt")
 
     assert any(req.method == "PUT" and req.path == "/foo/bar/new.txt" for req, _ in httpserver.log)
 
