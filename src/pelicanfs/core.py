@@ -1,5 +1,5 @@
 """
-Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
+Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
 
 Licensed under the Apache License, Version 2.0 (the "License"); you
 may not use this file except in compliance with the License.  You may
@@ -53,6 +53,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
+from .log_utils import format_token_for_log, trace
 from .token_generator import TokenGenerator, TokenOperation
 
 logger = logging.getLogger("fsspec.pelican")
@@ -357,8 +358,6 @@ class PelicanFileSystem(AsyncFileSystem):
         loop=None,
         get_webdav_client=get_webdav_client,
         oidc_timeout_seconds=300,
-        pty_buffer_size=1024,
-        select_timeout=0.1,
         **kwargs,
     ):
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
@@ -378,7 +377,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
 
         # The internal filesystem
-        self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
+        # IMPORTANT: We need to disable caching for HTTPFileSystem to avoid shared state
+        # issues. Without skip_instance_cache=True, multiple PelicanFileSystem instances
+        # could share the same HTTPFileSystem, causing method binding conflicts.
+        self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, skip_instance_cache=True, **kwargs)
 
         if federation_discovery_url and not federation_discovery_url.endswith("/"):
             federation_discovery_url = federation_discovery_url + "/"
@@ -390,8 +392,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # OIDC device flow configuration
         self.oidc_timeout_seconds = oidc_timeout_seconds
-        self.pty_buffer_size = pty_buffer_size
-        self.select_timeout = select_timeout
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
         # They will raise NotImplementedErrors when called. (mkdir/makedirs are handled by our own
@@ -521,29 +521,24 @@ class PelicanFileSystem(AsyncFileSystem):
         # Default to read for unknown operations
         return TokenOperation.TokenRead
 
-    def _set_http_filesystem_token(self, token: str, session=None) -> None:
+    def _set_http_filesystem_token(self, token: str) -> None:
         """
-        Set the Authorization header in the HTTP filesystem's session.
+        Set the Authorization header in the HTTP filesystem for all future requests.
 
         Args:
             token: The token to set (without "Bearer " prefix)
-            session: Optional specific session to set token in (in addition to HTTP filesystem session)
         """
         if not token:
             return
 
-        # Set the token in the HTTP filesystem's session headers
-        if hasattr(self.http_file_system, "session") and self.http_file_system.session:
-            self.http_file_system.session.headers.update({"Authorization": f"Bearer {token}"})
-        else:
-            # If session doesn't exist yet, set it in the default headers
-            if not hasattr(self.http_file_system, "_default_headers"):
-                self.http_file_system._default_headers = {}
-            self.http_file_system._default_headers["Authorization"] = f"Bearer {token}"
+        auth_header = f"Bearer {token}"
 
-        # Also set token in the specific session if provided
-        if session:
-            session.headers["Authorization"] = f"Bearer {token}"
+        # Set the token in http_file_system.kwargs which is used for all requests
+        # HTTPFileSystem copies self.kwargs for each request (kw = self.kwargs.copy())
+        if hasattr(self.http_file_system, "kwargs"):
+            if "headers" not in self.http_file_system.kwargs:
+                self.http_file_system.kwargs["headers"] = {}
+            self.http_file_system.kwargs["headers"]["Authorization"] = auth_header
 
     async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
@@ -573,10 +568,15 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if we already have a token, either from kwargs headers or generated earlier
         existing_token = self._get_token()
+        trace(logger, "_handle_token_generation url=%s", url[:50] if url else None)
+        trace(logger, "self.token=%s", format_token_for_log(self.token))
+        trace(logger, "existing_token=%s", format_token_for_log(existing_token))
         if existing_token:
-            logger.debug("Using existing token from headers for %s", url)
+            trace(logger, "reusing existing token")
             self._set_http_filesystem_token(existing_token)
             return existing_token
+
+        trace(logger, "no existing token; generating via TokenGenerator")
 
         try:
             # Ensure director URL is set (for token generation validation)
@@ -604,21 +604,30 @@ class PelicanFileSystem(AsyncFileSystem):
                 operation=operation,
                 pelican_url=pelican_url,
                 oidc_timeout_seconds=self.oidc_timeout_seconds,
-                pty_buffer_size=self.pty_buffer_size,
-                select_timeout=self.select_timeout,
             )
 
             # Get token (TokenContentIterator will automatically discover token location)
             token = token_generator.get_token()
+            trace(
+                logger,
+                "token_generator.get_token returned len=%s jwt=%s",
+                len(token) if token else 0,
+                format_token_for_log(token),
+            )
             if token:
                 self._set_http_filesystem_token(token)
                 # Also update self.token so _ls_real can use it
                 self.token = f"Bearer {token}"
                 # Remember when it expires so the check above can retire it in time
                 self._token_expiry = token_generator.token.Expiry if token_generator.token else None
+                trace(logger, "set self.token jwt=%s", format_token_for_log(self.token))
+                trace(logger, "_get_token after set=%s", format_token_for_log(self._get_token()))
+            else:
+                logger.warning("token_generator.get_token returned falsy value: %r", token)
             return token
         except Exception as e:
             logger.warning("Failed to generate token for %s: %s", url, e)
+            trace(logger, "token generation failed", exc_info=True)
             return None
 
     def get_access_data(self):
@@ -740,22 +749,27 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Finding a working cache...")
             session = await self.http_file_system.set_session()
 
+            # Build request headers
+            request_headers = {}
+
             # Handle token generation for cache requests if required
             if director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token:
+                trace(logger, "get_working_cache token before generation=%s", format_token_for_log(self.token))
                 operation = self._get_token_operation("get_working_cache")
                 await self._handle_token_generation(updated_url, director_response, operation)
+                trace(logger, "get_working_cache token after generation=%s", format_token_for_log(self.token))
 
-                # Set token in session headers if we have one (either existing or newly generated)
+                # Get the token to use for this request
                 token_to_use = self._get_token()
+                trace(logger, "get_working_cache token_to_use=%s", format_token_for_log(token_to_use))
                 if token_to_use:
-                    self._set_http_filesystem_token(token_to_use, session)
-                else:
-                    pass
-            else:
-                pass
+                    # _handle_token_generation already set the filesystem token above;
+                    # here we only need the per-request header for the HEAD probe.
+                    request_headers["Authorization"] = f"Bearer {token_to_use}"
+
             try:
                 logger.debug("Checking to see if the cache at %s is working and returns a valid response code", updated_url)
-                async with session.head(updated_url, timeout=timeout) as resp:
+                async with session.head(updated_url, timeout=timeout, headers=request_headers or None) as resp:
                     # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
                     # as indicators that the cache is working. Other error codes indicate
                     # the cache itself is having problems.
@@ -946,6 +960,9 @@ class PelicanFileSystem(AsyncFileSystem):
         Note: We do NOT remove hosts from the results because HTTPFileSystem needs
         full URLs to download files.
         """
+        trace(logger, "_ls_from_http url=%s", url[:60] if url else None)
+        trace(logger, "_ls_from_http token at entry=%s", format_token_for_log(self.token))
+
         # Extract the path from the URL
         parsed = urllib.parse.urlparse(url)
         path = parsed.path
@@ -953,9 +970,13 @@ class PelicanFileSystem(AsyncFileSystem):
         # Get the collections URL for this path
         collections_url, director_response = await self.get_dirlist_url(path)
 
+        trace(logger, "_ls_from_http token after get_dirlist_url=%s", format_token_for_log(self.token))
+
         # Handle token generation if required
         operation = self._get_token_operation("_ls")
         await self._handle_token_generation(collections_url, director_response, operation)
+
+        trace(logger, "_ls_from_http token after generation=%s", format_token_for_log(self.token))
 
         # Call _ls_real with the collections URL
         if self.use_listings_cache and collections_url in self.dircache:

@@ -29,6 +29,7 @@ from pelicanfs.exceptions import (
     NoCredentialsException,
     TokenIteratorException,
 )
+from pelicanfs.log_utils import format_token_for_log, trace
 from pelicanfs.token_content_iterator import TokenContentIterator
 
 logger = logging.getLogger("fsspec.pelican")
@@ -72,8 +73,6 @@ class TokenGenerator:
         token_name: str | None = None,
         pelican_url: str | None = None,
         oidc_timeout_seconds: int = 300,
-        pty_buffer_size: int = 1024,
-        select_timeout: float = 0.1,
     ) -> None:
         self.DirResp: DirectorResponse | None = dir_resp
         self.DestinationURL: str = destination_url
@@ -86,8 +85,6 @@ class TokenGenerator:
         self._lock: threading.Lock = threading.Lock()
         # OIDC device flow configuration
         self.oidc_timeout_seconds: int = oidc_timeout_seconds
-        self.pty_buffer_size: int = pty_buffer_size
-        self.select_timeout: float = select_timeout
 
     def set_token_location(self, token_location: str) -> None:
         """Sets the location (e.g., file path) where tokens can be found."""
@@ -142,28 +139,23 @@ class TokenGenerator:
                     destination_url=self.DestinationURL,
                     pelican_url=self.PelicanURL,
                     oidc_timeout_seconds=self.oidc_timeout_seconds,
-                    pty_buffer_size=self.pty_buffer_size,
-                    select_timeout=self.select_timeout,
                 )
 
-            logger.debug("About to enter token validation loop")
-            logger.debug("self.Iterator at validation loop: %s", self.Iterator)
+            trace(logger, "entering token validation loop")
             try:
                 # Use next() to get tokens one at a time from the iterator
                 while True:
                     try:
                         contents = next(self.Iterator)
-                        # Check if the token is valid and acceptable
-                        logger.debug("Validating token for operation: %s", operation)
                         valid, expiry = token_is_valid_and_acceptable(contents, object_path, self.DirResp, operation)
-                        logger.debug("Token validation result: valid=%s, expiry=%s", valid, expiry)
+                        trace(logger, "token validation valid=%s expiry=%s jwt=%s", valid, expiry, format_token_for_log(contents))
                         if valid:
                             self.token = TokenInfo(contents, expiry)
                             return contents
                         if contents and expiry > datetime.now(UTC):
                             potential_tokens.append(TokenInfo(contents, expiry))
                     except StopIteration:
-                        logger.debug("Token iterator reached StopIteration")
+                        trace(logger, "token iterator exhausted")
                         break
             except Exception as e:
                 logger.error("Error iterating tokens: %s", e)
@@ -222,35 +214,32 @@ def token_is_valid_and_acceptable(
     Returns:
         Tuple (is_valid, expiry_datetime)
     """
-    logger.debug("token_is_valid_and_acceptable called with operation: %s", operation)
+    trace(logger, "token_is_valid_and_acceptable operation=%s", operation)
 
     try:
         # Try to deserialize the token without SSL verification
         # The SSL issue is likely happening when SciToken tries to fetch the public key
         token: SciToken = SciToken.deserialize(jwt_serialized)
-        logger.debug("Successfully deserialized token")
-    except Exception as e:
-        logger.debug("Failed to deserialize token: %s... Error: %s", jwt_serialized[:30], e)
+    except (ValueError, Exception) as e:
+        trace(logger, "failed to deserialize token jwt=%s: %s", format_token_for_log(jwt_serialized), e)
         return False, datetime.fromtimestamp(0, tz=UTC)
 
     # Check if the token is expired
     exp = token.get("exp")
     if exp is None:
-        logger.debug("Token missing exp claim")
+        trace(logger, "token missing exp claim jwt=%s", format_token_for_log(jwt_serialized))
         return False, datetime.fromtimestamp(0, tz=UTC)
 
     expiry_dt: datetime = datetime.fromtimestamp(exp, tz=UTC)
-    logger.debug("Token expiry: %s", expiry_dt)
     if expiry_dt <= datetime.now(UTC):
-        logger.debug("Token expired at %s", expiry_dt)
+        trace(logger, "token expired at %s jwt=%s", expiry_dt, format_token_for_log(jwt_serialized))
         return False, expiry_dt
 
     # Get the allowed issuers from the director response and check if the token issuer is in the list
     issuers: list[str] = []
     if dir_resp and hasattr(dir_resp, "x_pel_tok_gen_hdr") and dir_resp.x_pel_tok_gen_hdr:
         issuers = dir_resp.x_pel_tok_gen_hdr.issuers or []
-    logger.debug("Allowed issuers: %s", issuers)
-    logger.debug("Token issuer: %s", dict(token._verified_claims).get("iss"))
+    trace(logger, "allowed issuers=%s token issuer=%s", issuers, dict(token._verified_claims).get("iss"))
 
     # Get the operation type and set the required scopes
     if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
@@ -260,8 +249,7 @@ def token_is_valid_and_acceptable(
     else:
         ok_scopes = []
 
-    logger.debug("Required scopes for operation '%s': %s", operation, ok_scopes)
-    logger.debug("Token scopes: %s", token.get("scope"))
+    trace(logger, "required scopes=%s token scopes=%s", ok_scopes, token.get("scope"))
 
     token_scopes = token.get("scope") or ""
     scope_list = token_scopes.split()
@@ -296,7 +284,7 @@ def token_is_valid_and_acceptable(
             break
 
     if not acceptable_scope:
-        logger.debug("No acceptable scope found in token")
+        trace(logger, "no acceptable scope in token jwt=%s", format_token_for_log(jwt_serialized))
         return False, expiry_dt
 
     return True, expiry_dt

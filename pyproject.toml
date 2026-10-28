@@ -31,7 +31,8 @@ dependencies = [
     "cachetools >=5.3,<6",
     "fsspec >=2024.3.1",
     "igwn-auth-utils",
-    "pywinpty; platform_system=='Windows'",
+    "pexpect; platform_system!='Windows'",
+    "wexpect; platform_system=='Windows'",
 ]
 
 [project.entry-points."fsspec.specs"]
@@ -65,6 +66,7 @@ strict = true
 filterwarnings = ["error"]
 log_level = "INFO"
 testpaths = ["test"]
+pythonpath = ["test"]
 markers = [
     "integration: marks tests as integration tests (require live OSDF infrastructure)",
 ]
