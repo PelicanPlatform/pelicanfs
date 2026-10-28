@@ -67,10 +67,7 @@ def handle(pelfs, dir_resp):
 
 
 def authorization_header(pelfs):
-    http_fs = pelfs.http_file_system
-    if getattr(http_fs, "session", None):
-        return http_fs.session.headers.get("Authorization")
-    return http_fs._default_headers.get("Authorization")
+    return pelfs.http_file_system.kwargs.get("headers", {}).get("Authorization")
 
 
 def test_expired_generated_token_is_regenerated(pelfs, token_required_dir_resp, monkeypatch):
