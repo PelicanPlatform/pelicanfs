@@ -13,8 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+
 import logging
-from typing import Optional, Union
 
 # Finer than DEBUG for internal call-flow tracing (not enabled by default).
 TRACE = 5
@@ -26,14 +26,11 @@ def trace(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
         logger._log(TRACE, msg, args, **kwargs)
 
 
-def format_token_for_log(token: Optional[Union[str, bytes]]) -> Optional[str]:
+def format_token_for_log(token: str | bytes | None) -> str | None:
     """Return JWT header and payload (no signature) for safe, readable logging."""
     if not token:
         return None
-    if isinstance(token, bytes):
-        raw = token.decode("utf-8", errors="replace")
-    else:
-        raw = token
+    raw = token.decode("utf-8", errors="replace") if isinstance(token, bytes) else token
     raw = raw.removeprefix("Bearer ").strip()
     parts = raw.split(".")
     if len(parts) >= 2:

@@ -626,7 +626,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 logger.warning("token_generator.get_token returned falsy value: %r", token)
             return token
         except Exception as e:
-            logger.warning(f"Failed to generate token for {url}: {e}")
+            logger.warning("Failed to generate token for %s: %s", url, e)
             trace(logger, "token generation failed", exc_info=True)
             return None
 
@@ -768,7 +768,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     request_headers["Authorization"] = f"Bearer {token_to_use}"
 
             try:
-                logger.debug(f"Checking to see if the cache at {updated_url} is working and returns a valid response code")
+                logger.debug("Checking to see if the cache at %s is working and returns a valid response code", updated_url)
                 async with session.head(updated_url, timeout=timeout, headers=request_headers or None) as resp:
                     # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
                     # as indicators that the cache is working. Other error codes indicate

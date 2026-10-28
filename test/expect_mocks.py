@@ -44,10 +44,11 @@ class MockPexpectChild:
         self.password_received = None
         self._closed = False
 
-    def expect(self, patterns):
+    def expect(self, patterns):  # noqa: ARG002
         if self.interaction_index >= len(self.interactions):
             # Simulate EOF when no more interactions
-            raise EOFError("End of interactions")
+            msg = "End of interactions"
+            raise EOFError(msg)
 
         interaction = self.interactions[self.interaction_index]
         self.interaction_index += 1
@@ -61,7 +62,7 @@ class MockPexpectChild:
         """Capture password input."""
         self.password_received = text
 
-    def close(self, force=False):
+    def close(self, force=False):  # noqa: ARG002
         self._closed = True
 
 
