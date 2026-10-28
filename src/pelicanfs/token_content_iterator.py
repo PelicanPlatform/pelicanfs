@@ -66,6 +66,13 @@ DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
 _PASSWORD_PROMPT_PATTERN = r"[Pp]assword[^:\n]*:\s*"
 
 
+def _to_text(value: object) -> str:
+    """Normalize pexpect (str) and wexpect (bytes) output; anything else, like EOF, is empty."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
+
+
 def get_token_from_file(token_location: str) -> str:
     logger.debug("Opening token file: %s", token_location)
     try:
@@ -228,11 +235,11 @@ class TokenContentIterator:
 
         # Print the plaintext version first so there's a single change in output
         # format (plaintext then, if available, the clickable version) rather than two.
-        print(f"Please visit: {filtered_url}")
+        print(f"Please visit: {filtered_url}")  # noqa: T201
 
         # Try to make URLs clickable in Jupyter/IPython
         try:
-            from IPython.display import HTML, display
+            from IPython.display import HTML, display  # noqa: PLC0415
 
             display(HTML(f'<a href="{html.escape(filtered_url, quote=True)}" target="_blank">Click here to authenticate: {html.escape(filtered_url)}</a>'))
         except ImportError:
@@ -256,14 +263,14 @@ class TokenContentIterator:
 
         if _expect_module is None:
             package = "wexpect" if _IS_WINDOWS else "pexpect"
-            logger.warning(f"{package} is required for OIDC device flow" + (" on Windows" if _IS_WINDOWS else "") + f". Install it with: pip install {package}")
+            logger.warning("%s is required for OIDC device flow%s. Install it with: pip install %s", package, " on Windows" if _IS_WINDOWS else "", package)
             return None
 
         flags = self._get_pelican_flag()
         cmd = "pelican"
         cmd_args = ["token", "fetch", self.pelican_url, *flags]
 
-        logger.info(f"Invoking OIDC device flow via pelican binary: {cmd} {' '.join(cmd_args)}")
+        logger.info("Invoking OIDC device flow via pelican binary: %s %s", cmd, " ".join(cmd_args))
 
         try:
             # Spawn with a PTY; passing the program and its args separately avoids
@@ -295,7 +302,7 @@ class TokenContentIterator:
 
                 # Capture any output before the match
                 if child.before:
-                    before_text = child.before if isinstance(child.before, str) else child.before.decode("utf-8", errors="replace")
+                    before_text = _to_text(child.before)
                     output_lines.append(before_text)
                     # Filter line-by-line: skip JSON debug lines (containing braces)
                     # but still print human-readable lines (e.g. the password prompt
@@ -303,24 +310,24 @@ class TokenContentIterator:
                     for line in before_text.splitlines(keepends=True):
                         filtered_line = re.sub(jwt_pattern, "[TOKEN_REDACTED]", line)
                         if filtered_line.strip() and "{" not in filtered_line and "}" not in filtered_line:
-                            print(filtered_line, end="", flush=True)
+                            print(filtered_line, end="", flush=True)  # noqa: T201
 
                 if index == 0:  # Password prompt
                     # Get the matched text (e.g. "password: ")
-                    match_text = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                    match_text = _to_text(child.after)
                     output_lines.append(match_text)
 
                     # Print the matched "password:" text and flush before blocking
                     # on getpass, so the full prompt (before_text + match_text) is
                     # visible. Pass empty string to getpass so it doesn't double-print.
-                    print(match_text, end="", flush=True)
+                    print(match_text, end="", flush=True)  # noqa: T201
                     password = getpass.getpass(prompt="")
                     child.sendline(password)
                     del password
 
                 elif index == 1:  # URL (device flow)
                     # Get the URL
-                    url = child.after if isinstance(child.after, str) else child.after.decode("utf-8", errors="replace")
+                    url = _to_text(child.after)
                     output_lines.append(url)
                     self._display_url_for_user(url)
 
@@ -329,7 +336,7 @@ class TokenContentIterator:
                     break
 
                 elif index == 3:  # Timeout
-                    logger.warning(f"Pelican binary timed out (exceeded {self.oidc_timeout_seconds} seconds)")
+                    logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
                     child.close(force=True)
                     return None
 
@@ -337,7 +344,7 @@ class TokenContentIterator:
 
             # Check exit status
             if child.exitstatus != 0:
-                logger.debug(f"Pelican binary exited with code {child.exitstatus}")
+                logger.debug("Pelican binary exited with code %s", child.exitstatus)
                 return None
 
             # Extract JWT token from captured output
@@ -349,11 +356,11 @@ class TokenContentIterator:
                 logger.info("Successfully acquired token via OIDC device flow")
                 return token
             logger.warning("Could not extract JWT token from pelican binary output")
-            logger.debug(f"Output was: {re.sub(jwt_pattern, '[TOKEN_REDACTED]', full_output)}")
+            logger.debug("Output was: %s", re.sub(jwt_pattern, "[TOKEN_REDACTED]", full_output))
             return None
 
         except Exception as err:
-            logger.debug(f"Error invoking pelican binary: {err}")
+            logger.debug("Error invoking pelican binary: %s", err)
             logger.debug(traceback.format_exc())
             return None
 
