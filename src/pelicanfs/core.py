@@ -80,6 +80,7 @@ from .exceptions import (
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
+    NoCredentialsException,
 )
 from .log_utils import TRACE, TokenForLog, log_operation, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
@@ -1946,6 +1947,8 @@ class PelicanFileSystem(AsyncFileSystem):
         with _audit_errors():
             try:
                 await self.get_working_cache(first)
+            except NoCredentialsException:
+                raise
             except Exception as e:
                 # Still best effort, but worth saying out loud: if warming fails
                 # systematically, every object goes back to the director on its own --
