@@ -438,4 +438,5 @@ class TestPexpectNotAvailable:
                 token = iterator._get_token_from_pelican_binary()
 
         assert token is None
-        assert "pexpect" in caplog.text.lower()
+        package = "wexpect" if sys.platform == "win32" else "pexpect"
+        assert package in caplog.text.lower()
