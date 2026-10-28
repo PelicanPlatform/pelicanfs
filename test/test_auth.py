@@ -32,7 +32,8 @@ def test_missing_credential_raises_and_sends_no_request(httpserver: HTTPServer, 
     foo_bar_url = httpserver.url_for("/foo/bar")
 
     def no_credentials(self):
-        raise NoCredentialsException(f"Credential is required for {self.DestinationURL} but was not discovered")
+        msg = f"Credential is required for {self.DestinationURL} but was not discovered"
+        raise NoCredentialsException(msg)
 
     monkeypatch.setattr(TokenGenerator, "get_token", no_credentials)
 
