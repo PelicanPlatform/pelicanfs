@@ -1271,7 +1271,8 @@ class PelicanFileSystem(AsyncFileSystem):
         matching fsspec's contract for ``create``.
         """
         if mode not in ("overwrite", "create"):
-            raise ValueError(f"Unsupported put mode {mode!r}; expected 'overwrite' or 'create'")
+            msg = f"Unsupported put mode {mode!r}; expected 'overwrite' or 'create'"
+            raise ValueError(msg)
 
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
@@ -1306,7 +1307,7 @@ class PelicanFileSystem(AsyncFileSystem):
         try:
             return bool(await self._exists(path))
         except Exception as probe_error:
-            logger.debug(f"Could not check whether {path} exists after a refused upload: {probe_error}")
+            logger.debug("Could not check whether %s exists after a refused upload: %s", path, probe_error)
             return False
 
     async def _put(self, lpath, rpath, *args, **kwargs):
