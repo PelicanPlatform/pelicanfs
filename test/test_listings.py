@@ -153,6 +153,33 @@ def test_glob_one_level(
     assert pelfs.glob("/foo/bar/*") == ["/foo/bar/file1.txt", "/foo/bar/file2.md", "/foo/bar/file3.txt", "/foo/bar/folder1/", "/foo/bar/folder2/"]
 
 
+def test_glob_pelican_url(
+    httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, file1_listing_response, file2_listing_response, file3_listing_response, f1_listing_response, f2_listing_response
+):
+    foo_bar_url = httpserver.url_for("foo/bar")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar/").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1', "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}"},
+    )
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file1.txt", method="PROPFIND").respond_with_data(file1_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file2.md", method="PROPFIND").respond_with_data(file2_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/file3.txt", method="PROPFIND").respond_with_data(file3_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/folder1/", method="PROPFIND").respond_with_data(f1_listing_response, status=207)
+    httpserver.expect_request("/foo/bar/folder2/", method="PROPFIND").respond_with_data(f2_listing_response, status=207)
+
+    httpserver.expect_request("/foo/bar/", method="HEAD").respond_with_data(status=200)
+
+    host = httpserver.url_for("/").removeprefix("https://")
+    pelfs = pelicanfs.core.PelicanFileSystem(f"pelican://{host}", get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
+
+    expected = ["/foo/bar/file1.txt", "/foo/bar/file2.md", "/foo/bar/file3.txt", "/foo/bar/folder1/", "/foo/bar/folder2/"]
+    assert pelfs.glob(f"pelican://{host}foo/bar/*") == expected
+    assert list(pelfs.glob(f"pelican://{host}foo/bar/*", detail=True)) == expected
+
+
 def test_glob_match_ext(
     httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, file1_listing_response, file2_listing_response, file3_listing_response, f1_listing_response, f2_listing_response
 ):
