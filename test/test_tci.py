@@ -16,7 +16,9 @@ limitations under the License.
 
 import json
 import os
+import subprocess
 import sys
+import time
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -498,3 +500,30 @@ def test_pelican_binary_exists():
     # We just test that the method works without error
     result = iterator._pelican_binary_exists()
     assert isinstance(result, bool)
+
+
+def _windows_branch_iterator(monkeypatch, script, timeout):
+    """Run the Windows code path with a Python child in place of the pelican binary."""
+    real_popen = subprocess.Popen
+
+    def fake_popen(_cmd, **kwargs):
+        return real_popen([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setattr("pelicanfs.token_content_iterator._IS_WINDOWS", True)
+    monkeypatch.setattr("subprocess.Popen", fake_popen)
+    return TokenContentIterator(location=None, name="token_name", pelican_url="pelican://example.com/path", oidc_timeout_seconds=timeout)
+
+
+def test_oidc_windows_branch_timeout_with_silent_child(monkeypatch):
+    iterator = _windows_branch_iterator(monkeypatch, "import time; time.sleep(8)", timeout=1)
+
+    start = time.monotonic()
+    assert iterator._get_token_from_pelican_binary() is None
+    assert time.monotonic() - start < 5
+
+
+def test_oidc_windows_branch_returns_token(monkeypatch):
+    script = "print('Navigate to https://example.org/device'); print('eyJa.eyJb.sigc')"
+    iterator = _windows_branch_iterator(monkeypatch, script, timeout=30)
+
+    assert iterator._get_token_from_pelican_binary() == "eyJa.eyJb.sigc"
