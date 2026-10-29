@@ -163,13 +163,11 @@ class _CacheManager:
         # Work around any bugs where the director may return the same cache twice
         cache_set = set()
         for cache_url in cache_list:
-            parsed_url = urllib.parse.urlparse(cache_url)
-            parsed_url = parsed_url._replace(path="", query="", fragment="")
-            cache_str = parsed_url.geturl()
+            cache_str = _host_of(cache_url)
             if cache_str in cache_set:
                 continue
             cache_set.add(cache_str)
-            self._cache_list.append(parsed_url.geturl())
+            self._cache_list.append(cache_str)
 
     def get_url(self, obj_name):
         """
@@ -185,12 +183,15 @@ class _CacheManager:
         """
         Remove the given cache_url from the list of possible caches to try
         """
-        cache_url_parsed = urllib.parse.urlparse(cache_url)
-        cache_url_parsed = cache_url_parsed._replace(path="", query="", fragment="")
-        bad_cache_url = cache_url_parsed.geturl()
+        bad_cache_url = _host_of(cache_url)
         with self._lock:
             if bad_cache_url in self._cache_list:
                 self._cache_list.remove(bad_cache_url)
+
+
+def _host_of(url: str) -> str:
+    """Strip a URL down to scheme://host, the identity of a cache."""
+    return urllib.parse.urlparse(url)._replace(path="", query="", fragment="").geturl()
 
 
 def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
@@ -679,22 +680,10 @@ class PelicanFileSystem(AsyncFileSystem):
         namespace = None
         logger.debug("Choosing a cache for %s...", fileloc)
         fparsed = urllib.parse.urlparse(fileloc)
-        # Removing the query if need be
-        try:
-            cached_url, cached_director_response = self._match_namespace(fparsed.path)
-            if cached_url and cached_director_response is not None:
-                # _CacheManager keeps bare scheme://host entries, so a namespace hit
-                # comes back without the query string the caller asked for. Put it back:
-                # it can carry an authz token, and dropping it turns an authorized
-                # request into an unauthorized one.
-                if fparsed.query:
-                    cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
-                logger.debug("Found previously working cache: %s", cached_url)
-                return cached_url, cached_director_response
-        except NoAvailableSource:
-            # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
-            # Fall through to discover caches
-            logger.debug("Namespace found but no caches available, discovering caches")
+        known = self._known_cache(fileloc)
+        if known is not None:
+            logger.debug("Found previously working cache: %s", known[0])
+            return known
 
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
@@ -868,6 +857,28 @@ class PelicanFileSystem(AsyncFileSystem):
                     break
         return None
 
+    def _known_cache(self, fileloc: str) -> tuple[str, DirectorResponse] | None:
+        """
+        Return the current cache for fileloc from memory, or None if the namespace
+        is unknown or has no caches left.
+        """
+        fparsed = urllib.parse.urlparse(fileloc)
+        try:
+            cached_url, director_response = self._match_namespace(fparsed.path)
+        except NoAvailableSource:
+            # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
+            logger.debug("Namespace found but no caches available")
+            return None
+        if not cached_url or director_response is None:
+            return None
+        # _CacheManager keeps bare scheme://host entries, so a namespace hit
+        # comes back without the query string the caller asked for. Put it back:
+        # it can carry an authz token, and dropping it turns an authorized
+        # request into an unauthorized one.
+        if fparsed.query:
+            cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
+        return cached_url, director_response
+
     def _match_namespace(self, fileloc: str) -> tuple[str | None, DirectorResponse | None]:
         """
         Search for a matching namespace and return both the cache URL and requires_token status
@@ -890,10 +901,8 @@ class PelicanFileSystem(AsyncFileSystem):
         if isinstance(e, FileNotFoundError):
             return
         logger.debug("Marking cache at %s as bad", url)
-        cache_url = urllib.parse.urlparse(url)
-        path = cache_url.path
-        cache_url = cache_url._replace(query="", path="", fragment="")
-        bad_cache = cache_url.geturl()
+        path = urllib.parse.urlparse(url).path
+        bad_cache = _host_of(url)
 
         ar = _AccessResp(url, False, str(e))
         self._access_stats.add_response(path, ar)
@@ -1164,43 +1173,60 @@ class PelicanFileSystem(AsyncFileSystem):
 
     fastwalk = sync_generator(_walk)
 
-    @staticmethod
-    def _cache_host(url: str) -> str:
-        return urllib.parse.urlparse(url)._replace(path="", query="", fragment="").geturl()
-
     async def _resolve_data_url(self, path: str) -> tuple[str, DirectorResponse]:
         if self.direct_reads:
             return await self.get_origin_url(path)
         return await self.get_working_cache(path)
 
-    async def _next_cache_after_failure(self, path: str, failed_url: str, tried: set[str], error: Exception) -> tuple[str, DirectorResponse] | None:
+    def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception) -> tuple[str, DirectorResponse] | None:
         """
-        Mark the cache behind failed_url as bad and return the next cache to try.
+        Mark the cache behind failed_url as bad and return the next known cache.
 
         Returns None when the request should not be retried: direct reads, a missing
-        object, or every known cache already tried. Reads are idempotent, so repeating
-        them on another cache is safe.
+        object, or no cache left for the namespace. Only caches already in memory are
+        considered; rediscovery would hand back the cache that just failed.
+        Reads are idempotent, so repeating them on another cache is safe.
         """
         if self.direct_reads or isinstance(error, FileNotFoundError):
             return None
         self._bad_cache(failed_url, error)
-        tried.add(self._cache_host(failed_url))
-        try:
-            data_url, director_response = await self.get_working_cache(path)
-        except Exception as e:
-            logger.debug("No further cache to retry %s on: %s", path, e)
+        retry = self._known_cache(path)
+        if retry is None:
+            logger.debug("No further cache to retry %s on", path)
             return None
-        if self._cache_host(data_url) in tried:
-            return None
-        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, error, data_url)
-        return data_url, director_response
+        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, error, retry[0])
+        return retry
 
-    @staticmethod
-    def _retarget_file(fp, url: str) -> bool:
+    async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt):
         """
-        Point an open fsspec http file at another cache. Range-based files resume at the
-        current offset. A streaming file can only be restarted before any data was read.
+        Call attempt(data_url) on the current cache, moving to the next cache on failure.
+        Records a successful access and returns attempt's result.
         """
+        data_url, director_response = await self._resolve_data_url(path)
+        while True:
+            await self._handle_token_generation(data_url, director_response, operation)
+            try:
+                result = await attempt(data_url)
+                break
+            except Exception as e:
+                retry = self._next_cache_after_failure(path, data_url, e)
+                if retry is None:
+                    raise
+                data_url, director_response = retry
+        if not self.direct_reads:
+            self._access_stats.add_response(path, _AccessResp(data_url, True))
+        return result
+
+    def _retarget_after_failure(self, fp, path: str, error: Exception) -> bool:
+        """
+        Point an open fsspec http file at the next cache after a read failed. Range-based
+        files resume at the current offset. A streaming file can only be restarted before
+        any data was read. Returns False when the read should not be retried.
+        """
+        retry = self._next_cache_after_failure(path, fp.url, error)
+        if retry is None:
+            return False
+        url = retry[0]
         if isinstance(fp, fshttp.HTTPFile):
             fp.url = url
             return True
@@ -1218,15 +1244,13 @@ class PelicanFileSystem(AsyncFileSystem):
         on the next cache.
         """
         read = fp.read
-        tried: set[str] = set()
 
         def io_wrapper(*args, **kwargs):
             while True:
                 try:
                     return read(*args, **kwargs)
                 except Exception as e:
-                    retry = sync(self.loop, self._next_cache_after_failure, path, fp.url, tried, e)
-                    if retry is None or not self._retarget_file(fp, retry[0]):
+                    if not self._retarget_after_failure(fp, path, e):
                         raise
 
         return io_wrapper
@@ -1236,15 +1260,13 @@ class PelicanFileSystem(AsyncFileSystem):
         Async counterpart of _io_wrapper.
         """
         read = fp.read
-        tried: set[str] = set()
 
         async def io_wrapper(*args, **kwargs):
             while True:
                 try:
                     return await read(*args, **kwargs)
                 except Exception as e:
-                    retry = await self._next_cache_after_failure(path, fp.url, tried, e)
-                    if retry is None or not self._retarget_file(fp, retry[0]):
+                    if not self._retarget_after_failure(fp, path, e):
                         raise
 
         return io_wrapper
@@ -1363,23 +1385,20 @@ class PelicanFileSystem(AsyncFileSystem):
 
         data_url, director_response = sync(self.loop, self._resolve_data_url, path)  # type: ignore[misc]
         operation = self._get_token_operation("open")
-        tried: set[str] = set()
         while True:
             sync(self.loop, self._handle_token_generation, data_url, director_response, operation)
             logger.debug("Running open on %s...", data_url)
             try:
                 fp = self.http_file_system.open(data_url, mode, **kwargs)
+                break
             except Exception as e:
-                retry: tuple[str, DirectorResponse] | None = sync(self.loop, self._next_cache_after_failure, path, data_url, tried, e)  # type: ignore[misc]
+                retry = self._next_cache_after_failure(path, data_url, e)
                 if retry is None:
                     raise
                 data_url, director_response = retry
-                continue
-            break
         fp.read = self._io_wrapper(fp, path)
         if not self.direct_reads:
-            ar = _AccessResp(data_url, True)
-            self._access_stats.add_response(path, ar)
+            self._access_stats.add_response(path, _AccessResp(data_url, True))
         return fp
 
     async def open_async(self, path, mode="rb", **kwargs):
@@ -1390,25 +1409,12 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "Write mode is not supported for open_async(). Use put() or pipe() to write files."
             raise NotImplementedError(msg)
 
-        data_url, director_response = await self._resolve_data_url(path)
-        operation = self._get_token_operation("open_async")
-        tried: set[str] = set()
-        while True:
-            await self._handle_token_generation(data_url, director_response, operation)
+        async def attempt(data_url):
             logger.debug("Running open_async on %s...", data_url)
-            try:
-                fp = await self.http_file_system.open_async(data_url, **kwargs)
-            except Exception as e:
-                retry = await self._next_cache_after_failure(path, data_url, tried, e)
-                if retry is None:
-                    raise
-                data_url, director_response = retry
-                continue
-            break
+            return await self.http_file_system.open_async(data_url, **kwargs)
+
+        fp = await self._with_cache_retry(path, self._get_token_operation("open_async"), attempt)
         fp.read = self._async_io_wrapper(fp, path)
-        if not self.direct_reads:
-            ar = _AccessResp(data_url, True)
-            self._access_stats.add_response(path, ar)
         return fp
 
     @staticmethod
@@ -1427,24 +1433,12 @@ class PelicanFileSystem(AsyncFileSystem):
         async def wrapper(self, *args, **kwargs):
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
-            data_url, director_response = await self._resolve_data_url(path)
-            operation = self._get_token_operation(func.__name__)
-            tried: set[str] = set()
-            while True:
-                await self._handle_token_generation(data_url, director_response, operation)
-                try:
-                    logger.debug("Calling %s using the following url: %s", func, data_url)
-                    result = await func(self, data_url, *rest, **kwargs)
-                except Exception as e:
-                    retry = await self._next_cache_after_failure(path, data_url, tried, e)
-                    if retry is None:
-                        raise
-                    data_url, director_response = retry
-                    continue
-                if not self.direct_reads:
-                    ar = _AccessResp(data_url, True)
-                    self._access_stats.add_response(path, ar)
-                return result
+
+            async def attempt(data_url):
+                logger.debug("Calling %s using the following url: %s", func, data_url)
+                return await func(self, data_url, *rest, **kwargs)
+
+            return await self._with_cache_retry(path, self._get_token_operation(func.__name__), attempt)
 
         return wrapper
 
