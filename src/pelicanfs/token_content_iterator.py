@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
 import getpass
 import html
 import io
@@ -21,10 +22,12 @@ import json
 import logging
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -51,6 +54,7 @@ logger = logging.getLogger("fsspec.pelican")
 DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
 DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
+READER_JOIN_TIMEOUT = 1.0  # Windows: wait for the output thread to reach EOF
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # Text at the end of a read that can be the start of a JWT.
@@ -347,25 +351,47 @@ class TokenContentIterator:
     def _run_pelican_windows(self, cmd: list[str]) -> str | None:
         """Inherit the console so pelican handles its prompts; capture output through a pipe."""
         process = subprocess.Popen(cmd, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
-        assert process.stdout is not None
+        stdout = process.stdout
+        assert stdout is not None
+        # Windows has no select() for pipes, so a thread does the blocking reads
+        chunks: queue.Queue[bytes] = queue.Queue()
+
+        def pump_output() -> None:
+            try:
+                while chunk := stdout.read(self.pty_buffer_size):
+                    chunks.put(chunk)
+            except (OSError, ValueError):
+                pass
+
+        reader = threading.Thread(target=pump_output, daemon=True)
+        reader.start()
         output: list[str] = []
         echo = _TerminalEcho()
+
+        def handle(data: bytes) -> None:
+            text = data.decode("utf-8", errors="replace")
+            output.append(text)
+            echo(text)
+
         start = time.monotonic()
         try:
-            while True:
+            while process.poll() is None:
                 if time.monotonic() - start > self.oidc_timeout_seconds:
                     logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
                     return None
-                data = process.stdout.read(self.pty_buffer_size)
-                if not data:
-                    break
-                text = data.decode("utf-8", errors="replace")
-                output.append(text)
-                echo(text)
+                with contextlib.suppress(queue.Empty):
+                    handle(chunks.get(timeout=self.select_timeout))
+            reader.join(timeout=READER_JOIN_TIMEOUT)
+            while not chunks.empty():
+                handle(chunks.get_nowait())
             echo.flush()
             return self._finish(process, "".join(output))
         finally:
             _reap(process)
+            reader.join(timeout=READER_JOIN_TIMEOUT)
+            # A grandchild can hold the pipe open; closing it under a blocked read can hang
+            if not reader.is_alive():
+                stdout.close()
 
     def _run_pelican_pty(self, cmd: list[str], in_kernel: bool) -> str | None:
         """
