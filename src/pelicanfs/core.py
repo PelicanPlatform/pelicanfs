@@ -1224,7 +1224,7 @@ class PelicanFileSystem(AsyncFileSystem):
             path = parsed.path
             if parsed.netloc:
                 # Handle malformed osdf://host/path by treating netloc as part of path
-                path = "/" + parsed.netloc + parsed.path
+                path = f"/{parsed.netloc}{parsed.path}"
         elif parsed.scheme == "pelican":
             discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
