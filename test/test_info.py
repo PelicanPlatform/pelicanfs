@@ -61,6 +61,32 @@ def test_info(httpserver: HTTPServer, get_client, get_webdav_client):
     assert result["type"] == "file"
 
 
+def test_info_collection(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    foo_bar_url = httpserver.url_for("foo/bar")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": "namespace=/foo",
+        },
+    )
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("")
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(top_listing_response, status=207, content_type="application/xml")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        get_webdav_client=get_webdav_client,
+        skip_instance_cache=True,
+    )
+
+    result = pelfs.info("/foo/bar")
+    assert result["type"] == "directory"
+    assert result["name"] == "/foo/bar/"
+
+
 def test_du(
     httpserver: HTTPServer,
     get_client,
