@@ -1236,7 +1236,24 @@ class PelicanFileSystem(AsyncFileSystem):
                 fp.r = None
             fp.url = url
             return True
+        if isinstance(fp, fshttp.HTTPStreamFile) and not fp.loc:
+            # The sync stream holds an open response, so it has to be reopened here
+            fp.r.close()
+            fp.url = url
+            try:
+                fp.r = sync(self.loop, self._open_stream_response, fp)
+            except Exception as e:
+                if not self._retarget_after_failure(fp, path, e):
+                    raise
+            return True
         return False
+
+    @staticmethod
+    async def _open_stream_response(fp):
+        """Start the GET behind an fsspec HTTPStreamFile, as its constructor does."""
+        r = await fp.session.get(fp.fs.encode_url(fp.url), **fp.kwargs).__aenter__()
+        fp.fs._raise_not_found_for_status(r, fp.url)
+        return r
 
     def _io_wrapper(self, fp, path):
         """
