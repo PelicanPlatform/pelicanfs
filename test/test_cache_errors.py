@@ -14,8 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import aiohttp
 import pytest
 from pytest_httpserver import HTTPServer
+from werkzeug.wrappers import Response
 
 from pelicanfs.core import PelicanFileSystem
 from pelicanfs.exceptions import NoAvailableSource
@@ -128,3 +130,108 @@ def test_double_cache_error_does_not_crash(httpserver: HTTPServer, get_client):
     # Second call must not crash with ValueError even though the cache is already evicted
     with pytest.raises(NoAvailableSource):
         pelfs.cat("/foo/bar")
+
+
+def _setup_two_caches(httpserver, httpserver2, path="/foo/bar"):
+    """Director lists httpserver as the first cache and httpserver2 as the second."""
+    httpserver2.clear()
+    url1 = httpserver.url_for(path)
+    url2 = httpserver2.url_for(path)
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request(path, method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{url1}>; rel="duplicate"; pri=1; depth=1, <{url2}>; rel="duplicate"; pri=2; depth=1',
+            "Location": url1,
+            "X-Pelican-Namespace": "namespace=/foo",
+        },
+    )
+    return url1, url2
+
+
+def _serve_range(data: bytes):
+    """Handler that honours a single bytes=start-end Range header with a 206."""
+
+    def handler(request):
+        rng = request.headers.get("Range")
+        if not rng:
+            return Response(data)
+        start, end = rng.removeprefix("bytes=").split("-")
+        start = int(start)
+        end = int(end) + 1 if end else len(data)
+        return Response(data[start:end], status=206, headers={"Content-Range": f"bytes {start}-{end - 1}/{len(data)}"})
+
+    return handler
+
+
+def _assert_first_cache_evicted(pelfs, url1, url2):
+    namespace_info = pelfs._get_prefix_info("/foo/bar")
+    assert namespace_info is not None
+    hosts = namespace_info.cache_manager._cache_list
+    assert not any(h.startswith(url1.rsplit("/foo", 1)[0]) for h in hosts)
+    assert any(h.startswith(url2.rsplit("/foo", 1)[0]) for h in hosts)
+
+
+def test_cat_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A non-404 failure on the first cache is retried on the second within the same call."""
+    url1, url2 = _setup_two_caches(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert pelfs.cat("/foo/bar") == b"hello"
+    _assert_first_cache_evicted(pelfs, url1, url2)
+
+
+def test_cat_all_caches_fail_raises_original_error(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """When every cache fails, the caller sees the I/O error rather than a bare NoAvailableSource."""
+    _setup_two_caches(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="500"):
+        pelfs.cat("/foo/bar")
+
+
+def test_open_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on an open file switches to the next cache and resumes at the same offset."""
+    url1, url2 = _setup_two_caches(httpserver, httpserver2)
+    # HEAD supplies the size so fsspec builds a range-capable HTTPFile
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello world")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello world"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "rb", cache_type="none") as fp:
+        fp.seek(6)
+        assert fp.read() == b"world"
+    _assert_first_cache_evicted(pelfs, url1, url2)
+
+
+def test_open_async_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on an async stream that has not yet returned data switches cache."""
+    from fsspec.asyn import sync
+
+    url1, url2 = _setup_two_caches(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    async def _read():
+        fp = await pelfs.open_async("/foo/bar")
+        try:
+            return await fp.read()
+        finally:
+            await fp.close()
+
+    assert sync(pelfs.loop, _read) == b"hello"
+    _assert_first_cache_evicted(pelfs, url1, url2)
