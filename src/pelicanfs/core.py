@@ -38,6 +38,8 @@ from aiowebdav2.exceptions import (
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
 )
+from aiowebdav2.parser import WebDavXmlUtils
+from aiowebdav2.urn import Urn
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.utils import glob_translate
 
@@ -1418,14 +1420,27 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _info(self, path, **kwargs):
         parts = urllib.parse.urlparse(path)
-        async with self.get_webdav_client(self._webdav_options(path)) as client:
+        options = self._webdav_options(path)
+        async with self.get_webdav_client(options) as client:
+            # Client.info drops resourcetype, so do its PROPFIND here and parse both
+            remote_path = Urn(parts.path).path()
             try:
-                result = await client.info(parts.path)
+                response = await client.execute_request(action="info", path=remote_path)
+                resource = WebDavXmlUtils.extract_response_for_path(
+                    content=await response.read(),
+                    path=remote_path,
+                    hostname=options["hostname"],
+                )
             except RemoteResourceNotFoundError:
                 raise FileNotFoundError(path) from None
+            result = WebDavXmlUtils.get_info_from_response(resource)
+            isdir = resource.find(".//{DAV:}resourcetype/{DAV:}collection") is not None
+            # Match the names _ls_real gives collections
+            if isdir and not path.endswith("/"):
+                path += "/"
             info = {
                 "name": path,
-                "type": "file",
+                "type": "directory" if isdir else "file",
                 "size": int(result.get("size", 0)),
                 "mimetype": result.get("content_type", ""),
                 "mtime": result.get("modified", ""),
