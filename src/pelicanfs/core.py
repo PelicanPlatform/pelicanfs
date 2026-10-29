@@ -53,7 +53,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .token_generator import TokenGenerator, TokenOperation
+from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -861,7 +861,7 @@ class PelicanFileSystem(AsyncFileSystem):
         with self._namespace_lock:
             # Find the longest matching prefix
             for prefix in sorted(self._namespace_cache.keys(), key=len, reverse=True):
-                if path.startswith(prefix):
+                if _is_path_prefix(path, prefix.rstrip("/")):
                     cache_manager = self._namespace_cache.get(prefix)
                     if cache_manager:
                         return NamespaceInfo(cache_manager, cache_manager.director_response)
