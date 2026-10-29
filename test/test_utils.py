@@ -64,6 +64,10 @@ def test_remove_hostname():
         ("pelican://osg-htc.org", "osdf:///namespace/path", "/namespace/path", "pelican://osg-htc.org/"),
         # Fresh filesystem receiving osdf:// should auto-configure for OSDF
         ("", "osdf:///namespace/path", "/namespace/path", "pelican://osg-htc.org/"),
+        # osdf://host/path keeps the trailing slash, like osdf:///path
+        ("", "osdf:///namespace/dir/", "/namespace/dir/", "pelican://osg-htc.org/"),
+        ("", "osdf://namespace/dir/", "/namespace/dir/", "pelican://osg-htc.org/"),
+        ("", "osdf://namespace/dir", "/namespace/dir", "pelican://osg-htc.org/"),
         # Fresh filesystem receiving pelican:// should set discovery from URL
         ("", "pelican://new-discovery-url.org/p/", "/p/", "pelican://new-discovery-url.org/"),
     ],

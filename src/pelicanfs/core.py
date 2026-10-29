@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import overload
 
 import aiohttp
@@ -1224,7 +1224,7 @@ class PelicanFileSystem(AsyncFileSystem):
             path = parsed.path
             if parsed.netloc:
                 # Handle malformed osdf://host/path by treating netloc as part of path
-                path = str(PurePosixPath("/" + parsed.netloc + parsed.path))
+                path = "/" + parsed.netloc + parsed.path
         elif parsed.scheme == "pelican":
             discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
