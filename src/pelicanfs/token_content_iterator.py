@@ -19,10 +19,12 @@ import json
 import logging
 import os
 import platform
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -44,6 +46,7 @@ logger = logging.getLogger("fsspec.pelican")
 DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
 DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
+READER_JOIN_TIMEOUT = 1.0  # Windows: wait for the output thread to reach EOF
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -209,16 +212,24 @@ class TokenContentIterator:
                     bufsize=0,  # Unbuffered for real-time output
                 )
 
+                # Windows has no select() for pipes, so a thread does the blocking reads
+                output_queue: queue.Queue[bytes] = queue.Queue()
+
+                def pump_output(stream):
+                    try:
+                        while chunk := stream.read(self.pty_buffer_size):
+                            output_queue.put(chunk)
+                    except (OSError, ValueError):
+                        pass
+
+                reader_thread = threading.Thread(target=pump_output, args=(process.stdout,), daemon=True)
+                reader_thread.start()
+
                 def read_from_pty() -> bytes:
                     """Read available data from subprocess stdout"""
                     try:
-                        # Non-blocking read with timeout
-                        import msvcrt  # noqa: PLC0415
-
-                        if process.stdout and (msvcrt.kbhit() or process.stdout):
-                            return process.stdout.read(self.pty_buffer_size)
-                        return b""
-                    except Exception:
+                        return output_queue.get(timeout=self.select_timeout)
+                    except queue.Empty:
                         return b""
 
                 def write_to_pty(data):
@@ -337,16 +348,17 @@ class TokenContentIterator:
                     # Check timeout
                     if time.time() - start_time > self.oidc_timeout_seconds:
                         process.kill()
+                        process.wait()
                         logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
                         return None
 
                     # Check if process is still running
                     if not is_alive():
                         # Process finished, read any remaining output
-                        while True:
-                            data = read_from_pty()
-                            if not data:
-                                break
+                        if _IS_WINDOWS:
+                            reader_thread.join(timeout=READER_JOIN_TIMEOUT)
+                        while read_and_echo_output():
+                            pass
                         break
 
                     # Read subprocess output
@@ -364,7 +376,12 @@ class TokenContentIterator:
                             logger.debug("Error writing redirected stdin to PTY: %s", e)
             finally:
                 # Cleanup platform-specific resources
-                if not _IS_WINDOWS:
+                if _IS_WINDOWS:
+                    reader_thread.join(timeout=READER_JOIN_TIMEOUT)
+                    # A grandchild can hold the pipe open; closing it under a blocked read can hang
+                    if process.stdout and not reader_thread.is_alive():
+                        process.stdout.close()
+                else:
                     # Unix cleanup
                     os.close(master_fd)
 
