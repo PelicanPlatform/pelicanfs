@@ -147,6 +147,13 @@ def _serve_range(data: bytes):
     return handler
 
 
+def _broken_body(request):
+    """A 200 whose body is shorter than its Content-Length, so the client fails on its first read."""
+    response = Response(iter([b"he"]), status=200, direct_passthrough=True)
+    response.headers["Content-Length"] = "5"
+    return response
+
+
 def _assert_first_cache_evicted(pelfs, httpserver, httpserver2):
     namespace_info = pelfs._get_prefix_info("/foo/bar")
     assert namespace_info is not None
@@ -194,6 +201,21 @@ def test_open_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HT
     with pelfs.open("/foo/bar", "rb", cache_type="none") as fp:
         fp.seek(6)
         assert fp.read() == b"world"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_stream_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on a sync stream that has not yet returned data switches cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(_broken_body)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    # block_size=0 makes fsspec build a streaming HTTPStreamFile
+    with pelfs.open("/foo/bar", "rb", block_size=0) as fp:
+        assert fp.read() == b"hello"
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
 
 
