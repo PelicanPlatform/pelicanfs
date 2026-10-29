@@ -1078,8 +1078,8 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "maxdepth must be at least 1"
             raise ValueError(msg)
 
-        ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
-        path = self._strip_protocol(path)
+        ends_with_slash = path.endswith("/")
+        path = self._check_fspath(path)
         append_slash_to_dirname = ends_with_slash or path.endswith(("/**", "/*"))
         idx_star = path.find("*") if path.find("*") >= 0 else len(path)
         idx_brace = path.find("[") if path.find("[") >= 0 else len(path)
