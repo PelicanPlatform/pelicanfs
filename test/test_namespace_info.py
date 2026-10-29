@@ -417,3 +417,17 @@ def test_parse_director_response_with_malformed_issuer_urls():
     # Malformed URLs should be filtered out
     assert "invalid-url" not in director_response.x_pel_tok_gen_hdr.issuers
     assert "not-a-url" not in director_response.x_pel_tok_gen_hdr.issuers
+
+
+def test_get_prefix_info_matches_path_boundaries():
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
+    pelfs._namespace_cache["/foo"] = _CacheManager(["https://a.example.com"], None)
+    pelfs._namespace_cache["/bar/"] = _CacheManager(["https://b.example.com"], None)
+
+    assert pelfs._get_prefix_info("/foo") is not None
+    assert pelfs._get_prefix_info("/foo/x") is not None
+    assert pelfs._get_prefix_info("/foobar/x") is None
+
+    assert pelfs._get_prefix_info("/bar") is not None
+    assert pelfs._get_prefix_info("/bar/x") is not None
+    assert pelfs._get_prefix_info("/barbaz/x") is None
