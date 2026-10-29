@@ -36,6 +36,7 @@ repos:
           - cachetools>=7.2.4,<8
           - fsspec
           - igwn-auth-utils
+          - scitokens
           - types-cachetools
 -   repo: https://github.com/zizmorcore/zizmor-pre-commit
     rev: c92afdf2c6ca336aaa8f39e2bd8d48f62dbd8e1f  # frozen: v1.31.1
