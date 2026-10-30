@@ -20,7 +20,7 @@ from fsspec.asyn import sync
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
-from pelicanfs.core import PelicanFileSystem
+from pelicanfs.core import MAX_CACHE_ATTEMPTS, PelicanFileSystem
 from pelicanfs.exceptions import NoAvailableSource
 
 
@@ -251,3 +251,37 @@ def test_open_text_read_retries_on_next_cache(httpserver: HTTPServer, httpserver
     with pelfs.open("/foo/bar", "r", cache_type="none") as fp:
         assert fp.read() == "hello"
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_non_transport_error_does_not_evict_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):
+    """An error that is not a cache failure is raised at once and leaves every cache in place."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    async def broken_cat_file(*args, **kwargs):
+        msg = "not a cache problem"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(pelfs.http_file_system, "_cat_file", broken_cat_file)
+
+    with pytest.raises(ValueError, match="not a cache problem"):
+        pelfs.cat("/foo/bar")
+    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
+    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
+
+
+def test_retry_stops_when_cache_is_not_evicted(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):
+    """If a failed cache stays in the list, the retry loop still stops."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+    monkeypatch.setattr(pelfs, "_bad_cache", lambda *_: None)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="500"):
+        pelfs.cat("/foo/bar")
+    # One GET is the director redirect
+    assert len([req for req, _ in httpserver.log if req.method == "GET" and req.path == "/foo/bar"]) == MAX_CACHE_ATTEMPTS + 1
