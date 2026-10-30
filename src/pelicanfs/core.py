@@ -18,16 +18,18 @@ import asyncio
 import contextvars
 import functools
 import inspect
+import io
 import logging
 import re
 import threading
 import urllib.parse
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import overload
+from typing import TypeVar, overload
 
 import aiohttp
 import cachetools
@@ -56,6 +58,10 @@ from .exceptions import (
 from .token_generator import TokenGenerator, TokenOperation
 
 logger = logging.getLogger("fsspec.pelican")
+
+_T = TypeVar("_T")
+_HTTPReadFile = fshttp.HTTPFile | fshttp.HTTPStreamFile | fshttp.AsyncStreamFile
+
 
 # How long before a generated token's expiry it is retired and a new one generated. A
 # token sent right at its expiry would be expired by the time it reaches the server.
@@ -1197,7 +1203,7 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, error, retry[0])
         return retry
 
-    async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt):
+    async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt: Callable[[str], Awaitable[_T]]) -> _T:
         """
         Call attempt(data_url) on the current cache, moving to the next cache on failure.
         Records a successful access and returns attempt's result.
@@ -1217,7 +1223,7 @@ class PelicanFileSystem(AsyncFileSystem):
             self._access_stats.add_response(path, _AccessResp(data_url, True))
         return result
 
-    def _retarget_after_failure(self, fp, path: str, error: Exception) -> bool:
+    def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception) -> bool:
         """
         Point an open fsspec http file at the next cache after a read failed. Range-based
         files resume at the current offset. A streaming file can only be restarted before
@@ -1249,13 +1255,14 @@ class PelicanFileSystem(AsyncFileSystem):
         return True
 
     @staticmethod
-    async def _open_stream_response(fp):
+    async def _open_stream_response(fp: fshttp.HTTPStreamFile) -> aiohttp.ClientResponse:
         """Start the GET behind an fsspec HTTPStreamFile, as its constructor does."""
-        r = await fp.session.get(fp.fs.encode_url(fp.url), **fp.kwargs).__aenter__()
+        session = await fp.fs.set_session()
+        r = await session.get(fp.fs.encode_url(fp.url), **fp.kwargs).__aenter__()
         fp.fs._raise_not_found_for_status(r, fp.url)
         return r
 
-    def _io_wrapper(self, fp, path):
+    def _io_wrapper(self, fp: fshttp.HTTPFile | fshttp.HTTPStreamFile, path: str) -> Callable[..., bytes]:
         """
         Wrap fp.read so a failure marks the cache as bad and the read is retried
         on the next cache.
@@ -1272,7 +1279,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return io_wrapper
 
-    def _async_io_wrapper(self, fp, path):
+    def _async_io_wrapper(self, fp: fshttp.AsyncStreamFile, path: str) -> Callable[..., Awaitable[bytes]]:
         """
         Async counterpart of _io_wrapper.
         """
@@ -1413,7 +1420,10 @@ class PelicanFileSystem(AsyncFileSystem):
                 if retry is None:
                     raise
                 data_url, director_response = retry
-        fp.read = self._io_wrapper(fp, path)
+        # Text mode wraps the binary file; its reads go through the binary file's read
+        raw = fp.buffer if isinstance(fp, io.TextIOWrapper) else fp
+        if isinstance(raw, fshttp.HTTPFile | fshttp.HTTPStreamFile):
+            raw.read = self._io_wrapper(raw, path)
         if not self.direct_reads:
             self._access_stats.add_response(path, _AccessResp(data_url, True))
         return fp
@@ -1426,7 +1436,7 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "Write mode is not supported for open_async(). Use put() or pipe() to write files."
             raise NotImplementedError(msg)
 
-        async def attempt(data_url):
+        async def attempt(data_url: str) -> fshttp.AsyncStreamFile:
             logger.debug("Running open_async on %s...", data_url)
             return await self.http_file_system.open_async(data_url, **kwargs)
 
@@ -1451,7 +1461,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
 
-            async def attempt(data_url):
+            async def attempt(data_url: str):
                 logger.debug("Calling %s using the following url: %s", func, data_url)
                 return await func(self, data_url, *rest, **kwargs)
 

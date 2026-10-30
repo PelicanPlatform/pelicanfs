@@ -237,3 +237,17 @@ def test_open_async_read_retries_on_next_cache(httpserver: HTTPServer, httpserve
 
     assert sync(pelfs.loop, _read) == b"hello"
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_text_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """Text mode wraps the binary file, and its reads still switch cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "r", cache_type="none") as fp:
+        assert fp.read() == "hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
