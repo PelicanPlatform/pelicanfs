@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import contextlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -43,7 +44,7 @@ class XPelTokGen:
 
     issuers: list[str] = field(default_factory=list)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Validate and filter issuers to ensure they are valid URLs
         validated_issuers = []
         for issuer in self.issuers:
@@ -68,7 +69,7 @@ class DirectorResponse:
     x_pel_tok_gen_hdr: XPelTokGen | None = None
 
 
-def parse_director_response(headers: dict) -> DirectorResponse:
+def parse_director_response(headers: Mapping[str, str]) -> DirectorResponse:
     """
     Parse director response headers into a DirectorResponse object.
 
@@ -159,7 +160,7 @@ def parse_director_response(headers: dict) -> DirectorResponse:
     return DirectorResponse(object_servers=object_servers, location=location, x_pel_auth_hdr=x_pel_auth_hdr, x_pel_ns_hdr=x_pel_ns_hdr, x_pel_tok_gen_hdr=x_pel_tok_gen_hdr)
 
 
-def get_collections_url(headers: dict[str, str]) -> str | None:
+def get_collections_url(headers: Mapping[str, str]) -> str | None:
     """
     Get the collections URL from the director response headers
     """
