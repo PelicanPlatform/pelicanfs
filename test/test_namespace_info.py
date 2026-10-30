@@ -417,3 +417,30 @@ def test_parse_director_response_with_malformed_issuer_urls():
     # Malformed URLs should be filtered out
     assert "invalid-url" not in director_response.x_pel_tok_gen_hdr.issuers
     assert "not-a-url" not in director_response.x_pel_tok_gen_hdr.issuers
+
+
+def test_get_dirlist_url_keeps_known_caches(httpserver, get_client):
+    """A namespace entry without a director response keeps its caches when get_dirlist_url fills it in."""
+    from fsspec.asyn import sync
+
+    from pelicanfs.core import PelicanFileSystem, _CacheManager
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": '<https://collections.example.com/foo/bar>; rel="collection"; pri=1',
+            "X-Pelican-Namespace": "namespace=/foo, collections-url=https://collections.example.com",
+        },
+    )
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+    pelfs._namespace_cache["/foo"] = _CacheManager(["https://cache.example.com"])
+
+    dirlist_url, _ = sync(pelfs.loop, pelfs.get_dirlist_url, "/foo/bar")
+
+    assert dirlist_url == "https://collections.example.com/foo/bar"
+    cache_manager = pelfs._namespace_cache["/foo"]
+    assert cache_manager.director_response is not None
+    assert cache_manager._cache_list == ["https://cache.example.com"]

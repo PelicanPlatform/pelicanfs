@@ -14,27 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import aiohttp
 import pytest
+from fsspec.asyn import sync
 from pytest_httpserver import HTTPServer
+from werkzeug.wrappers import Response
 
-from pelicanfs.core import PelicanFileSystem
+from pelicanfs.core import MAX_CACHE_ATTEMPTS, PelicanFileSystem
 from pelicanfs.exceptions import NoAvailableSource
 
 
-def _setup_director(httpserver, path="/foo/bar"):
-    """Register the pelican-configuration and a single director 307 redirect for path."""
-    url = httpserver.url_for(path)
+def _setup_director(httpserver, second=None, path="/foo/bar"):
+    """
+    Register the pelican-configuration and a single director 307 redirect for path.
+    httpserver is the first cache; second, if given, is listed as the next cache.
+    """
+    caches = [httpserver] if second is None else [httpserver, second]
+    urls = [server.url_for(path) for server in caches]
+    link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request(path, method="GET").respond_with_data(
         "",
         status=307,
-        headers={
-            "Link": f'<{url}>; rel="duplicate"; pri=1; depth=1',
-            "Location": url,
-            "X-Pelican-Namespace": "namespace=/foo",
-        },
+        headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo"},
     )
-    return url
+    return urls[0] if second is None else urls
 
 
 def test_cat_file_404_raises_file_not_found(httpserver: HTTPServer, get_client):
@@ -80,8 +84,6 @@ def test_404_does_not_evict_cache(httpserver: HTTPServer, get_client):
 
 def test_open_async_404_does_not_evict_cache(httpserver: HTTPServer, get_client):
     """A 404 surfacing at read() time via open_async must not evict the cache."""
-    from fsspec.asyn import sync
-
     _setup_director(httpserver)
     # get_working_cache probes with HEAD, then open_async probes with HEAD again for info()
     # both return 404 since the file doesn't exist; two GETs follow (info + read)
@@ -128,3 +130,158 @@ def test_double_cache_error_does_not_crash(httpserver: HTTPServer, get_client):
     # Second call must not crash with ValueError even though the cache is already evicted
     with pytest.raises(NoAvailableSource):
         pelfs.cat("/foo/bar")
+
+
+def _serve_range(data: bytes):
+    """Handler that honours a single bytes=start-end Range header with a 206."""
+
+    def handler(request):
+        rng = request.headers.get("Range")
+        if not rng:
+            return Response(data)
+        start, end = rng.removeprefix("bytes=").split("-")
+        start = int(start)
+        end = int(end) + 1 if end else len(data)
+        return Response(data[start:end], status=206, headers={"Content-Range": f"bytes {start}-{end - 1}/{len(data)}"})
+
+    return handler
+
+
+def _broken_body(request):
+    """A 200 whose body is shorter than its Content-Length, so the client fails on its first read."""
+    response = Response(iter([b"he"]), status=200, direct_passthrough=True)
+    response.headers["Content-Length"] = "5"
+    return response
+
+
+def _assert_first_cache_evicted(pelfs, httpserver, httpserver2):
+    namespace_info = pelfs._get_prefix_info("/foo/bar")
+    assert namespace_info is not None
+    hosts = namespace_info.cache_manager._cache_list
+    assert httpserver.url_for("").rstrip("/") not in hosts
+    assert httpserver2.url_for("").rstrip("/") in hosts
+
+
+def test_cat_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A non-404 failure on the first cache is retried on the second within the same call."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert pelfs.cat("/foo/bar") == b"hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_cat_all_caches_fail_raises_original_error(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """When every cache fails, the caller sees the I/O error rather than a bare NoAvailableSource."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="500"):
+        pelfs.cat("/foo/bar")
+
+
+def test_open_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on an open file switches to the next cache and resumes at the same offset."""
+    _setup_director(httpserver, httpserver2)
+    # HEAD supplies the size so fsspec builds a range-capable HTTPFile
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello world")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello world"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "rb", cache_type="none") as fp:
+        fp.seek(6)
+        assert fp.read() == b"world"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_stream_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on a sync stream that has not yet returned data switches cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(_broken_body)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    # block_size=0 makes fsspec build a streaming HTTPStreamFile
+    with pelfs.open("/foo/bar", "rb", block_size=0) as fp:
+        assert fp.read() == b"hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_async_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read() failure on an async stream that has not yet returned data switches cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    async def _read():
+        fp = await pelfs.open_async("/foo/bar")
+        try:
+            return await fp.read()
+        finally:
+            await fp.close()
+
+    assert sync(pelfs.loop, _read) == b"hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_text_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """Text mode wraps the binary file, and its reads still switch cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "r", cache_type="none") as fp:
+        assert fp.read() == "hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_non_transport_error_does_not_evict_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):
+    """An error that is not a cache failure is raised at once and leaves every cache in place."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    async def broken_cat_file(*args, **kwargs):
+        msg = "not a cache problem"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(pelfs.http_file_system, "_cat_file", broken_cat_file)
+
+    with pytest.raises(ValueError, match="not a cache problem"):
+        pelfs.cat("/foo/bar")
+    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
+    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
+
+
+def test_retry_stops_when_cache_is_not_evicted(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):
+    """If a failed cache stays in the list, the retry loop still stops."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+    monkeypatch.setattr(pelfs, "_bad_cache", lambda *_: None)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="500"):
+        pelfs.cat("/foo/bar")
+    # One GET is the director redirect
+    assert len([req for req, _ in httpserver.log if req.method == "GET" and req.path == "/foo/bar"]) == MAX_CACHE_ATTEMPTS + 1
