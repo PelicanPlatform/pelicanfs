@@ -1227,26 +1227,26 @@ class PelicanFileSystem(AsyncFileSystem):
         if retry is None:
             return False
         url = retry[0]
-        if isinstance(fp, fshttp.HTTPFile):
-            fp.url = url
-            return True
-        if isinstance(fp, fshttp.AsyncStreamFile) and not fp.loc:
-            if fp.r is not None:
+        match fp:
+            case fshttp.HTTPFile():
+                fp.url = url
+            case fshttp.AsyncStreamFile(loc=0):
+                if fp.r is not None:
+                    fp.r.close()
+                    fp.r = None
+                fp.url = url
+            case fshttp.HTTPStreamFile(loc=0):
+                # The sync stream holds an open response, so it has to be reopened here
                 fp.r.close()
-                fp.r = None
-            fp.url = url
-            return True
-        if isinstance(fp, fshttp.HTTPStreamFile) and not fp.loc:
-            # The sync stream holds an open response, so it has to be reopened here
-            fp.r.close()
-            fp.url = url
-            try:
-                fp.r = sync(self.loop, self._open_stream_response, fp)
-            except Exception as e:
-                if not self._retarget_after_failure(fp, path, e):
-                    raise
-            return True
-        return False
+                fp.url = url
+                try:
+                    fp.r = sync(self.loop, self._open_stream_response, fp)
+                except Exception as e:
+                    if not self._retarget_after_failure(fp, path, e):
+                        raise
+            case _:
+                return False
+        return True
 
     @staticmethod
     async def _open_stream_response(fp):
