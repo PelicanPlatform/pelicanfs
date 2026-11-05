@@ -68,7 +68,7 @@ def scope():
     return "storage.read"
 
 
-def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
+def create_token(ec_keys, issuer, exp_offset_sec, scope_val, ver=None) -> SciToken:
     """Create a signed SciToken using EC private key object."""
 
     # Use the private key object for signing
@@ -76,6 +76,8 @@ def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
 
     token["sub"] = "test-subject"
     token["scope"] = scope_val
+    if ver:
+        token["ver"] = ver
 
     # We can either set exp and iss as claims, or rely on serialize to set them
     # Let's rely on serialize for iss and exp, so only set sub, aud, scope here
@@ -266,3 +268,39 @@ def test_root_scope_matches_every_path(ec_keys, issuer):
     assert valid
     valid, _ = token_is_valid_and_acceptable(token, object_name="/foo/bar", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
+
+
+@pytest.mark.parametrize("ver", ["scitoken:2.0", "scitokens:2.0"])
+@pytest.mark.parametrize(
+    ("scope_val", "operation", "object_name"),
+    [
+        ("read:/foo", TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read", TokenOperation.TokenSharedRead, "/ns/foo/file.txt"),
+        ("write:/foo", TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("write", TokenOperation.TokenSharedWrite, "/ns/foo/file.txt"),
+    ],
+)
+def test_scitoken_scopes_accepted(ec_keys, issuer, ver, scope_val, operation, object_name):
+    token = create_token(ec_keys, issuer, 3600, scope_val, ver=ver)
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name=object_name, dir_resp=mock_dir_resp("/ns", [issuer]), operation=operation)
+
+    assert valid
+
+
+@pytest.mark.parametrize(
+    ("scope_val", "ver", "operation", "object_name"),
+    [
+        ("read:/foo", "scitoken:2.0", TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("write:/foo", "scitoken:2.0", TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read:/foo", "scitoken:2.0", TokenOperation.TokenRead, "/ns/bar/file.txt"),
+        ("read:/foo", "scitoken:1.0", TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read:/foo", None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+    ],
+)
+def test_scitoken_scopes_rejected(ec_keys, issuer, scope_val, ver, operation, object_name):
+    token = create_token(ec_keys, issuer, 3600, scope_val, ver=ver)
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name=object_name, dir_resp=mock_dir_resp("/ns", [issuer]), operation=operation)
+
+    assert not valid

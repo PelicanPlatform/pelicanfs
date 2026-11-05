@@ -270,10 +270,13 @@ def token_is_valid_and_acceptable(
     trace(logger, "allowed issuers=%s token issuer=%s", issuers, token.get("iss"))
 
     # Get the operation type and set the required scopes
+    ver = token.get("ver")
+    # Pelican also accepts the plural spelling.
+    is_scitoken = isinstance(ver, str) and ver.startswith(("scitoken:2.0", "scitokens:2.0"))
     if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
-        ok_scopes = ["storage.modify", "storage.create"]
+        ok_scopes = ["storage.modify", "storage.create", *(["write"] if is_scitoken else [])]
     elif operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
-        ok_scopes = ["storage.read"]
+        ok_scopes = ["storage.read", *(["read"] if is_scitoken else [])]
     else:
         ok_scopes = []
 
