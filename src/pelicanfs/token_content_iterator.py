@@ -50,8 +50,8 @@ DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
-# A prompt ends the line with ":" and no newline. Prose such as "asked for this
-# password whenever a new session is started." must not match.
+# A prompt line ends with ":" (pelican prints it with or without a trailing newline).
+# Prose such as "asked for this password whenever a new session is started." must not match.
 _PASSWORD_PROMPT_PATTERN = re.compile(r"[Pp]assword[^:\n]*:\s*$")
 _DEVICE_URL_PATTERN = re.compile(r"https?://\S+/(?:device|activate|authorize|login|oauth)\S*")
 
@@ -67,6 +67,13 @@ def _running_in_ipykernel() -> bool:
         return False
     shell = ipython.get_ipython()
     return shell is not None and type(shell).__name__ == "ZMQInteractiveShell"
+
+
+def _send_password(master_fd: int) -> None:
+    """Ask through getpass (a masked box in notebooks) and answer the prompt on the pty."""
+    password = getpass.getpass("")
+    os.write(master_fd, (password + "\n").encode())
+    del password
 
 
 def _display_device_url(url: str) -> None:
@@ -472,12 +479,12 @@ class TokenContentIterator:
                         print(_redact(line), end="", flush=True)  # noqa: T201
                         if match := _DEVICE_URL_PATTERN.search(line):
                             _display_device_url(match.group(0))
+                        elif _PASSWORD_PROMPT_PATTERN.search(line):
+                            _send_password(master_fd)
                     if _PASSWORD_PROMPT_PATTERN.search(pending):
                         print(pending, end="", flush=True)  # noqa: T201
                         pending = ""
-                        password = getpass.getpass("")
-                        os.write(master_fd, (password + "\n").encode())
-                        del password
+                        _send_password(master_fd)
                 elif process.poll() is not None:
                     break
         finally:

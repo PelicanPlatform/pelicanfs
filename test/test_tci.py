@@ -506,7 +506,10 @@ PELICAN_PREAMBLE = (
     b"This prevents the need to reinitialize the authorization for each transfer.\n"
     b"You will be asked for this password whenever a new session is started.\n"
 )
+# pelican 7.23 wording; the prompt has no trailing newline.
 PELICAN_PROMPT = b"Please provide a new password to encrypt the local OSDF client configuration file:"
+# Current pelican wording (config/encrypted.go); the prompt is written with Fprintln.
+PELICAN_PROMPT_LN = b"Please create a new password to protect your local credentials: \n"
 PELICAN_URL_LINE = b"To approve credentials for this operation, please navigate to the following URL and approve the request:\nhttps://issuer.example/device?user_code=ABC-123\n"
 
 
@@ -571,6 +574,16 @@ def test_oidc_jupyter_password_prompt(jupyter_pty, capsys):
     assert "hunter2" not in out
     assert FAKE_JWT not in out
     assert "[TOKEN_REDACTED]" in out
+
+
+@needs_pty
+def test_oidc_jupyter_password_prompt_with_newline(jupyter_pty, capsys):
+    jupyter_pty["feed"]([PELICAN_PROMPT_LN, b"\n" + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    jupyter_pty["getpass"].assert_called_once()
+    jupyter_pty["write"].assert_called_once_with(100, b"hunter2\n")
+    assert "local credentials:" in capsys.readouterr().out
 
 
 @needs_pty
