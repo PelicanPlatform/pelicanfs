@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod
+from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho
 
 needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
 
@@ -731,6 +731,49 @@ def test_oidc_terminal_path_unchanged_outside_kernel(mock_getpass, mock_select, 
     mock_open_fd.assert_called_once_with("/dev/tty", os.O_RDWR)
     assert mock_popen.call_args.kwargs["stdin"] == 7
     mock_getpass.assert_not_called()
+
+
+@needs_pty
+@pytest.mark.parametrize("split", [1, 2, 5, FAKE_JWT.index(".") + 1, FAKE_JWT.rindex("."), FAKE_JWT.rindex(".") + 1, len(FAKE_JWT) - 5, len(FAKE_JWT) - 1])
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=False)
+@patch("pty.openpty", return_value=(100, 101))
+@patch("subprocess.Popen")
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("os.open", return_value=7)
+@patch("select.select")
+def test_oidc_terminal_redacts_token_split_across_reads(mock_select, mock_open_fd, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_kernel, mock_which, split, capsys):
+    process = mock_popen.return_value
+    process.returncode = 0
+    process.poll.side_effect = [None, None, 0]
+    mock_read.side_effect = [b"Token: " + FAKE_JWT[:split].encode(), FAKE_JWT[split:].encode() + b"\n", b""]
+    mock_select.side_effect = _select_for([1, 2])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    out = capsys.readouterr().out
+    signature = FAKE_JWT.rpartition(".")[2]
+    assert out.startswith("Token: ")
+    assert signature[:5] not in out
+    assert out.rstrip().endswith("REDACTED]")
+
+
+def test_terminal_echo_holds_only_a_possible_token(capsys):
+    echo = _TerminalEcho()
+
+    echo("Password: ")
+    assert capsys.readouterr().out == "Password: "
+
+    echo("The code")
+    assert capsys.readouterr().out == "The cod"
+
+    echo(" is 123\n")
+    assert capsys.readouterr().out == "e is 123\n"
+
+    echo("last line e")
+    echo.flush()
+    assert capsys.readouterr().out == "last line e"
 
 
 def test_running_in_ipykernel_detection(monkeypatch):
