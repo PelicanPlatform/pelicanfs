@@ -423,10 +423,10 @@ def test_open_compressed_read_retries_on_next_cache(httpserver: HTTPServer, http
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
 
 
-def test_open_compressed_stream_failure_marks_cache_bad(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
-    """A compressed stream that already returned data cannot fail over, but the cache is still marked."""
+def test_open_compressed_stream_failure_marks_cache_bad(httpserver: HTTPServer, get_client):
+    """A compressed stream failure marks the cache, with no other cache to mask it."""
     data = gzip.compress(b"hello")
-    _setup_director(httpserver, httpserver2)
+    _setup_director(httpserver)
 
     def truncated(_request):
         response = Response(iter([data[:4]]), status=200, direct_passthrough=True)
@@ -444,7 +444,7 @@ def test_open_compressed_stream_failure_marks_cache_bad(httpserver: HTTPServer, 
         with pytest.raises(aiohttp.ClientError):
             fp.read()
     stream.close()
-    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+    assert not pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
 
 
 def _stream_read(pelfs):
