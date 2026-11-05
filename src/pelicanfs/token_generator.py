@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import logging
+import posixpath
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -192,6 +193,7 @@ def _is_path_prefix(object_name: str, resource: str) -> bool:
     - _is_path_prefix("/foo/barz/file.txt", "/foo/bar") -> False
     - _is_path_prefix("/foo/bar", "/foo/bar") -> True
     """
+    resource = resource.rstrip("/")  # "/" covers every path
     if not object_name.startswith(resource):
         return False
 
@@ -205,6 +207,26 @@ def _is_path_prefix(object_name: str, resource: str) -> bool:
         return object_name[len(resource)] == "/"
 
     return False
+
+
+def _scope_target_path(object_name: str, dir_resp: DirectorResponse | None) -> str | None:
+    """
+    Path that token scopes apply to, as in pelican's tokenIsAcceptable.
+
+    Scopes are relative to the issuer base path (or the namespace when the
+    director sends no base path). Without either header the full path is used.
+    Returns None when the object is outside that prefix.
+    """
+    object_name = posixpath.normpath(object_name)
+    tok_gen = getattr(dir_resp, "x_pel_tok_gen_hdr", None)
+    base_paths = getattr(tok_gen, "base_paths", None)
+    base = base_paths[0] if base_paths else getattr(getattr(dir_resp, "x_pel_ns_hdr", None), "namespace", None)
+    if not base:
+        return object_name
+    if not _is_path_prefix(object_name, base):
+        return None
+    relative = object_name[len(base.rstrip("/")) :]
+    return posixpath.normpath("/" + relative.lstrip("/"))
 
 
 def token_is_valid_and_acceptable(
@@ -257,6 +279,11 @@ def token_is_valid_and_acceptable(
 
     trace(logger, "required scopes=%s token scopes=%s", ok_scopes, token.get("scope"))
 
+    target = _scope_target_path(object_name, dir_resp)
+    if target is None:
+        logger.debug("Object %s is outside the token namespace", object_name)
+        return False, expiry_dt
+
     token_scopes = token.get("scope") or ""
     scope_list = token_scopes.split()
     acceptable_scope = False
@@ -285,7 +312,7 @@ def token_is_valid_and_acceptable(
 
         is_shared = operation in [TokenOperation.TokenSharedRead, TokenOperation.TokenSharedWrite]
 
-        if (is_shared and object_name == resource) or _is_path_prefix(object_name, resource):
+        if (is_shared and target == resource) or _is_path_prefix(target, resource):
             acceptable_scope = True
             break
 

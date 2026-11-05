@@ -459,3 +459,17 @@ def test_get_dirlist_url_keeps_caches_of_entry_without_director_response(monkeyp
     cache_manager = pelfs._namespace_cache["/namespace"]
     assert cache_manager.director_response is not None
     assert cache_manager.get_url("/namespace/file.txt") == "https://cache1.example.com/namespace/file.txt"
+
+
+def test_parse_token_generation_base_path():
+    from pelicanfs.dir_header_parser import parse_director_response
+
+    headers = {
+        "X-Pelican-Namespace": "namespace=/osdf-tutorial, require-token=true, collections-url=https://origin.example:8443",
+        "X-Pelican-Token-Generation": "issuer=https://origin.example/api/v1.0/issuer/ns/osdf-tutorial, max-scope-depth=3, strategy=OAuth2, base-path=/osdf-tutorial",
+    }
+
+    director_response = parse_director_response(headers)
+
+    assert director_response.x_pel_tok_gen_hdr.issuers == ["https://origin.example/api/v1.0/issuer/ns/osdf-tutorial"]
+    assert director_response.x_pel_tok_gen_hdr.base_paths == ["/osdf-tutorial"]
