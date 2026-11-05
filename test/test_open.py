@@ -17,6 +17,7 @@ limitations under the License.
 import os
 
 import aiohttp
+import fsspec
 import pytest
 from fsspec.asyn import get_loop
 from pytest_httpserver import HTTPServer
@@ -195,6 +196,39 @@ def test_open_mapper(httpserver: HTTPServer, get_client):
 
     pel_map = pelicanfs.core.PelicanMap("/foo", pelfs=pelfs)
     assert pel_map["bar"] == b"hello, world!"
+
+
+def _serve_foo_bar(httpserver: HTTPServer) -> None:
+    foo_bar_url = httpserver.url_for("/foo/bar")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "Location": foo_bar_url,
+            "X-Pelican-Namespace": "namespace=/foo",
+        },
+    )
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("hello, world!")
+
+
+# A hostname, since urlparse reads "localhost:port/..." as a scheme but not "127.0.0.1:port/..."
+def test_mapper_port_in_url(httpserver: HTTPServer, get_client):
+    _serve_foo_bar(httpserver)
+    url = httpserver.url_for("/").replace("https://127.0.0.1", "pelican://localhost")
+    pelfs = pelicanfs.core.PelicanFileSystem(get_client=get_client, skip_instance_cache=True)
+
+    assert pelfs.get_mapper(f"{url}foo")["bar"] == b"hello, world!"
+
+
+def test_fsspec_open_port_in_url(httpserver: HTTPServer, get_client):
+    _serve_foo_bar(httpserver)
+    url = httpserver.url_for("/foo/bar").replace("https://127.0.0.1", "pelican://localhost")
+
+    with fsspec.open(url, "rb", get_client=get_client, skip_instance_cache=True) as f:
+        assert f.read() == b"hello, world!"
 
 
 def test_open_write_mode_not_supported(httpserver: HTTPServer, get_client):
