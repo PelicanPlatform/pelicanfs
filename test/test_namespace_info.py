@@ -431,3 +431,31 @@ def test_get_prefix_info_matches_path_boundaries():
     assert pelfs._get_prefix_info("/bar") is not None
     assert pelfs._get_prefix_info("/bar/x") is not None
     assert pelfs._get_prefix_info("/barbaz/x") is None
+
+
+def test_get_dirlist_url_keeps_caches_of_entry_without_director_response(monkeypatch):
+    """get_dirlist_url must keep the cache list of an existing entry that has no director response"""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
+    pelfs.director_url = "https://director.example.com/"
+    pelfs._namespace_cache["/namespace"] = _CacheManager(["https://cache1.example.com"])
+
+    mock_response = MagicMock()
+    mock_response.headers = {
+        "Link": '<https://collections.example.com/namespace>; rel="collection"; pri=1',
+        "X-Pelican-Namespace": "namespace=/namespace, collections-url=https://collections.example.com/namespace",
+    }
+    mock_context = MagicMock()
+    mock_context.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_context.__aexit__ = AsyncMock(return_value=None)
+    mock_session = MagicMock()
+    mock_session.request = MagicMock(return_value=mock_context)
+    monkeypatch.setattr(pelfs.http_file_system, "set_session", AsyncMock(return_value=mock_session))
+
+    asyncio.run(pelfs.get_dirlist_url("/namespace/file.txt"))
+
+    cache_manager = pelfs._namespace_cache["/namespace"]
+    assert cache_manager.director_response is not None
+    assert cache_manager.get_url("/namespace/file.txt") == "https://cache1.example.com/namespace/file.txt"
