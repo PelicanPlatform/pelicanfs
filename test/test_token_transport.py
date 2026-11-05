@@ -16,13 +16,12 @@ limitations under the License.
 Tests that assert which Authorization header reaches the server.
 """
 
-import asyncio
 import gc
 import weakref
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from fsspec.asyn import sync
+from fsspec.asyn import get_loop, sync
 from pytest_httpserver import HTTPServer
 
 from pelicanfs.core import PelicanFileSystem
@@ -74,18 +73,14 @@ def fixture_federation(httpserver: HTTPServer, httpserver2: HTTPServer, get_clie
 @pytest.mark.usefixtures("generated_token")
 def test_open_async_read_sends_token(federation, httpserver2):
     async def read():
-        pelfs = federation(asynchronous=True)
-        session = await pelfs.http_file_system.set_session()
+        fp = await federation(asynchronous=True).open_async("/foo/bar")
         try:
-            fp = await pelfs.open_async("/foo/bar")
-            try:
-                return await fp.read()
-            finally:
-                await fp.close()
+            return await fp.read()
         finally:
-            await session.close()
+            await fp.close()
 
-    assert asyncio.run(read()) == b"hello, world!"
+    # On fsspec's loop, so the get_client fixture can close the session on its own loop
+    assert sync(get_loop(), read) == b"hello, world!"
     assert [request.headers.get("Authorization") for request in requests_to(httpserver2, "GET")] == [GENERATED]
 
 
@@ -142,7 +137,8 @@ def test_failed_regeneration_sends_no_stale_token(federation, httpserver2, monke
     pelfs.cat_file("/foo/bar")
 
     def fail(_self):
-        raise RuntimeError("no token")
+        msg = "no token"
+        raise RuntimeError(msg)
 
     monkeypatch.setattr(TokenGenerator, "get_token", fail)
     pelfs._token_expiry = datetime.now(UTC) - timedelta(hours=1)
