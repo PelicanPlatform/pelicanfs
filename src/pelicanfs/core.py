@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import overload
 
 import aiohttp
@@ -55,7 +55,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .token_generator import TokenGenerator, TokenOperation
+from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -863,7 +863,7 @@ class PelicanFileSystem(AsyncFileSystem):
         with self._namespace_lock:
             # Find the longest matching prefix
             for prefix in sorted(self._namespace_cache.keys(), key=len, reverse=True):
-                if path.startswith(prefix):
+                if _is_path_prefix(path, prefix.rstrip("/")):
                     cache_manager = self._namespace_cache.get(prefix)
                     if cache_manager:
                         return NamespaceInfo(cache_manager, cache_manager.director_response)
@@ -1080,8 +1080,8 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "maxdepth must be at least 1"
             raise ValueError(msg)
 
-        ends_with_slash = path.endswith("/")  # _strip_protocol strips trailing slash
-        path = self._strip_protocol(path)
+        ends_with_slash = path.endswith("/")
+        path = self._check_fspath(path)
         append_slash_to_dirname = ends_with_slash or path.endswith(("/**", "/*"))
         idx_star = path.find("*") if path.find("*") >= 0 else len(path)
         idx_brace = path.find("[") if path.find("[") >= 0 else len(path)
@@ -1226,7 +1226,7 @@ class PelicanFileSystem(AsyncFileSystem):
             path = parsed.path
             if parsed.netloc:
                 # Handle malformed osdf://host/path by treating netloc as part of path
-                path = str(PurePosixPath("/" + parsed.netloc + parsed.path))
+                path = f"/{parsed.netloc}{parsed.path}"
         elif parsed.scheme == "pelican":
             discovery_url = parsed._replace(path="/", fragment="", query="", params="").geturl()
             self._validate_discovery_url(discovery_url)
