@@ -82,7 +82,8 @@ def test_level_name_is_not_registered():
     [
         ({}, "Token missing exp claim"),
         ({"exp": 1}, "Token expired at"),
-        ({"exp": time.time() + 3600, "scope": ""}, "No acceptable scope found in token"),
+        ({"exp": time.time() + 3600, "scope": "storage.read"}, "Token has no WLCG or SciToken 2.0 version claim"),
+        ({"exp": time.time() + 3600, "scope": "", "wlcg.ver": "1.0"}, "No acceptable scope found in token"),
     ],
 )
 def test_rejection_reason_is_logged_at_debug(caplog, monkeypatch, claims, message):
