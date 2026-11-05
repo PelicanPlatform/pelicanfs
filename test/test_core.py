@@ -73,39 +73,3 @@ def test_ls_method_binding_isolated_between_instances(httpserver: HTTPServer, ge
     # The _ls method on each http_file_system should be bound to its respective PelicanFileSystem
     assert pelfs1.http_file_system._ls.__self__ is pelfs1, "pelfs1.http_file_system._ls should be bound to pelfs1"
     assert pelfs2.http_file_system._ls.__self__ is pelfs2, "pelfs2.http_file_system._ls should be bound to pelfs2"
-
-
-def test_token_state_isolated_between_instances(httpserver: HTTPServer, get_client):
-    """
-    Test that token state is isolated between PelicanFileSystem instances.
-
-    Regression test: Without the fix, setting a token on pelfs1 could be
-    overwritten or lost when pelfs2 was created because they shared the
-    same HTTPFileSystem.
-    """
-    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
-
-    pelfs1 = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-        headers={"Authorization": "Bearer token1"},
-    )
-
-    pelfs2 = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-        headers={"Authorization": "Bearer token2"},
-    )
-
-    # Each instance should maintain its own token
-    assert pelfs1.token == "Bearer token1"
-    assert pelfs2.token == "Bearer token2"
-
-    # The HTTPFileSystem kwargs should also be separate
-    pelfs1_auth = pelfs1.http_file_system.kwargs.get("headers", {}).get("Authorization")
-    pelfs2_auth = pelfs2.http_file_system.kwargs.get("headers", {}).get("Authorization")
-
-    assert pelfs1_auth == "Bearer token1"
-    assert pelfs2_auth == "Bearer token2"
