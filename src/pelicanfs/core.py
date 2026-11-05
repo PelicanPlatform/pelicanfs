@@ -20,6 +20,7 @@ import functools
 import inspect
 import logging
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -459,6 +460,12 @@ def _url_origin(url: object) -> tuple[str, str | None, int | None]:
     return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}.get(parts.scheme)
 
 
+def _audit_url(url: str) -> str:
+    """Remove the query and credentials from a path or URL. A query can carry an authz token."""
+    parts = urllib.parse.urlsplit(url)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
+
+
 class PelicanFileSystem(AsyncFileSystem):
     """
     Access a pelican namespace as if it were a file system.
@@ -716,6 +723,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
+        sys.audit("pelicanfs.token.use", _audit_url(url), operation.name)
         self._token_origins.add(_url_origin(url))
 
         # A token we generated earlier is only good until it expires; once it has, or is
@@ -734,6 +742,8 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Using existing token from headers for %s", url)
             return existing_token
 
+        # Outside the try, which would swallow a hook's veto
+        sys.audit("pelicanfs.token.acquire", _audit_url(url), operation.name)
         try:
             # Ensure director URL is set (for token generation validation)
             await self._set_director_url()
@@ -800,6 +810,7 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Running federation discovery...")
         discovery_url = urllib.parse.urlparse(disc_url)
         discovery_url = discovery_url._replace(scheme="https", path="/.well-known/pelican-configuration")
+        sys.audit("pelicanfs.discover", _audit_url(discovery_url.geturl()))
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
@@ -1111,6 +1122,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
             data_url, director_response = await self.get_dirlist_url(path)
+            sys.audit("pelicanfs.list", _audit_url(path), _audit_url(data_url))
 
             # Handle token generation if required
             operation = self._get_token_operation(func.__name__)
@@ -1149,6 +1161,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Get the collections URL for this path
         collections_url, director_response = await self.get_dirlist_url(path)
+        sys.audit("pelicanfs.list", _audit_url(path), _audit_url(collections_url))
 
         # Handle token generation if required
         operation = self._get_token_operation("_ls")
@@ -1235,6 +1248,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # so nothing in it is usefully a collection
             return False
 
+        sys.audit("pelicanfs.list", _audit_url(path), _audit_url(list_url))
         operation = self._get_token_operation("_is_collection")
         await self._handle_token_generation(list_url, director_response, operation)
 
@@ -1347,6 +1361,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _walk(self, path: str, maxdepth: int | None = None, on_error: str = "omit", **kwargs: Any) -> AsyncIterator[tuple[str, Any, Any]]:
         path = self._check_fspath(path)
         list_url, _director_response = await self.get_dirlist_url(path)
+        sys.audit("pelicanfs.list", _audit_url(path), _audit_url(list_url))
         async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             async for url, dirs, files in self.http_file_system._walk(
                 list_url,
@@ -1407,6 +1422,8 @@ class PelicanFileSystem(AsyncFileSystem):
         data_url, director_response = await (self.get_origin_url(path) if self.direct_reads else self.get_working_cache(path))
         tries = 1
         while True:
+            # Outside the try below: a hook's veto says nothing about the cache
+            sys.audit("pelicanfs.read", _audit_url(path), _audit_url(data_url))
             await self._handle_token_generation(data_url, director_response, operation)
             try:
                 result = await attempt(data_url)
@@ -1442,6 +1459,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     fp.r = None
             case _:
                 return False
+        sys.audit("pelicanfs.read", _audit_url(path), _audit_url(url))
         await self._handle_token_generation(url, director_response, self._get_token_operation("open"))
         fp.url = url
         return True
@@ -1595,6 +1613,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _put_file(self, lpath: str, rpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
+        sys.audit("pelicanfs.write", _audit_url(path), _audit_url(data_url))
 
         operation = self._get_token_operation("_put_file")
         await self._handle_token_generation(data_url, director_response, operation)
