@@ -36,6 +36,8 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
+from pelicanfs.log_utils import TokenForLog
+
 # Platform-specific imports
 _IS_WINDOWS = platform.system() == "Windows"
 if not _IS_WINDOWS:
@@ -58,7 +60,7 @@ _DEVICE_URL_PATTERN = re.compile(r"https?://\S+/(?:device|activate|authorize|log
 
 
 def _redact(text: str) -> str:
-    return _JWT_PATTERN.sub("[TOKEN_REDACTED]", text)
+    return _JWT_PATTERN.sub(lambda match: f"{TokenForLog(match.group())}.[SIGNATURE_REDACTED]", text)
 
 
 def _running_in_ipykernel() -> bool:
