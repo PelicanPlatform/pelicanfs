@@ -18,21 +18,27 @@ import logging
 
 # Finer than DEBUG for internal call-flow tracing (not enabled by default).
 TRACE = 5
-logging.addLevelName(TRACE, "TRACE")
 
 
 def trace(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
-    if logger.isEnabledFor(TRACE):
-        logger._log(TRACE, msg, args, **kwargs)
+    logger.log(TRACE, msg, *args, stacklevel=2, **kwargs)
 
 
-def format_token_for_log(token: str | bytes | None) -> str | None:
-    """Return JWT header and payload (no signature) for safe, readable logging."""
-    if not token:
-        return None
-    raw = token.decode("utf-8", errors="replace") if isinstance(token, bytes) else token
-    raw = raw.removeprefix("Bearer ").strip()
-    parts = raw.split(".")
-    if len(parts) >= 2:
-        return f"{parts[0]}.{parts[1]}"
-    return raw
+class TokenForLog:
+    """Show a JWT as header and payload (no signature), and hide any other value.
+
+    Formatting runs only when a log record is emitted.
+    """
+
+    def __init__(self, token: str | None) -> None:
+        self.token = token
+
+    def __str__(self) -> str:
+        if not self.token:
+            return "None"
+        raw = self.token.removeprefix("Bearer ").strip()
+        parts = raw.split(".")
+        # A JWT header is base64url JSON, so it starts with the encoding of '{"'.
+        if len(parts) == 3 and raw.startswith("eyJ"):
+            return f"{parts[0]}.{parts[1]}"
+        return f"<non-jwt len={len(raw)}>"
