@@ -46,7 +46,6 @@ def fixture_store_fs_factory(httpserver: HTTPServer, httpserver2: HTTPServer, ge
 
     Returns a factory so tests can pass filesystem options (e.g. direct_reads=True).
     """
-    httpserver2.clear()
 
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
 

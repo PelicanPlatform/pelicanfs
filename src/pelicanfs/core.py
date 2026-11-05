@@ -1249,11 +1249,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
     fastwalk = sync_generator(_walk)
 
-    async def _resolve_data_url(self, path: str) -> tuple[str, DirectorResponse]:
-        if self.direct_reads:
-            return await self.get_origin_url(path)
-        return await self.get_working_cache(path)
-
     def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception, attempt: int) -> tuple[str, DirectorResponse] | None:
         """
         Return the cache to retry on after error, marking the cache behind failed_url
@@ -1290,7 +1285,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Call attempt(data_url) on the current cache, moving to the next cache on failure.
         Records a successful access and returns attempt's result.
         """
-        data_url, director_response = await self._resolve_data_url(path)
+        data_url, director_response = await (self.get_origin_url(path) if self.direct_reads else self.get_working_cache(path))
         tries = 1
         while True:
             await self._handle_token_generation(data_url, director_response, operation)
@@ -1351,18 +1346,15 @@ class PelicanFileSystem(AsyncFileSystem):
 
         def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
             tries = 1
-            reopen = False
             while True:
                 try:
-                    if reopen:
+                    if tries > 1 and isinstance(fp, fshttp.HTTPStreamFile):
                         fp.r = sync(self.loop, self._open_stream_response, fp)
-                        reopen = False
                     return read(*args, **kwargs)
                 except Exception as e:
                     if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
                         raise
                     tries += 1
-                    reopen = isinstance(fp, fshttp.HTTPStreamFile)
 
         return io_wrapper
 
@@ -1502,27 +1494,16 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "Write mode is not supported for open(). Use put() or pipe() to write files."
             raise NotImplementedError(msg)
 
-        data_url, director_response = sync(self.loop, self._resolve_data_url, path)  # type: ignore[misc]
-        operation = self._get_token_operation("open")
-        tries = 1
-        while True:
-            sync(self.loop, self._handle_token_generation, data_url, director_response, operation)
+        async def attempt(data_url: str) -> Any:
             logger.debug("Running open on %s...", data_url)
-            try:
-                fp = self.http_file_system.open(data_url, mode, **kwargs)
-                break
-            except Exception as e:
-                retry = self._next_cache_after_failure(path, data_url, e, tries)
-                if retry is None:
-                    raise
-                data_url, director_response = retry
-                tries += 1
+            # A thread, since the sync open blocks on this event loop
+            return await asyncio.to_thread(self.http_file_system.open, data_url, mode, **kwargs)
+
+        fp = sync(self.loop, self._with_cache_retry, path, self._get_token_operation("open"), attempt)  # type: ignore[misc]
         # Text mode wraps the binary file; its reads go through the binary file's read
         raw = fp.buffer if isinstance(fp, io.TextIOWrapper) else fp
         if isinstance(raw, fshttp.HTTPFile | fshttp.HTTPStreamFile):
             raw.read = self._io_wrapper(raw, path)
-        if not self.direct_reads:
-            self._access_stats.add_response(path, _AccessResp(data_url, True))
         return fp
 
     async def open_async(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:

@@ -95,7 +95,6 @@ def fixture_two_host_fs_factory(
 
     Returns a factory so tests can pass filesystem options (e.g. direct_reads=True).
     """
-    httpserver2.clear()
 
     collections_url = httpserver2.url_for("/")
     namespace_header = f"namespace=/foo, collections-url={collections_url}"

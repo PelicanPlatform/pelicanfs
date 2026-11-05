@@ -58,7 +58,6 @@ def fixture_federation(httpserver: HTTPServer, httpserver2: HTTPServer, get_clie
     A require-token namespace with the director on `httpserver` and the cache on
     `httpserver2`. Returns a factory for filesystems that use this federation.
     """
-    httpserver2.clear()
     cache_url = httpserver2.url_for("/foo/bar")
 
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
@@ -106,7 +105,6 @@ def _async_read(fs):
 )
 def test_read_retry_sends_token_to_replacement_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, read):
     """A cache first seen by a read retry is prepared for the token before the retry."""
-    httpserver2.clear()
     urls = [server.url_for("/foo/bar") for server in (httpserver, httpserver2)]
     link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
