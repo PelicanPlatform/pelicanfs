@@ -640,6 +640,32 @@ def test_oidc_jupyter_url_falls_back_to_print_without_ipython(jupyter_pty, monke
     assert jupyter_pty["displayed"] == []
 
 
+TOKEN_URL_LINE = f"Go to https://issuer.example/device?token={FAKE_JWT} ({FAKE_JWT})\n".encode()
+
+
+@needs_pty
+def test_oidc_jupyter_url_line_is_redacted(jupyter_pty):
+    jupyter_pty["feed"]([TOKEN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    data, _ = jupyter_pty["displayed"][0]
+    assert FAKE_JWT not in data["text/plain"]
+    assert FAKE_JWT not in data["text/html"]
+    assert "[TOKEN_REDACTED]" in data["text/plain"]
+    assert 'href="https://issuer.example/device?token=[TOKEN_REDACTED]"' in data["text/html"]
+
+
+@needs_pty
+def test_oidc_jupyter_url_line_is_redacted_without_ipython(jupyter_pty, monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, "IPython.display")
+    jupyter_pty["feed"]([TOKEN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    out = capsys.readouterr().out
+    assert FAKE_JWT not in out
+    assert "[TOKEN_REDACTED]" in out
+
+
 @needs_pty
 def test_oidc_jupyter_interrupt_stops_pelican(jupyter_pty):
     jupyter_pty["feed"]([PELICAN_PROMPT_LN])

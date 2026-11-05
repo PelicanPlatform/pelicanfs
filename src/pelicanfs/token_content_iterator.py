@@ -119,12 +119,13 @@ class _KernelEcho:
             lines.append(self.pending)
             self.pending = ""
         for line in lines:
-            if match := _DEVICE_URL_PATTERN.search(line):
-                _display_device_url(line, match.group(0))
-            elif _JWT_PATTERN.fullmatch(line.strip()):
+            if _JWT_PATTERN.fullmatch(line.strip()):
                 continue
+            redacted = _redact(line)
+            if match := _DEVICE_URL_PATTERN.search(redacted):
+                _display_device_url(redacted, match.group(0))
             else:
-                print(_redact(line), end="", flush=True)  # noqa: T201
+                print(redacted, end="", flush=True)  # noqa: T201
                 if _PASSWORD_PROMPT_PATTERN.search(line):
                     _send_password(self.master_fd)
 
