@@ -340,7 +340,7 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
     return wrapper
 
 
-def _url_origin(url) -> tuple[str, str | None, int | None]:
+def _url_origin(url: object) -> tuple[str, str | None, int | None]:
     """Return the scheme, host and port of `url`, with the default port filled in."""
     parts = urllib.parse.urlsplit(str(url))
     return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}.get(parts.scheme)
@@ -557,7 +557,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         add_token_header = weakref.WeakMethod(self._add_token_header)
 
-        async def on_request_start(_session, _context, params):
+        async def on_request_start(_session: aiohttp.ClientSession, _context: object, params: aiohttp.TraceRequestStartParams) -> None:
             if (add := add_token_header()) is not None:
                 add(params)
 
