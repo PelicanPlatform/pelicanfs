@@ -1,5 +1,5 @@
 """
-Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
+Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
 
 Licensed under the Apache License, Version 2.0 (the "License"); you
 may not use this file except in compliance with the License.  You may
@@ -53,7 +53,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .log_utils import format_token_for_log, trace
+from .log_utils import TRACE, TokenForLog, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
@@ -574,15 +574,12 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Check if we already have a token, either from kwargs headers or generated earlier
         existing_token = self._get_token()
-        trace(logger, "_handle_token_generation url=%s", url[:50] if url else None)
-        trace(logger, "self.token=%s", format_token_for_log(self.token))
-        trace(logger, "existing_token=%s", format_token_for_log(existing_token))
+        if logger.isEnabledFor(TRACE):
+            trace(logger, "_handle_token_generation path=%s token=%s", urllib.parse.urlparse(url).path, TokenForLog(existing_token))
         if existing_token:
-            trace(logger, "reusing existing token")
+            logger.debug("Using existing token from headers for %s", url)
             self._set_http_filesystem_token(existing_token)
             return existing_token
-
-        trace(logger, "no existing token; generating via TokenGenerator")
 
         try:
             # Ensure director URL is set (for token generation validation)
@@ -616,20 +613,13 @@ class PelicanFileSystem(AsyncFileSystem):
 
             # Get token (TokenContentIterator will automatically discover token location)
             token = token_generator.get_token()
-            trace(
-                logger,
-                "token_generator.get_token returned len=%s jwt=%s",
-                len(token) if token else 0,
-                format_token_for_log(token),
-            )
+            trace(logger, "generated token=%s", TokenForLog(token))
             if token:
                 self._set_http_filesystem_token(token)
                 # Also update self.token so _ls_real can use it
                 self.token = f"Bearer {token}"
                 # Remember when it expires so the check above can retire it in time
                 self._token_expiry = token_generator.token.Expiry if token_generator.token else None
-                trace(logger, "set self.token jwt=%s", format_token_for_log(self.token))
-                trace(logger, "_get_token after set=%s", format_token_for_log(self._get_token()))
             return token
         except Exception as e:
             logger.warning("Failed to generate token for %s: %s", url, e)
@@ -757,14 +747,11 @@ class PelicanFileSystem(AsyncFileSystem):
 
             # Handle token generation for cache requests if required
             if director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token:
-                trace(logger, "get_working_cache token before generation=%s", format_token_for_log(self.token))
                 operation = self._get_token_operation("get_working_cache")
                 await self._handle_token_generation(updated_url, director_response, operation)
-                trace(logger, "get_working_cache token after generation=%s", format_token_for_log(self.token))
 
                 # Set token in session headers if we have one (either existing or newly generated)
                 token_to_use = self._get_token()
-                trace(logger, "get_working_cache token_to_use=%s", format_token_for_log(token_to_use))
                 if token_to_use:
                     self._set_http_filesystem_token(token_to_use, session)
                 else:
@@ -964,23 +951,17 @@ class PelicanFileSystem(AsyncFileSystem):
         Note: We do NOT remove hosts from the results because HTTPFileSystem needs
         full URLs to download files.
         """
-        trace(logger, "_ls_from_http url=%s", url[:60] if url else None)
-        trace(logger, "_ls_from_http token at entry=%s", format_token_for_log(self.token))
-
         # Extract the path from the URL
         parsed = urllib.parse.urlparse(url)
         path = parsed.path
+        trace(logger, "_ls_from_http path=%s", path)
 
         # Get the collections URL for this path
         collections_url, director_response = await self.get_dirlist_url(path)
 
-        trace(logger, "_ls_from_http token after get_dirlist_url=%s", format_token_for_log(self.token))
-
         # Handle token generation if required
         operation = self._get_token_operation("_ls")
         await self._handle_token_generation(collections_url, director_response, operation)
-
-        trace(logger, "_ls_from_http token after generation=%s", format_token_for_log(self.token))
 
         # Call _ls_real with the collections URL
         if self.use_listings_cache and collections_url in self.dircache:

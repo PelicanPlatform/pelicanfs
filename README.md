@@ -679,7 +679,8 @@ logger.setLevel(logging.DEBUG)
 ```
 
 **Logging levels and what they show:**
-- `DEBUG`: Detailed information including cache URLs being tried, token discovery, Director responses, and all HTTP requests
+- `TRACE` (level 5): Token call flow, including allowed issuers and the required and token scopes. Tokens appear as JWT header and payload, which contain claims such as `sub`. The signature is not logged. Enable with `logger.setLevel(5)`
+- `DEBUG`: Detailed information including cache URLs being tried, token discovery, reasons for token rejection, Director responses, and all HTTP requests
 - `INFO`: High-level operations like file opens, reads, and writes
 - `WARNING`: Issues that don't prevent operation but may indicate problems (e.g., falling back to alternate caches)
 - `ERROR`: Operation failures and exceptions
