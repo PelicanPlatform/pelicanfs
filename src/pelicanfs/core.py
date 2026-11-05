@@ -1421,6 +1421,21 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_cache_dec
     async def _cat_file(self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any) -> bytes:
+        """
+        Read an object, with start and end clamped as slice bounds.
+
+        fsspec does not clamp them, so its Range header can get a 416. A range that
+        starts past the end of the object is not clamped, and still gets a 416. With
+        no end, the Range header is valid as it is, and the server does the clamping.
+        """
+        if end is not None:
+            start = start or 0
+            if start < 0 or end < 0:
+                size = (await self.http_file_system._info(path))["size"]
+                start = max(size + start, 0) if start < 0 else start
+                end = max(size + end, 0) if end < 0 else end
+            if start >= end:
+                return b""
         return await self.http_file_system._cat_file(path, start, end, **kwargs)
 
     @_cache_dec
