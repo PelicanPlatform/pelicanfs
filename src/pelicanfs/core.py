@@ -38,9 +38,13 @@ import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav2.client import Client, ClientOptions
 from aiowebdav2.exceptions import (
+    AccessDeniedError,
+    ConnectionExceptionError,
     MethodNotSupportedError,
+    NoConnectionError,
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
+    UnauthorizedError,
 )
 from aiowebdav2.parser import WebDavXmlUtils
 from aiowebdav2.urn import Urn
@@ -347,16 +351,47 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
     return wrapper
 
 
+_RETRYABLE_ERRORS = (aiohttp.ClientError, ConnectionError, TimeoutError, NoConnectionError)
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status == 429 or status >= 500
+
+
+def _underlying_error(error: BaseException) -> BaseException | None:
+    """Return the error that a wrapper from fsspec's _info or aiowebdav2 reports."""
+    match error:
+        case FileNotFoundError():
+            return error.__cause__
+        case ConnectionExceptionError():
+            return error.exception
+    return error
+
+
+def _http_status(error: BaseException | None) -> int | None:
+    """Return the HTTP status that error reports, if any."""
+    match error:
+        case aiohttp.ClientResponseError(status=status) | ResponseErrorCodeError(code=status):
+            return status
+        case UnauthorizedError():
+            return 401
+        case AccessDeniedError():
+            return 403
+    return None
+
+
 def _cache_failure(error: BaseException) -> BaseException | None:
     """
-    Return the transport or HTTP failure behind error, or None for any other error,
-    a missing object included. fsspec's _info reports every failed GET as
-    FileNotFoundError, with the real error as the cause.
+    Return the failure behind error if another cache could succeed, else None.
+
+    As in the Go client's IsRetryable, connection failures, timeouts, 429 and 5xx are
+    retryable. Other 4xx, a missing object and local errors are not.
     """
-    failure = error.__cause__ if isinstance(error, FileNotFoundError) else error
-    if isinstance(failure, FileNotFoundError) or (isinstance(failure, aiohttp.ClientResponseError) and failure.status == 404):
-        return None
-    return failure if isinstance(failure, aiohttp.ClientError | OSError) else None
+    failure = _underlying_error(error)
+    status = _http_status(failure)
+    if status is not None:
+        return failure if _is_retryable_status(status) else None
+    return failure if isinstance(failure, _RETRYABLE_ERRORS) else None
 
 
 def _url_origin(url: object) -> tuple[str, str | None, int | None]:
@@ -591,6 +626,9 @@ class PelicanFileSystem(AsyncFileSystem):
         if token and "Authorization" not in params.headers and _url_origin(params.url) in self._token_origins:
             params.headers["Authorization"] = f"Bearer {token}"
 
+    def _token_is_expiring(self) -> bool:
+        return self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN
+
     async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
         Handle token generation if required by the director response.
@@ -614,7 +652,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # A token we generated earlier is only good until it expires; once it has, or is
         # about to, forget it so a fresh one is generated below instead of being sent
         # until the server rejects it.
-        if self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN:
+        if self._token_is_expiring():
             logger.debug("Remembered token expires at %s, regenerating for %s", self._token_expiry, url)
             self.token = None
             self._token_expiry = None
@@ -787,16 +825,12 @@ class PelicanFileSystem(AsyncFileSystem):
             try:
                 logger.debug("Checking to see if the cache at %s is working and returns a valid response code", updated_url)
                 async with session.head(updated_url, timeout=timeout) as resp:
-                    # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
-                    # as indicators that the cache is working. Other error codes indicate
-                    # the cache itself is having problems.
-                    if resp.status >= 200 and resp.status < 400:
-                        logger.debug("Cache found")
+                    # A 404 or an auth error is an answer from a working cache, and
+                    # the request that follows reports it to the caller
+                    if not _is_retryable_status(resp.status):
+                        logger.debug("Cache found (status %d)", resp.status)
                         break
-                    if resp.status == 404:
-                        logger.debug("Cache is working (returned 404 for non-existent object)")
-                        break
-            except (TimeoutError, aiohttp.ClientConnectorError):
+            except _RETRYABLE_ERRORS:
                 pass
             cache_list = cache_list[1:]
 
@@ -1222,19 +1256,25 @@ class PelicanFileSystem(AsyncFileSystem):
 
     def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception, attempt: int) -> tuple[str, DirectorResponse] | None:
         """
-        Mark the cache behind failed_url as bad and return the next known cache.
-        attempt counts the caches this request has tried, failed_url included.
+        Return the cache to retry on after error, marking the cache behind failed_url
+        as bad if it is to blame. attempt counts the attempts of this request so far.
+
+        An expired token is not the cache's fault: the request repeats on the same
+        cache, and the retry generates a new token.
 
         Returns None when the request should not be retried: direct reads, an error
-        that is not a transport or HTTP failure (a missing object included), the
-        MAX_CACHE_ATTEMPTS limit, or no cache left for the namespace. Only caches
-        already in memory are considered; rediscovery would hand back the cache that
-        just failed. Reads are idempotent, so repeating them on another cache is safe.
+        that _cache_failure rejects, the MAX_CACHE_ATTEMPTS limit, or no cache left for
+        the namespace. Only caches already in memory are considered; rediscovery would
+        hand back the cache that just failed. Reads are idempotent, so repeating them
+        on another cache is safe.
         """
-        failure = _cache_failure(error)
-        if self.direct_reads or failure is None:
+        if self.direct_reads:
             return None
-        self._bad_cache(failed_url, failure)
+        failure = _cache_failure(error)
+        if failure is not None:
+            self._bad_cache(failed_url, failure)
+        elif _http_status(_underlying_error(error)) not in {401, 403} or not self._token_is_expiring():
+            return None
         if attempt >= MAX_CACHE_ATTEMPTS:
             logger.debug("Tried %d caches for %s, giving up", attempt, path)
             return None
@@ -1242,7 +1282,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if retry is None:
             logger.debug("No further cache to retry %s on", path)
             return None
-        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, failure, retry[0])
+        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, failure or error, retry[0])
         return retry
 
     async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt: Callable[[str], Awaitable[T]]) -> T:

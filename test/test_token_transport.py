@@ -20,6 +20,7 @@ import gc
 import weakref
 from datetime import UTC, datetime, timedelta
 
+import aiohttp
 import pytest
 from fsspec.asyn import get_loop, sync
 from pytest_httpserver import HTTPServer
@@ -124,6 +125,50 @@ def test_read_retry_sends_token_to_replacement_cache(httpserver: HTTPServer, htt
 
     assert read(fs) == b"hello"
     assert [request.headers.get("Authorization") for request in requests_to(httpserver2, "GET")] == [GENERATED]
+
+
+def _refused(request, fs, *, expired):
+    """A cache's 403. With expired, the token runs out while the request is in flight."""
+    if expired:
+        fs._token_expiry = datetime.now(UTC) - timedelta(minutes=1)
+    return Response(status=403)
+
+
+@pytest.fixture(name="numbered_tokens")
+def fixture_numbered_tokens(monkeypatch):
+    tokens = iter(["token-1", "token-2"])
+
+    def get_token(self):
+        token = next(tokens)
+        self.token = TokenInfo(token, datetime.now(UTC) + timedelta(hours=1))
+        return token
+
+    monkeypatch.setattr(TokenGenerator, "get_token", get_token)
+
+
+@pytest.mark.usefixtures("numbered_tokens")
+def test_expired_token_retries_on_same_cache(federation, httpserver2):
+    """A 403 for an expired token gets a new token and does not evict the cache."""
+    fs = federation()
+    httpserver2.expect_oneshot_request("/foo/bar", method="GET").respond_with_handler(lambda request: _refused(request, fs, expired=True))
+
+    assert fs.cat("/foo/bar") == b"hello, world!"
+
+    assert [request.headers["Authorization"] for request in requests_to(httpserver2, "GET")] == ["Bearer token-1", "Bearer token-2"]
+    assert fs._get_prefix_info("/foo/bar").cache_manager._cache_list == [httpserver2.url_for("").rstrip("/")]
+
+
+@pytest.mark.usefixtures("numbered_tokens")
+def test_valid_token_refused_is_not_retried(federation, httpserver2):
+    """A 403 for a token that has not expired will not get better on any cache."""
+    fs = federation()
+    httpserver2.expect_oneshot_request("/foo/bar", method="GET").respond_with_handler(lambda request: _refused(request, fs, expired=False))
+
+    with pytest.raises(aiohttp.ClientResponseError, match="403"):
+        fs.cat("/foo/bar")
+
+    assert len(requests_to(httpserver2, "GET")) == 1
+    assert fs._get_prefix_info("/foo/bar").cache_manager._cache_list == [httpserver2.url_for("").rstrip("/")]
 
 
 @pytest.mark.usefixtures("generated_token")

@@ -14,8 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import errno
+import socketserver
+import threading
+
 import aiohttp
 import pytest
+from aiowebdav2.exceptions import (
+    AccessDeniedError,
+    ConnectionExceptionError,
+    NoConnectionError,
+    RemoteResourceNotFoundError,
+    ResponseErrorCodeError,
+    UnauthorizedError,
+)
 from fsspec.asyn import sync
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
@@ -162,6 +174,12 @@ def _assert_first_cache_evicted(pelfs, httpserver, httpserver2):
     assert httpserver2.url_for("").rstrip("/") in hosts
 
 
+def _assert_all_caches_kept(pelfs, httpserver, httpserver2):
+    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
+    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
+    assert not [req for req, _ in httpserver2.log if req.path == "/foo/bar"]
+
+
 def test_cat_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
     """A non-404 failure on the first cache is retried on the second within the same call."""
     _setup_director(httpserver, httpserver2)
@@ -253,7 +271,7 @@ def test_open_text_read_retries_on_next_cache(httpserver: HTTPServer, httpserver
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
 
 
-@pytest.mark.parametrize("status", [401, 500, 503])
+@pytest.mark.parametrize("status", [429, 500, 503])
 def test_open_metadata_failure_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
     """fsspec wraps a failed metadata GET as FileNotFoundError, which must still switch cache."""
     _setup_director(httpserver, httpserver2)
@@ -281,9 +299,145 @@ def test_open_missing_object_keeps_caches(httpserver: HTTPServer, httpserver2: H
 
     with pytest.raises(FileNotFoundError):
         pelfs.open("/foo/bar", "rb")
-    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
-    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
-    assert not [req for req, _ in httpserver2.log if req.path == "/foo/bar"]
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_open_auth_failure_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """An authorization failure is about the credential, not the cache."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_oneshot_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=status)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(FileNotFoundError):
+        pelfs.open("/foo/bar", "rb")
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403])
+def test_cat_client_error_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """A 4xx other than 429 is raised at once and leaves every cache in place."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match=str(status)):
+        pelfs.cat("/foo/bar")
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+PROPFIND_RESPONSE = """<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/bar</D:href>
+    <D:propstat>
+      <D:prop><D:getcontentlength>5</D:getcontentlength><D:resourcetype/></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
+"""
+
+
+def _webdav_fs(httpserver, get_client, get_webdav_client):
+    return PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, get_webdav_client=get_webdav_client, skip_instance_cache=True)
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_exists_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status):
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("", status=status)
+    httpserver2.expect_request("/foo/bar", method="PROPFIND").respond_with_data(PROPFIND_RESPONSE, status=207)
+
+    pelfs = _webdav_fs(httpserver, get_client, get_webdav_client)
+
+    assert pelfs.exists("/foo/bar")
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_info_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status):
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("", status=status)
+    httpserver2.expect_request("/foo/bar", method="PROPFIND").respond_with_data(PROPFIND_RESPONSE, status=207, content_type="application/xml")
+
+    pelfs = _webdav_fs(httpserver, get_client, get_webdav_client)
+
+    assert pelfs.info("/foo/bar")["size"] == 5
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize(("status", "error"), [(401, UnauthorizedError), (403, AccessDeniedError)])
+def test_info_auth_failure_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status, error):
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("", status=status)
+
+    pelfs = _webdav_fs(httpserver, get_client, get_webdav_client)
+
+    with pytest.raises(error):
+        pelfs.info("/foo/bar")
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_probe_auth_failure_reports_real_error(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """A probe refused for its credential keeps the cache, so the caller sees the real error."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=status)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match=str(status)):
+        pelfs.cat("/foo/bar")
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_probe_retryable_status_skips_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=status)
+    httpserver2.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert pelfs.cat("/foo/bar") == b"hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+class _ClosingHandler(socketserver.BaseRequestHandler):
+    def handle(self):
+        self.request.recv(1024)
+
+
+def test_probe_disconnect_skips_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A cache that drops the connection after accepting it is skipped."""
+    with socketserver.ThreadingTCPServer(("127.0.0.1", 0), _ClosingHandler) as closing:
+        threading.Thread(target=closing.serve_forever, daemon=True).start()
+        urls = [f"http://127.0.0.1:{closing.server_address[1]}/foo/bar", httpserver2.url_for("/foo/bar")]
+        link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
+        httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+        httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+            "",
+            status=307,
+            headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo"},
+        )
+        httpserver2.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+        httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+        pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+        assert pelfs.cat("/foo/bar") == b"hello"
+        closing.shutdown()
 
 
 def _wrapped(cause):
@@ -301,10 +455,24 @@ def _response_error(status):
     [
         (connection := aiohttp.ClientConnectionError("refused"), connection),
         (_wrapped(connection), connection),
+        (refused := ConnectionRefusedError(), refused),
+        (too_many := _response_error(429), too_many),
+        (no_connection := NoConnectionError("host"), no_connection),
+        (webdav_server_error := ResponseErrorCodeError("url", 503, "busy"), webdav_server_error),
         (server_error := _response_error(500), server_error),
         (_wrapped(server_error), server_error),
         (_wrapped(timeout := TimeoutError()), timeout),
         (_response_error(404), None),
+        (_response_error(400), None),
+        (_response_error(401), None),
+        (_wrapped(_response_error(403)), None),
+        (ResponseErrorCodeError("url", 400, "bad"), None),
+        (UnauthorizedError("host"), None),
+        (AccessDeniedError("host"), None),
+        (RemoteResourceNotFoundError("/foo/bar"), None),
+        (ConnectionExceptionError(_response_error(403)), None),
+        (OSError(errno.ENOSPC, "No space left on device"), None),
+        (PermissionError(), None),
         (_wrapped(_response_error(404)), None),
         (FileNotFoundError("/foo/bar"), None),
         (_wrapped(ValueError("bad header")), None),
@@ -330,8 +498,7 @@ def test_non_transport_error_does_not_evict_caches(httpserver: HTTPServer, https
 
     with pytest.raises(ValueError, match="not a cache problem"):
         pelfs.cat("/foo/bar")
-    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
-    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
 
 
 def test_retry_stops_when_cache_is_not_evicted(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):
