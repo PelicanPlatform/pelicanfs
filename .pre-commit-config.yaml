@@ -32,7 +32,7 @@ repos:
         pass_filenames: false
         additional_dependencies:
           - aiohttp
-          - aiowebdav2
+          - aiowebdav2<1
           - cachetools>=7.2.8,<8
           - fsspec
           - igwn-auth-utils
