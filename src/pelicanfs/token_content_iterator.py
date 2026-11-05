@@ -51,6 +51,8 @@ DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# Text at the end of a read that can be the start of a JWT.
+_PARTIAL_JWT_PATTERN = re.compile(r"(?:e|ey|eyJ[A-Za-z0-9_.-]*)\Z")
 # A prompt line ends with ":" (pelican prints it with or without a trailing newline).
 # Prose such as "asked for this password whenever a new session is started." must not match.
 _PASSWORD_PROMPT_PATTERN = re.compile(r"[Pp]assword[^:\n]*:\s*$")
@@ -88,15 +90,35 @@ def _display_device_url(line: str, url: str) -> None:
     display({"text/html": html.escape(text).replace(html.escape(url), link), "text/plain": text}, raw=True)
 
 
-def _echo_terminal(text: str) -> None:
-    """Write child output to the terminal as it arrives, with tokens redacted."""
-    text = _redact(text)
+def _write_terminal(text: str) -> None:
     try:
         sys.stdout.buffer.write(text.encode("utf-8"))
         sys.stdout.buffer.flush()
     except AttributeError:
         sys.stdout.write(text)
         sys.stdout.flush()
+
+
+class _TerminalEcho:
+    """
+    Write child output to the terminal as it arrives, with tokens redacted.
+
+    A read can end inside a token, so text that can be the start of one waits for the next read.
+    """
+
+    def __init__(self) -> None:
+        self.pending = ""
+
+    def __call__(self, text: str) -> None:
+        text = self.pending + text
+        partial = _PARTIAL_JWT_PATTERN.search(text)
+        end = partial.start() if partial else len(text)
+        self.pending = text[end:]
+        _write_terminal(_redact(text[:end]))
+
+    def flush(self) -> None:
+        _write_terminal(_redact(self.pending))
+        self.pending = ""
 
 
 class _KernelEcho:
@@ -325,6 +347,7 @@ class TokenContentIterator:
         process = subprocess.Popen(cmd, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
         assert process.stdout is not None
         output: list[str] = []
+        echo = _TerminalEcho()
         start = time.monotonic()
         try:
             while True:
@@ -336,7 +359,8 @@ class TokenContentIterator:
                     break
                 text = data.decode("utf-8", errors="replace")
                 output.append(text)
-                _echo_terminal(text)
+                echo(text)
+            echo.flush()
             return self._finish(process, "".join(output))
         finally:
             _reap(process)
@@ -374,12 +398,11 @@ class TokenContentIterator:
                 echo = _KernelEcho(master_fd)
                 stdin_data = None
             else:
-                echo = _echo_terminal
+                echo = _TerminalEcho()
                 stdin_data = None if use_tty else _read_redirected_stdin()
 
             output = self._pump_pty(master_fd, process, echo, stdin_data)
-            if isinstance(echo, _KernelEcho):
-                echo.flush()
+            echo.flush()
             if output is None:
                 return None
             return self._finish(process, output)
