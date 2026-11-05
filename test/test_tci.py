@@ -527,8 +527,15 @@ def _select_for(chunks):
 
 
 @pytest.fixture
-def jupyter_pty():
+def jupyter_pty(monkeypatch):
     """Mock the pty machinery and pretend to run inside an IPython kernel."""
+    import types
+
+    displayed = []
+    fake_display_module = types.ModuleType("IPython.display")
+    fake_display_module.display = lambda data, raw=False: displayed.append((data, raw))
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
     with (
         patch("shutil.which", return_value="/usr/bin/pelican"),
         patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=True),
@@ -554,7 +561,7 @@ def jupyter_pty():
             process.poll.return_value = returncode
             process.returncode = returncode
 
-        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select}
+        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select, "displayed": displayed}
 
 
 @needs_pty
@@ -570,10 +577,12 @@ def test_oidc_jupyter_password_prompt(jupyter_pty, capsys):
     assert popen_kwargs["stdin"] == 101
     out = capsys.readouterr().out
     assert "configuration file:" in out
-    assert "https://issuer.example/device?user_code=ABC-123" in out
     assert "hunter2" not in out
     assert FAKE_JWT not in out
-    assert "[TOKEN_REDACTED]" in out
+    # The token line is dropped, and the URL is shown once (by display, not print).
+    assert "[TOKEN_REDACTED]" not in out
+    assert "https://issuer.example/device?user_code=ABC-123" not in out
+    assert len(jupyter_pty["displayed"]) == 1
 
 
 @needs_pty
@@ -608,30 +617,57 @@ def test_oidc_jupyter_prompt_split_across_reads(jupyter_pty):
 
 
 @needs_pty
-def test_oidc_jupyter_url_is_displayed(jupyter_pty, monkeypatch):
-    import types
-
-    shown = []
-    fake_display_module = types.ModuleType("IPython.display")
-    fake_display_module.HTML = lambda data: ("HTML", data)
-    fake_display_module.display = shown.append
-    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
-    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
-
+def test_oidc_jupyter_url_is_displayed(jupyter_pty, capsys):
     jupyter_pty["feed"]([PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
 
     assert next(_jupyter_iterator()) == FAKE_JWT
-    assert len(shown) == 1
-    kind, markup = shown[0]
-    assert kind == "HTML"
-    assert 'href="https://issuer.example/device?user_code=ABC-123"' in markup
-    assert 'target="_blank"' in markup
+    assert "https://issuer.example" not in capsys.readouterr().out
+    assert len(jupyter_pty["displayed"]) == 1
+    data, raw = jupyter_pty["displayed"][0]
+    assert raw is True
+    assert data["text/plain"] == "https://issuer.example/device?user_code=ABC-123"
+    assert 'href="https://issuer.example/device?user_code=ABC-123"' in data["text/html"]
+    assert 'target="_blank"' in data["text/html"]
+
+
+@needs_pty
+def test_oidc_jupyter_url_falls_back_to_print_without_ipython(jupyter_pty, monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, "IPython.display")
+    jupyter_pty["feed"]([PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert capsys.readouterr().out.count("https://issuer.example/device?user_code=ABC-123") == 1
+    assert jupyter_pty["displayed"] == []
+
+
+@needs_pty
+def test_oidc_jupyter_interrupt_stops_pelican(jupyter_pty):
+    jupyter_pty["feed"]([PELICAN_PROMPT_LN])
+    process = jupyter_pty["process"]
+    process.poll.return_value = None
+    process.returncode = None
+    jupyter_pty["getpass"].side_effect = KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        _jupyter_iterator()._get_token_from_pelican_binary()
+    process.kill.assert_called_once()
+    process.wait.assert_called()
+
+
+@needs_pty
+def test_oidc_jupyter_error_falls_through(jupyter_pty):
+    jupyter_pty["feed"]([PELICAN_PROMPT_LN])
+    jupyter_pty["getpass"].side_effect = OSError("stdin is not available")
+
+    with pytest.raises(StopIteration):
+        next(_jupyter_iterator())
 
 
 @needs_pty
 def test_oidc_jupyter_timeout(jupyter_pty):
     jupyter_pty["feed"]([b"waiting...\n"])
     jupyter_pty["process"].poll.return_value = None
+    jupyter_pty["process"].returncode = None
 
     iterator = _jupyter_iterator(oidc_timeout_seconds=0)
     assert iterator._get_token_from_pelican_binary() is None
@@ -679,6 +715,8 @@ def test_running_in_ipykernel_detection(monkeypatch):
 
     fake_ipython = types.ModuleType("IPython")
     monkeypatch.setitem(sys.modules, "IPython", fake_ipython)
-    for shell, expected in [(None, False), (type("TerminalInteractiveShell", (), {})(), False), (type("ZMQInteractiveShell", (), {})(), True)]:
+    zmq_shell = type("ZMQInteractiveShell", (), {})
+    colab_shell = type("Shell", (zmq_shell,), {})  # Colab and Spyder subclass the kernel shell
+    for shell, expected in [(None, False), (type("TerminalInteractiveShell", (), {})(), False), (zmq_shell(), True), (colab_shell(), True)]:
         fake_ipython.get_ipython = MagicMock(return_value=shell)
         assert _running_in_ipykernel() is expected

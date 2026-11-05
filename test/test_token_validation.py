@@ -214,3 +214,53 @@ def test_path_prefix_matching(ec_keys, issuer):
     # Test that /foo/bartest scope doesn't match /foo/bar/file.txt
     valid3, _ = token_is_valid_and_acceptable(token2, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
     assert not valid3
+
+
+def _live_dir_resp(issuer, base_paths=None):
+    """Headers as the OSDF tutorial director sends them (scopes are relative to the base path)."""
+    from pelicanfs.dir_header_parser import DirectorResponse, XPelNs, XPelTokGen
+
+    return DirectorResponse(
+        object_servers=[],
+        location=None,
+        x_pel_ns_hdr=XPelNs(namespace="/osdf-tutorial", require_token=True),
+        x_pel_tok_gen_hdr=XPelTokGen(issuers=[issuer], base_paths=base_paths or []),
+    )
+
+
+@pytest.mark.parametrize("object_name", ["/osdf-tutorial/protected", "/osdf-tutorial/protected/", "/osdf-tutorial/protected/file.txt"])
+def test_scope_is_relative_to_base_path(ec_keys, issuer, object_name):
+    token = create_token(ec_keys, issuer, 3600, "storage.read:/protected")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name=object_name, dir_resp=_live_dir_resp(issuer, ["/osdf-tutorial"]), operation=TokenOperation.TokenRead)
+    assert valid
+
+
+def test_scope_is_relative_to_namespace_without_base_path(ec_keys, issuer):
+    token = create_token(ec_keys, issuer, 3600, "storage.read:/protected")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/osdf-tutorial/protected/file.txt", dir_resp=_live_dir_resp(issuer), operation=TokenOperation.TokenRead)
+    assert valid
+
+
+def test_relative_scope_does_not_match_other_directory(ec_keys, issuer):
+    token = create_token(ec_keys, issuer, 3600, "storage.read:/protected")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/osdf-tutorial/public/file.txt", dir_resp=_live_dir_resp(issuer, ["/osdf-tutorial"]), operation=TokenOperation.TokenRead)
+    assert not valid
+
+
+def test_object_outside_namespace_is_not_acceptable(ec_keys, issuer):
+    token = create_token(ec_keys, issuer, 3600, "storage.read:/")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/other/file.txt", dir_resp=_live_dir_resp(issuer, ["/osdf-tutorial"]), operation=TokenOperation.TokenRead)
+    assert not valid
+
+
+def test_root_scope_matches_every_path(ec_keys, issuer):
+    token = create_token(ec_keys, issuer, 3600, "storage.read:/")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/osdf-tutorial/protected/file.txt", dir_resp=_live_dir_resp(issuer, ["/osdf-tutorial"]), operation=TokenOperation.TokenRead)
+    assert valid
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/foo/bar", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    assert valid

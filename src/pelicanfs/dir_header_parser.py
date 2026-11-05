@@ -43,6 +43,7 @@ class XPelTokGen:
     """X-Pelican-Token-Generation header data"""
 
     issuers: list[str] = field(default_factory=list)
+    base_paths: list[str] = field(default_factory=list)  # token scopes are relative to the first one
 
     def __post_init__(self) -> None:
         # Validate and filter issuers to ensure they are valid URLs
@@ -148,14 +149,15 @@ def parse_director_response(headers: Mapping[str, str]) -> DirectorResponse:
         # Parse token generation header
         tok_gen_header = headers["X-Pelican-Token-Generation"]
         issuers = []
+        base_paths = []
 
-        # Parse the header content for issuers
         for part in tok_gen_header.split(", "):
             if part.startswith("issuer="):
-                issuer = part.split("=", 1)[1]
-                issuers.append(issuer)
+                issuers.append(part.split("=", 1)[1])
+            elif part.startswith("base-path="):
+                base_paths.append(part.split("=", 1)[1])
 
-        x_pel_tok_gen_hdr = XPelTokGen(issuers=issuers)
+        x_pel_tok_gen_hdr = XPelTokGen(issuers=issuers, base_paths=base_paths)
 
     return DirectorResponse(object_servers=object_servers, location=location, x_pel_auth_hdr=x_pel_auth_hdr, x_pel_ns_hdr=x_pel_ns_hdr, x_pel_tok_gen_hdr=x_pel_tok_gen_hdr)
 

@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Self
@@ -61,28 +62,111 @@ def _redact(text: str) -> str:
 
 
 def _running_in_ipykernel() -> bool:
-    """True inside a Jupyter kernel (ZMQ shell), False in a terminal or plain IPython."""
+    """True inside a Jupyter kernel (ZMQ shell or a subclass), False in a terminal or plain IPython."""
     ipython = sys.modules.get("IPython")
     if ipython is None:
         return False
     shell = ipython.get_ipython()
-    return shell is not None and type(shell).__name__ == "ZMQInteractiveShell"
+    return shell is not None and any(cls.__name__ == "ZMQInteractiveShell" for cls in type(shell).__mro__)
 
 
 def _send_password(master_fd: int) -> None:
     """Ask through getpass (a masked box in notebooks) and answer the prompt on the pty."""
     password = getpass.getpass("")
     os.write(master_fd, (password + "\n").encode())
-    del password
 
 
-def _display_device_url(url: str) -> None:
-    """Show a clickable link in notebook output, in addition to the plain-text line."""
+def _display_device_url(line: str, url: str) -> None:
+    """Show the URL line once: a clickable link in notebook frontends, plain text elsewhere."""
     try:
-        from IPython.display import HTML, display  # noqa: PLC0415
+        from IPython.display import display  # noqa: PLC0415
     except ImportError:
+        print(line, end="", flush=True)  # noqa: T201
         return
-    display(HTML(f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(url)}</a>'))
+    text = line.strip()
+    link = f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(url)}</a>'
+    display({"text/html": html.escape(text).replace(html.escape(url), link), "text/plain": text}, raw=True)
+
+
+def _echo_terminal(text: str) -> None:
+    """Write child output to the terminal as it arrives, with tokens redacted."""
+    text = _redact(text)
+    try:
+        sys.stdout.buffer.write(text.encode("utf-8"))
+        sys.stdout.buffer.flush()
+    except AttributeError:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+
+class _KernelEcho:
+    """
+    Line-based echo for a notebook cell.
+
+    Answers the password prompt through getpass, shows the device URL as a link,
+    and drops lines that contain only the token.
+    """
+
+    def __init__(self, master_fd: int) -> None:
+        self.master_fd = master_fd
+        self.pending = ""  # text read but not yet printed (no trailing newline)
+
+    def __call__(self, text: str) -> None:
+        self.pending += text
+        lines = self.pending.splitlines(keepends=True)
+        self.pending = "" if lines[-1].endswith("\n") else lines.pop()
+        if _PASSWORD_PROMPT_PATTERN.search(self.pending):  # pelican may write the prompt without a newline
+            lines.append(self.pending)
+            self.pending = ""
+        for line in lines:
+            if match := _DEVICE_URL_PATTERN.search(line):
+                _display_device_url(line, match.group(0))
+            elif _JWT_PATTERN.fullmatch(line.strip()):
+                continue
+            else:
+                print(_redact(line), end="", flush=True)  # noqa: T201
+                if _PASSWORD_PROMPT_PATTERN.search(line):
+                    _send_password(self.master_fd)
+
+    def flush(self) -> None:
+        if self.pending and not _JWT_PATTERN.fullmatch(self.pending.strip()):
+            print(_redact(self.pending), flush=True)  # noqa: T201
+        self.pending = ""
+
+
+def _disable_echo(fd: int) -> None:
+    """Pelican turns echo off itself; do it here too so a password never lands in the output."""
+    try:
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except termios.error as err:
+        logger.debug("Could not disable echo on the pty: %s", err)
+
+
+def _read_redirected_stdin() -> bytes | None:
+    """Data on a non-tty stdin (such as a script run with `< answers`), to forward to the child once."""
+    try:
+        if os.isatty(sys.stdin.fileno()):
+            return None
+    except (AttributeError, io.UnsupportedOperation, ValueError):
+        pass
+    try:
+        data = sys.stdin.read()
+    except Exception as err:
+        logger.debug("Could not read from redirected stdin: %s", err)
+        return None
+    if not data:
+        return None
+    logger.debug("Read %s chars from redirected stdin", len(data))
+    return data.encode("utf-8")
+
+
+def _reap(process: subprocess.Popen) -> None:
+    """Stop the child if it still runs (timeout, interrupt) and collect its exit status."""
+    if process.returncode is None:
+        process.kill()
+    process.wait()
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -210,9 +294,8 @@ class TokenContentIterator:
         """
         Invoke pelican binary to get token via OIDC device flow.
 
-        Uses platform-specific approach for secure password input:
-        - Unix terminal: pty module with stdin from /dev/tty
-        - Unix IPython kernel (Jupyter): pty as stdin, password via getpass
+        - Unix terminal: pty for output, stdin from /dev/tty
+        - Unix Jupyter kernel: pty for stdin too, password via getpass, URL as a link
         - Windows: subprocess with inherited stdin
 
         Returns:
@@ -228,202 +311,124 @@ class TokenContentIterator:
 
         logger.info("Invoking OIDC device flow via pelican binary: %s", " ".join(cmd))
 
-        if _running_in_ipykernel():
-            if _IS_WINDOWS:
-                logger.debug("IPython kernel detected on Windows; no pty support, using the console path")
-            else:
-                return self._get_token_from_pelican_binary_jupyter(cmd)
-
         try:
-            # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
-            # This lets the user see prompts and interact while we capture the output
-
-            output_data = []
-            start_time = time.time()
-
-            # Platform-specific PTY setup
             if _IS_WINDOWS:
-                # Windows: Let the process inherit stdin from the console for password prompts
-                # We use PIPE for stdout/stderr to capture output, but inherit stdin
-                # This allows the pelican binary to handle password prompts directly
-                process = subprocess.Popen(
-                    cmd,
-                    stdin=None,  # Inherit stdin from parent process
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,  # Merge stderr into stdout
-                    text=False,
-                    bufsize=0,  # Unbuffered for real-time output
-                )
-
-                def read_from_pty() -> bytes:
-                    """Read available data from subprocess stdout"""
-                    try:
-                        # Non-blocking read with timeout
-                        import msvcrt  # noqa: PLC0415
-
-                        if process.stdout and (msvcrt.kbhit() or process.stdout):
-                            return process.stdout.read(self.pty_buffer_size)
-                        return b""
-                    except Exception:
-                        return b""
-
-                def write_to_pty(data: bytes) -> None:
-                    """Not used on Windows with inherited stdin"""
-
-                def is_alive() -> bool:
-                    """Check if process is still running"""
-                    return process.poll() is None
-
-                stdin_data_to_send = None
-            else:
-                # Unix: use pty module
-                import termios  # noqa: PLC0415
-
-                master_fd, slave_fd = pty.openpty()
-
-                # Try to open /dev/tty for stdin so password prompts work correctly
-                # If /dev/tty is not available, fall back to slave_fd
-                try:
-                    tty_fd = os.open("/dev/tty", os.O_RDWR)
-                    process = subprocess.Popen(cmd, stdin=tty_fd, stdout=slave_fd, stderr=slave_fd, text=False)
-                    os.close(tty_fd)
-                except (OSError, FileNotFoundError):
-                    # /dev/tty not available (e.g., Jupyter with redirected stdin)
-                    # Disable echo on both master and slave PTY to prevent password echo
-                    # This only affects the fallback case where stdin goes through the PTY
-                    try:
-                        # Disable echo on slave side
-                        attrs = termios.tcgetattr(slave_fd)
-                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
-                        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-
-                        # Also disable echo on master side
-                        attrs = termios.tcgetattr(master_fd)
-                        attrs[3] = attrs[3] & ~termios.ECHO  # Disable ECHO flag
-                        termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
-                    except Exception as e:
-                        logger.debug("Could not disable echo on PTY: %s", e)
-
-                    process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False)
-                os.close(slave_fd)
-
-                def read_from_pty() -> bytes:
-                    """Read available data from Unix PTY"""
-                    ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
-                    if ready:
-                        try:
-                            return os.read(master_fd, self.pty_buffer_size)
-                        except OSError:
-                            return b""
-                    return b""
-
-                def write_to_pty(data: bytes) -> None:
-                    """Write data to Unix PTY"""
-                    os.write(master_fd, data)
-
-                def is_alive() -> bool:
-                    """Check if process is still running"""
-                    return process.poll() is None
-
-                # Check if stdin has been redirected (e.g., StringIO in Jupyter)
-                # If /dev/tty is available, the process reads from the terminal directly
-                # If not, we need to forward any redirected stdin data
-                stdin_data_to_send = None
-                try:
-                    stdin_fd = sys.stdin.fileno()
-                    # Check if stdin is redirected (not a terminal)
-                    if not os.isatty(stdin_fd):
-                        # Stdin is redirected, read the data to forward it
-                        try:
-                            stdin_data_to_send = sys.stdin.read()
-                            if stdin_data_to_send:
-                                logger.debug("Read %s chars from redirected stdin", len(stdin_data_to_send))
-                        except Exception as e:
-                            logger.debug("Could not read from redirected stdin: %s", e)
-                            stdin_data_to_send = None
-                except (AttributeError, io.UnsupportedOperation):
-                    # stdin doesn't have fileno() - likely redirected (e.g., Jupyter)
-                    try:
-                        stdin_data_to_send = sys.stdin.read()
-                        if stdin_data_to_send:
-                            logger.debug("Read %s chars from redirected stdin", len(stdin_data_to_send))
-                    except Exception as e:
-                        logger.debug("Could not read from redirected stdin: %s", e)
-                        stdin_data_to_send = None
-
-            def read_and_echo_output() -> bytes:
-                """Helper to read from PTY, echo to terminal (filtering sensitive data), and store data"""
-                data = read_from_pty()
-                if data:
-                    # Store raw data for token extraction
-                    output_data.append(data)
-
-                    # Filter sensitive information before echoing to terminal
-                    decoded_data = data.decode("utf-8", errors="replace")
-
-                    filtered_data = _redact(decoded_data)
-
-                    # Try to write to stdout.buffer (for real terminals)
-                    # Fall back to stdout.write() for Jupyter/IPython environments
-                    try:
-                        sys.stdout.buffer.write(filtered_data.encode("utf-8"))
-                        sys.stdout.buffer.flush()
-                    except AttributeError:
-                        # stdout doesn't have buffer (e.g., Jupyter/IPython)
-                        sys.stdout.write(filtered_data)
-                        sys.stdout.flush()
-                return data
-
-            # Read from PTY and echo to terminal, also forward stdin to the process
-            try:
-                while True:
-                    # Check timeout
-                    if time.time() - start_time > self.oidc_timeout_seconds:
-                        process.kill()
-                        logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
-                        return None
-
-                    # Check if process is still running
-                    if not is_alive():
-                        # Process finished, read any remaining output
-                        while True:
-                            data = read_from_pty()
-                            if not data:
-                                break
-                        break
-
-                    # Read subprocess output
-                    read_and_echo_output()
-
-                    # Handle stdin forwarding (Unix only - Windows uses simpler approach)
-                    # Note: When /dev/tty is available, pelican reads stdin directly from the terminal
-                    # This code only applies when stdin is redirected (e.g., Jupyter notebooks)
-                    if not _IS_WINDOWS and stdin_data_to_send:
-                        # Redirected stdin - send buffered data once
-                        try:
-                            write_to_pty(stdin_data_to_send.encode("utf-8"))
-                            stdin_data_to_send = None  # Only send once
-                        except OSError as e:
-                            logger.debug("Error writing redirected stdin to PTY: %s", e)
-            finally:
-                # Cleanup platform-specific resources
-                if not _IS_WINDOWS:
-                    # Unix cleanup
-                    os.close(master_fd)
-
-            # Wait for process to finish and get return code
-            process.wait()
-            returncode = process.returncode
-
-            if returncode != 0:
-                logger.debug("Pelican binary exited with code %s", returncode)
-                return None
-
-            return self._extract_token(b"".join(output_data).decode("utf-8", errors="replace"))
-
+                return self._run_pelican_windows(cmd)
+            return self._run_pelican_pty(cmd, in_kernel=_running_in_ipykernel())
         except Exception as err:
             logger.debug("Error invoking pelican binary: %s", err, exc_info=True)
             return None
+
+    def _run_pelican_windows(self, cmd: list[str]) -> str | None:
+        """Inherit the console so pelican handles its prompts; capture output through a pipe."""
+        process = subprocess.Popen(cmd, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+        assert process.stdout is not None
+        output: list[str] = []
+        start = time.monotonic()
+        try:
+            while True:
+                if time.monotonic() - start > self.oidc_timeout_seconds:
+                    logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
+                    return None
+                data = process.stdout.read(self.pty_buffer_size)
+                if not data:
+                    break
+                text = data.decode("utf-8", errors="replace")
+                output.append(text)
+                _echo_terminal(text)
+            return self._finish(process, "".join(output))
+        finally:
+            _reap(process)
+
+    def _run_pelican_pty(self, cmd: list[str], in_kernel: bool) -> str | None:
+        """
+        Run pelican under a pty (Unix).
+
+        In a terminal the child reads stdin from /dev/tty, so pelican handles the
+        password prompt itself. In a kernel, or when /dev/tty is unavailable, stdin
+        is the pty: the kernel answers the prompt through getpass, a script forwards
+        its redirected stdin once.
+        """
+        master_fd, slave_fd = pty.openpty()
+        tty_fd = None
+        process = None
+        try:
+            if not in_kernel:
+                try:
+                    tty_fd = os.open("/dev/tty", os.O_RDWR)
+                except OSError as err:
+                    logger.debug("/dev/tty unavailable, stdin goes through the pty: %s", err)
+            use_tty = tty_fd is not None
+            if not use_tty:
+                _disable_echo(slave_fd)
+            # A new session keeps the kernel's SIGINT away from pelican; _reap stops it instead.
+            process = subprocess.Popen(cmd, stdin=tty_fd if use_tty else slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=in_kernel)
+            os.close(slave_fd)
+            slave_fd = None
+            if tty_fd is not None:
+                os.close(tty_fd)
+                tty_fd = None
+
+            if in_kernel:
+                echo = _KernelEcho(master_fd)
+                stdin_data = None
+            else:
+                echo = _echo_terminal
+                stdin_data = None if use_tty else _read_redirected_stdin()
+
+            output = self._pump_pty(master_fd, process, echo, stdin_data)
+            if isinstance(echo, _KernelEcho):
+                echo.flush()
+            if output is None:
+                return None
+            return self._finish(process, output)
+        finally:
+            os.close(master_fd)
+            for fd in (slave_fd, tty_fd):
+                if fd is not None:
+                    os.close(fd)
+            if process is not None:
+                _reap(process)
+
+    def _pump_pty(self, master_fd: int, process: subprocess.Popen, echo: Callable[[str], None], stdin_data: bytes | None) -> str | None:
+        """Relay child output until it exits. Returns the full output, or None on timeout."""
+        output: list[str] = []
+        start = time.monotonic()
+
+        def read() -> bytes:
+            ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
+            if not ready:
+                return b""
+            try:
+                return os.read(master_fd, self.pty_buffer_size)
+            except OSError:  # EIO once the child closes the slave
+                return b""
+
+        def handle(data: bytes) -> None:
+            text = data.decode("utf-8", errors="replace")
+            output.append(text)
+            echo(text)
+
+        while True:
+            if time.monotonic() - start > self.oidc_timeout_seconds:
+                logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
+                return None
+            exited = process.poll() is not None  # checked first so output written just before exit is read
+            if data := read():
+                handle(data)
+            elif exited:
+                break
+            if stdin_data:
+                os.write(master_fd, stdin_data)
+                stdin_data = None
+        return "".join(output)
+
+    def _finish(self, process: subprocess.Popen, output: str) -> str | None:
+        process.wait()
+        if process.returncode != 0:
+            logger.debug("Pelican binary exited with code %s", process.returncode)
+            return None
+        return self._extract_token(output)
 
     def _extract_token(self, full_output: str) -> str | None:
         """Return the last JWT in the pelican binary output, or None."""
@@ -434,70 +439,6 @@ class TokenContentIterator:
         logger.warning("Could not extract JWT token from pelican binary output")
         logger.debug("Output was: %s", _redact(full_output))
         return None
-
-    def _get_token_from_pelican_binary_jupyter(self, cmd: list[str]) -> str | None:
-        """
-        Run the pelican binary inside a Jupyter kernel (Unix only).
-
-        The kernel has no controlling terminal, so the child gets a pty as stdin.
-        Output is echoed to the cell, the password prompt is answered through
-        getpass (a masked input box in the notebook), and the device-flow URL is
-        shown as a clickable link.
-        """
-        master_fd, slave_fd = pty.openpty()
-        # The binary turns echo off itself; do it here too so a password never lands in the cell.
-        attrs = termios.tcgetattr(slave_fd)
-        attrs[3] &= ~termios.ECHO
-        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
-        process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=True)
-        os.close(slave_fd)
-
-        output: list[str] = []
-        pending = ""  # text read but not yet printed (no trailing newline)
-        start_time = time.time()
-        try:
-            while True:
-                if time.time() - start_time > self.oidc_timeout_seconds:
-                    process.kill()
-                    logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
-                    return None
-
-                ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
-                data = b""
-                if ready:
-                    try:
-                        data = os.read(master_fd, self.pty_buffer_size)
-                    except OSError:
-                        data = b""
-                if data:
-                    text = data.decode("utf-8", errors="replace")
-                    output.append(text)
-                    pending += text
-                    lines = pending.splitlines(keepends=True)
-                    pending = "" if lines and lines[-1].endswith("\n") else lines.pop()
-                    for line in lines:
-                        print(_redact(line), end="", flush=True)  # noqa: T201
-                        if match := _DEVICE_URL_PATTERN.search(line):
-                            _display_device_url(match.group(0))
-                        elif _PASSWORD_PROMPT_PATTERN.search(line):
-                            _send_password(master_fd)
-                    if _PASSWORD_PROMPT_PATTERN.search(pending):
-                        print(pending, end="", flush=True)  # noqa: T201
-                        pending = ""
-                        _send_password(master_fd)
-                elif process.poll() is not None:
-                    break
-        finally:
-            os.close(master_fd)
-
-        if pending:
-            print(_redact(pending), flush=True)  # noqa: T201
-
-        process.wait()
-        if process.returncode != 0:
-            logger.debug("Pelican binary exited with code %s", process.returncode)
-            return None
-        return self._extract_token("".join(output))
 
     def get_method_index(self, method: TokenDiscoveryMethod) -> int:
         """
