@@ -269,11 +269,20 @@ def token_is_valid_and_acceptable(
         issuers = dir_resp.x_pel_tok_gen_hdr.issuers or []
     trace(logger, "allowed issuers=%s token issuer=%s", issuers, token.get("iss"))
 
+    # The token profile selects the scope names, as in the Go client's tokenIsAcceptable.
+    is_wlcg = token.get("wlcg.ver") is not None
+    ver = token.get("ver")
+    # Pelican also accepts the plural spelling.
+    is_scitoken = isinstance(ver, str) and ver.startswith(("scitoken:2.0", "scitokens:2.0"))
+    if not is_wlcg and not is_scitoken:
+        logger.debug("Token has no WLCG or SciToken 2.0 version claim")
+        return False, expiry_dt
+
     # Get the operation type and set the required scopes
     if operation in [TokenOperation.TokenWrite, TokenOperation.TokenSharedWrite]:
-        ok_scopes = ["storage.modify", "storage.create"]
+        ok_scopes = [*(["storage.modify", "storage.create"] if is_wlcg else []), *(["write"] if is_scitoken else [])]
     elif operation in [TokenOperation.TokenRead, TokenOperation.TokenSharedRead]:
-        ok_scopes = ["storage.read"]
+        ok_scopes = [*(["storage.read"] if is_wlcg else []), *(["read"] if is_scitoken else [])]
     else:
         ok_scopes = []
 

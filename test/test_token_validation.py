@@ -68,7 +68,7 @@ def scope():
     return "storage.read"
 
 
-def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
+def create_token(ec_keys, issuer, exp_offset_sec, scope_val, ver=None, wlcg_ver="1.0") -> SciToken:
     """Create a signed SciToken using EC private key object."""
 
     # Use the private key object for signing
@@ -76,6 +76,10 @@ def create_token(ec_keys, issuer, exp_offset_sec, scope_val) -> SciToken:
 
     token["sub"] = "test-subject"
     token["scope"] = scope_val
+    if ver:
+        token["ver"] = ver
+    if wlcg_ver:
+        token["wlcg.ver"] = wlcg_ver
 
     # We can either set exp and iss as claims, or rely on serialize to set them
     # Let's rely on serialize for iss and exp, so only set sub, aud, scope here
@@ -266,3 +270,70 @@ def test_root_scope_matches_every_path(ec_keys, issuer):
     assert valid
     valid, _ = token_is_valid_and_acceptable(token, object_name="/foo/bar", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
+
+
+@pytest.mark.parametrize("ver", ["scitoken:2.0", "scitokens:2.0"])
+@pytest.mark.parametrize(
+    ("scope_val", "operation"),
+    [
+        ("read:/foo", TokenOperation.TokenRead),
+        ("read", TokenOperation.TokenSharedRead),
+        ("write:/foo", TokenOperation.TokenWrite),
+        ("write", TokenOperation.TokenSharedWrite),
+    ],
+)
+def test_scitoken_scopes_accepted(ec_keys, issuer, ver, scope_val, operation):
+    token = create_token(ec_keys, issuer, 3600, scope_val, ver=ver, wlcg_ver=None)
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/ns/foo/file.txt", dir_resp=mock_dir_resp("/ns", [issuer]), operation=operation)
+
+    assert valid
+
+
+@pytest.mark.parametrize(
+    ("scope_val", "operation"),
+    [
+        ("storage.read:/foo", TokenOperation.TokenRead),
+        ("storage.create:/foo", TokenOperation.TokenWrite),
+        ("storage.modify:/foo", TokenOperation.TokenWrite),
+    ],
+)
+def test_wlcg_scopes_accepted(ec_keys, issuer, scope_val, operation):
+    token = create_token(ec_keys, issuer, 3600, scope_val)
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/ns/foo/file.txt", dir_resp=mock_dir_resp("/ns", [issuer]), operation=operation)
+
+    assert valid
+
+
+@pytest.mark.parametrize("scope_val", ["read:/foo", "storage.read:/foo"])
+def test_token_with_both_profiles_accepts_both_scope_styles(ec_keys, issuer, scope_val):
+    token = create_token(ec_keys, issuer, 3600, scope_val, ver="scitoken:2.0")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/ns/foo/file.txt", dir_resp=mock_dir_resp("/ns", [issuer]), operation=TokenOperation.TokenRead)
+
+    assert valid
+
+
+@pytest.mark.parametrize(
+    ("scope_val", "ver", "wlcg_ver", "operation", "object_name"),
+    [
+        ("read:/foo", "scitoken:2.0", None, TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("write:/foo", "scitoken:2.0", None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read:/foo", "scitoken:2.0", None, TokenOperation.TokenRead, "/ns/bar/file.txt"),
+        ("read:/foo", "scitoken:1.0", None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read:/foo", None, None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("read:/foo", None, "1.0", TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("write:/foo", None, "1.0", TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("storage.read:/foo", "scitoken:2.0", None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+        ("storage.create:/foo", "scitoken:2.0", None, TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("storage.modify:/foo", "scitoken:2.0", None, TokenOperation.TokenWrite, "/ns/foo/file.txt"),
+        ("storage.read:/foo", None, None, TokenOperation.TokenRead, "/ns/foo/file.txt"),
+    ],
+)
+def test_token_scopes_rejected(ec_keys, issuer, scope_val, ver, wlcg_ver, operation, object_name):
+    token = create_token(ec_keys, issuer, 3600, scope_val, ver=ver, wlcg_ver=wlcg_ver)
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name=object_name, dir_resp=mock_dir_resp("/ns", [issuer]), operation=operation)
+
+    assert not valid

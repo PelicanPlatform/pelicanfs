@@ -77,6 +77,7 @@ def create_es256_scitoken_with_public_key(exp_offset_seconds=3600, aud=None, iss
     token["iss"] = issuer or "https://trusted-issuer.example.com"
     token["aud"] = aud or "/namespace/prefix"
     token["scope"] = " ".join(scopes) if scopes else ""
+    token["wlcg.ver"] = "1.0"
 
     jwt = token.serialize(issuer=token["iss"], lifetime=exp_offset_seconds)
     return jwt, public_key_pem

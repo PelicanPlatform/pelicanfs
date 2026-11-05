@@ -490,9 +490,9 @@ This happens transparently without requiring manual token management. If no vali
 
 ### Token Scopes
 
-PelicanFS validates that discovered tokens have the appropriate scopes for the requested operation. Pelican supports both WLCG and SciTokens2 scope formats:
+PelicanFS validates that discovered tokens have the appropriate scopes for the requested operation. As in the Pelican client, the token profile selects the scope format. A WLCG token has a `wlcg.ver` claim, and a SciTokens2 token has a `ver` claim of `scitoken:2.0`. A token with neither is rejected:
 - **Read operations** (`cat`, `open`, `ls`, `glob`, `find`): Require `storage.read:<path>` (WLCG) or `read:<path>` (SciTokens2) scope
-- **Write operations** (`put`): Require `storage.create:<path>` (WLCG) or `write:<path>` (SciTokens2) scope
+- **Write operations** (`put`): Require `storage.create:<path>` or `storage.modify:<path>` (WLCG), or `write:<path>` (SciTokens2) scope
 
 When obtaining tokens from your federation administrator or token issuer, ensure they include the necessary scopes for your intended operations.
 
