@@ -842,7 +842,7 @@ class PelicanFileSystem(AsyncFileSystem):
                         existing = self._namespace_cache.get(namespace)
                         # Cache if namespace doesn't exist or existing entry has no director_response
                         if not existing or not existing.director_response:
-                            self._namespace_cache[namespace] = _CacheManager(existing.cache_list if existing else [], director_response)
+                            self._namespace_cache[namespace] = _CacheManager(existing._cache_list if existing else [], director_response)
 
         if not collections_url:
             logger.error("No collections endpoint found for %s", fileloc)
