@@ -22,6 +22,7 @@ import aiohttp.connector
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
+from pelicanfs._webdav_compat import resource_exists
 
 
 def test_exists_nonexistent_object(httpserver: HTTPServer, get_client, get_webdav_client):
@@ -163,7 +164,8 @@ def connections_held_by(client):
     that matters here: a response that has not been released keeps its connection checked
     out, so this stays at zero only if each call really does release as it ends.
     """
-    return len(client._http.session.connector._acquired)
+    session = client._http.session if hasattr(client, "_http") else client._session
+    return len(session.connector._acquired)
 
 
 # aiohttp finishes a small body along with the headers and releases the connection by
@@ -203,12 +205,12 @@ def webdav_options(httpserver, httpclient_ssl_context):
 
 async def check_through_webdav_client(httpserver, httpclient_ssl_context):
     async with pelicanfs.core.get_webdav_client(webdav_options(httpserver, httpclient_ssl_context)) as client:
-        return await pelicanfs.core._resource_exists(client, "/foo/bar")
+        return await resource_exists(client, "/foo/bar")
 
 
 def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_ssl_context):
     """
-    _resource_exists, which backs exists(), only looks at response.status and leaves the
+    resource_exists, which backs exists(), only looks at response.status and leaves the
     response unreleased, so get_webdav_client has to release it.
     """
     expect_propfind(httpserver, status=207)
@@ -222,7 +224,7 @@ def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_
 
 def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTPServer, httpclient_ssl_context):
     """
-    aiowebdav2's Client.request abandons the response when it raises for an error status,
+    aiowebdav2 abandons the response when it raises for an error status,
     so the object-does-not-exist path leaks unless get_webdav_client releases it too. This
     is the common case for exists(), which returns False by way of that exception.
     """
@@ -255,7 +257,7 @@ def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserv
         held = []
         async with pelicanfs.core.get_webdav_client(webdav_options(threaded_httpserver, httpclient_ssl_context)) as client:
             for _ in range(3):
-                assert await pelicanfs.core._resource_exists(client, "/foo/bar") is True
+                assert await resource_exists(client, "/foo/bar") is True
                 held.append(connections_held_by(client))
         return held
 

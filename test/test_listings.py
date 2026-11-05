@@ -105,6 +105,7 @@ def test_ls_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_li
         assert isinstance(entry["modified"], datetime)
         assert entry["modified"].tzinfo is None
     assert entries["/foo/bar/folder1/"]["type"] == "directory"
+    assert entries["/foo/bar/folder1/"]["size"] == 0
     assert entries["/foo/bar/file1.txt"]["type"] == "file"
 
 
