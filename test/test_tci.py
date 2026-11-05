@@ -580,7 +580,7 @@ def test_oidc_jupyter_password_prompt(jupyter_pty, capsys):
     assert "hunter2" not in out
     assert FAKE_JWT not in out
     # The token line is dropped, and the URL is shown once (by display, not print).
-    assert "[TOKEN_REDACTED]" not in out
+    assert "[SIGNATURE_REDACTED]" not in out
     assert "https://issuer.example/device?user_code=ABC-123" not in out
     assert len(jupyter_pty["displayed"]) == 1
 
@@ -640,6 +640,8 @@ def test_oidc_jupyter_url_falls_back_to_print_without_ipython(jupyter_pty, monke
     assert jupyter_pty["displayed"] == []
 
 
+FAKE_JWT_SIGNATURE = FAKE_JWT.rpartition(".")[2]
+REDACTED_JWT = f"{FAKE_JWT.rpartition('.')[0]}.[SIGNATURE_REDACTED]"
 TOKEN_URL_LINE = f"Go to https://issuer.example/device?token={FAKE_JWT} ({FAKE_JWT})\n".encode()
 
 
@@ -649,10 +651,10 @@ def test_oidc_jupyter_url_line_is_redacted(jupyter_pty):
 
     assert next(_jupyter_iterator()) == FAKE_JWT
     data, _ = jupyter_pty["displayed"][0]
-    assert FAKE_JWT not in data["text/plain"]
-    assert FAKE_JWT not in data["text/html"]
-    assert "[TOKEN_REDACTED]" in data["text/plain"]
-    assert 'href="https://issuer.example/device?token=[TOKEN_REDACTED]"' in data["text/html"]
+    assert FAKE_JWT_SIGNATURE not in data["text/plain"]
+    assert FAKE_JWT_SIGNATURE not in data["text/html"]
+    assert REDACTED_JWT in data["text/plain"]
+    assert f'href="https://issuer.example/device?token={REDACTED_JWT}"' in data["text/html"]
 
 
 @needs_pty
@@ -662,8 +664,8 @@ def test_oidc_jupyter_url_line_is_redacted_without_ipython(jupyter_pty, monkeypa
 
     assert next(_jupyter_iterator()) == FAKE_JWT
     out = capsys.readouterr().out
-    assert FAKE_JWT not in out
-    assert "[TOKEN_REDACTED]" in out
+    assert FAKE_JWT_SIGNATURE not in out
+    assert REDACTED_JWT in out
 
 
 @needs_pty
