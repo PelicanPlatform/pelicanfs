@@ -372,8 +372,6 @@ class PelicanFileSystem(AsyncFileSystem):
         loop: asyncio.AbstractEventLoop | None = None,
         get_webdav_client: Callable[[dict[str, Any]], AbstractAsyncContextManager[Client]] = get_webdav_client,
         oidc_timeout_seconds: int = 300,
-        pty_buffer_size: int = 1024,
-        select_timeout: float = 0.1,
         **kwargs: Any,
     ) -> None:
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
@@ -412,8 +410,6 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # OIDC device flow configuration
         self.oidc_timeout_seconds = oidc_timeout_seconds
-        self.pty_buffer_size = pty_buffer_size
-        self.select_timeout = select_timeout
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
         # They will raise NotImplementedErrors when called. (mkdir/makedirs are handled by our own
@@ -634,8 +630,6 @@ class PelicanFileSystem(AsyncFileSystem):
                 operation=operation,
                 pelican_url=pelican_url,
                 oidc_timeout_seconds=self.oidc_timeout_seconds,
-                pty_buffer_size=self.pty_buffer_size,
-                select_timeout=self.select_timeout,
             )
 
             # Get token (TokenContentIterator will automatically discover token location)
