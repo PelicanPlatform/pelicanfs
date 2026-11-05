@@ -17,8 +17,10 @@ limitations under the License.
 import asyncio
 import gc
 from contextlib import contextmanager
+from unittest.mock import AsyncMock
 
 import aiohttp.connector
+import pytest
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -261,3 +263,21 @@ def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserv
 
     held = asyncio.run(held_after_each_of_several_calls())
     assert held == [1, 1, 1], f"connections accumulated across calls instead of being recycled: {held}"
+
+
+@pytest.mark.parametrize("path", ["s3://bucket/key", "localhost:63371/ns/obj", "pelican://[broken/path"])
+@pytest.mark.parametrize("keyword", [False, True])
+def test_exists_unparseable_path_returns_false_without_network(path, keyword, monkeypatch):
+    fs = pelicanfs.core.PelicanFileSystem(skip_instance_cache=True)
+    cache = AsyncMock(side_effect=AssertionError("unparseable paths must not reach the network"))
+    monkeypatch.setattr(fs, "get_working_cache", cache)
+
+    result = fs.exists(path=path) if keyword else fs.exists(path)
+
+    assert result is False
+    cache.assert_not_awaited()
+
+
+def test_async_exists_unparseable_path_returns_false():
+    fs = pelicanfs.core.PelicanFileSystem(asynchronous=True, skip_instance_cache=True)
+    assert asyncio.run(fs._exists("s3://bucket/key")) is False

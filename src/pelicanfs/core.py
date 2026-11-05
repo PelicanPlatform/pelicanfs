@@ -521,7 +521,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # strings at their call sites. Unknown names default to read below.
         read_operations = {
             "_cat_file",
-            "_exists",
+            "_exists_from_cache",
             "_info",
             "_get_file_from_cache",
             "_is_collection",
@@ -1423,8 +1423,15 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _cat_file(self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any) -> bytes:
         return await self.http_file_system._cat_file(path, start, end, **kwargs)
 
-    @_cache_dec
     async def _exists(self, path: str, **kwargs: Any) -> bool:
+        try:
+            return await self._exists_from_cache(path, **kwargs)
+        except Exception:
+            # Match fsspec's boolean contract, including failures before cache lookup.
+            return False
+
+    @_cache_dec
+    async def _exists_from_cache(self, path: str, **kwargs: Any) -> bool:
         parts = urllib.parse.urlparse(path)
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
