@@ -26,6 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Self
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
@@ -221,10 +222,10 @@ class TokenContentIterator:
                     except Exception:
                         return b""
 
-                def write_to_pty(data):
+                def write_to_pty(data: bytes) -> None:
                     """Not used on Windows with inherited stdin"""
 
-                def is_alive():
+                def is_alive() -> bool:
                     """Check if process is still running"""
                     return process.poll() is None
 
@@ -271,11 +272,11 @@ class TokenContentIterator:
                             return b""
                     return b""
 
-                def write_to_pty(data):
+                def write_to_pty(data: bytes) -> None:
                     """Write data to Unix PTY"""
                     os.write(master_fd, data)
 
-                def is_alive():
+                def is_alive() -> bool:
                     """Check if process is still running"""
                     return process.poll() is None
 
@@ -305,7 +306,7 @@ class TokenContentIterator:
                         logger.debug("Could not read from redirected stdin: %s", e)
                         stdin_data_to_send = None
 
-            def read_and_echo_output():
+            def read_and_echo_output() -> bytes:
                 """Helper to read from PTY, echo to terminal (filtering sensitive data), and store data"""
                 data = read_from_pty()
                 if data:
@@ -412,7 +413,7 @@ class TokenContentIterator:
         """
         return self.methods.index(method)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.methods = list(TokenDiscoveryMethod)
         # Ensure HTCONDOR_FALLBACK is always available after HTCONDOR_DISCOVERY
         if TokenDiscoveryMethod.HTCONDOR_DISCOVERY in self.methods and TokenDiscoveryMethod.HTCONDOR_FALLBACK not in self.methods:
@@ -420,7 +421,7 @@ class TokenContentIterator:
             discovery_index = self.methods.index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
             self.methods.insert(discovery_index + 1, TokenDiscoveryMethod.HTCONDOR_FALLBACK)
 
-    def __iter__(self):
+    def __iter__(self) -> Self:
         return self
 
     def __next__(self) -> str:

@@ -15,12 +15,13 @@ limitations under the License.
 """
 
 import logging
+from typing import Any
 
 # Finer than DEBUG for internal call-flow tracing (not enabled by default).
 TRACE = 5
 
 
-def trace(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+def trace(logger: logging.Logger, msg: str, *args: object, **kwargs: Any) -> None:
     logger.log(TRACE, msg, *args, stacklevel=2, **kwargs)
 
 
