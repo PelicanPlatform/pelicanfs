@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from pelicanfs import token_generator
-from pelicanfs.log_utils import TRACE, TokenForLog, trace
+from pelicanfs.log_utils import TRACE, TokenForLog, redact_query, trace
 from pelicanfs.token_generator import TokenOperation, token_is_valid_and_acceptable
 
 
@@ -61,6 +61,35 @@ def test_trace_reports_call_site(caplog):
     assert record.levelno == TRACE
     assert Path(record.pathname) == Path(__file__)
     assert record.funcName == "test_trace_reports_call_site"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://c/foo?authz=abc", "https://c/foo?authz=<redacted>"),
+        ("/foo?a=1&authz=abc", "/foo?a=<redacted>&authz=<redacted>"),
+        ("500, url='https://c/foo?authz=abc' failed", "500, url='https://c/foo?authz=<redacted>' failed"),
+        ("https://c/foo", "https://c/foo"),
+        ("/foo/ba?.txt", "/foo/ba?.txt"),
+    ],
+)
+def test_redact_query(text, expected):
+    assert redact_query(text) == expected
+
+
+@pytest.mark.parametrize("name", ["fsspec.pelican", "fsspec.http"])
+def test_query_values_are_not_logged(caplog, name):
+    logger = logging.getLogger(name)
+    with caplog.at_level(logging.DEBUG, logger=name):
+        logger.debug("url=%s", "https://c/foo?authz=abc")
+        url = "https://c/foo?authz=abc"
+        try:
+            raise ValueError(url)
+        except ValueError:
+            logger.debug("failed", exc_info=True)
+
+    assert "url=https://c/foo?authz=<redacted>" in caplog.text
+    assert "abc" not in caplog.text
 
 
 def test_token_is_not_formatted_when_trace_is_off():

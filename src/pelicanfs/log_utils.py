@@ -15,10 +15,13 @@ limitations under the License.
 """
 
 import logging
+import re
 from typing import Any
 
 # Finer than DEBUG for internal call-flow tracing (not enabled by default).
 TRACE = 5
+
+_QUERY_VALUE = re.compile(r"""([?&][^=&?\s'"<>]+=)[^&\s'"<>]*""")
 
 
 def trace(logger: logging.Logger, msg: str, *args: object, **kwargs: Any) -> None:
@@ -43,3 +46,22 @@ class TokenForLog:
         if len(parts) == 3 and raw.startswith("eyJ"):
             return f"{parts[0]}.{parts[1]}"
         return f"<non-jwt len={len(raw)}>"
+
+
+def redact_query(text: str) -> str:
+    """Hide the value of each URL query parameter, which can be an authz token."""
+    return _QUERY_VALUE.sub(r"\1<redacted>", text)
+
+
+class _RedactQueryFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_query(record.getMessage())
+        record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = redact_query(logging.Formatter().formatException(record.exc_info))
+        return True
+
+
+# fsspec.http also logs each URL we hand it.
+for _name in ("fsspec.pelican", "fsspec.http"):
+    logging.getLogger(_name).addFilter(_RedactQueryFilter())

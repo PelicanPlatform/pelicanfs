@@ -682,10 +682,12 @@ logger.setLevel(logging.DEBUG)
 
 **Logging levels and what they show:**
 - `TRACE` (level 5): Token call flow, including allowed issuers and the required and token scopes. Tokens appear as JWT header and payload, which contain claims such as `sub`. The signature is not logged. Enable with `logger.setLevel(5)`
-- `DEBUG`: Detailed information including cache URLs being tried, token discovery, reasons for token rejection, Director responses, and all HTTP requests
-- `INFO`: High-level operations like file opens, reads, and writes
+- `DEBUG`: Detailed information including cache URLs being tried, token discovery, reasons for token rejection, and Director responses
+- `INFO`: OIDC device flow progress
 - `WARNING`: Issues that don't prevent operation but may indicate problems (e.g., falling back to alternate caches)
 - `ERROR`: Operation failures and exceptions
+
+Query string values, such as `authz` tokens, appear as `<redacted>` in `fsspec.pelican` and `fsspec.http` logs and in `get_access_data()`.
 
 ## API Reference
 
@@ -755,7 +757,7 @@ PelicanMap(root, pelfs, check=False, create=False)
 
 **Problem:** `NoAvailableSource` error when trying to access a file
 
-**Solution:** This usually means no Cache or Origin is available for the namespace. Check:
+**Solution:** This usually means no Cache or Origin is available for the namespace. The error message lists each Cache tried and why it failed. If the Director itself returned an error status, you get `DirectorError`, a subclass of `NoAvailableSource`. Check:
 - The namespace path is correct
 - The federation URL is correct
 - Network connectivity to the federation
