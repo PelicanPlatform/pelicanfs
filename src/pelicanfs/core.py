@@ -521,7 +521,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # strings at their call sites. Unknown names default to read below.
         read_operations = {
             "_cat_file",
-            "_exists_on_cache",
+            "_exists_via_cache",
             "_info",
             "_get_file_from_cache",
             "_is_collection",
@@ -1428,10 +1428,10 @@ class PelicanFileSystem(AsyncFileSystem):
             self._check_fspath(path)
         except (InvalidDestinationURL, InvalidMetadata, ValueError):
             return False
-        return await self._exists_on_cache(path, **kwargs)
+        return await self._exists_via_cache(path, **kwargs)
 
     @_cache_dec
-    async def _exists_on_cache(self, path: str, **kwargs: Any) -> bool:
+    async def _exists_via_cache(self, path: str, **kwargs: Any) -> bool:
         parts = urllib.parse.urlparse(path)
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
