@@ -69,6 +69,9 @@ T = TypeVar("T")
 _HTTPReadFile = fshttp.HTTPFile | fshttp.HTTPStreamFile | fshttp.AsyncStreamFile
 
 
+# The most caches one read tries before it gives up and raises the last error.
+MAX_CACHE_ATTEMPTS = 5
+
 # How long before a generated token's expiry it is retired and a new one generated. A
 # token sent right at its expiry would be expired by the time it reaches the server.
 TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
@@ -1207,18 +1210,23 @@ class PelicanFileSystem(AsyncFileSystem):
             return await self.get_origin_url(path)
         return await self.get_working_cache(path)
 
-    def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception) -> tuple[str, DirectorResponse] | None:
+    def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception, attempt: int) -> tuple[str, DirectorResponse] | None:
         """
         Mark the cache behind failed_url as bad and return the next known cache.
+        attempt counts the caches this request has tried, failed_url included.
 
-        Returns None when the request should not be retried: direct reads, a missing
-        object, or no cache left for the namespace. Only caches already in memory are
-        considered; rediscovery would hand back the cache that just failed.
-        Reads are idempotent, so repeating them on another cache is safe.
+        Returns None when the request should not be retried: direct reads, an error
+        that is not a transport or HTTP failure (a missing object included), the
+        MAX_CACHE_ATTEMPTS limit, or no cache left for the namespace. Only caches
+        already in memory are considered; rediscovery would hand back the cache that
+        just failed. Reads are idempotent, so repeating them on another cache is safe.
         """
-        if self.direct_reads or isinstance(error, FileNotFoundError):
+        if self.direct_reads or not isinstance(error, aiohttp.ClientError | OSError) or isinstance(error, FileNotFoundError):
             return None
         self._bad_cache(failed_url, error)
+        if attempt >= MAX_CACHE_ATTEMPTS:
+            logger.debug("Tried %d caches for %s, giving up", attempt, path)
+            return None
         retry = self._known_cache(path)
         if retry is None:
             logger.debug("No further cache to retry %s on", path)
@@ -1232,27 +1240,30 @@ class PelicanFileSystem(AsyncFileSystem):
         Records a successful access and returns attempt's result.
         """
         data_url, director_response = await self._resolve_data_url(path)
+        tries = 1
         while True:
             await self._handle_token_generation(data_url, director_response, operation)
             try:
                 result = await attempt(data_url)
                 break
             except Exception as e:
-                retry = self._next_cache_after_failure(path, data_url, e)
+                retry = self._next_cache_after_failure(path, data_url, e, tries)
                 if retry is None:
                     raise
                 data_url, director_response = retry
+                tries += 1
         if not self.direct_reads:
             self._access_stats.add_response(path, _AccessResp(data_url, True))
         return result
 
-    def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception) -> bool:
+    def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception, attempt: int) -> bool:
         """
         Point an open fsspec http file at the next cache after a read failed. Range-based
         files resume at the current offset. A streaming file can only be restarted before
-        any data was read. Returns False when the read should not be retried.
+        any data was read; a sync stream must then be reopened with _open_stream_response.
+        Returns False when the read should not be retried.
         """
-        retry = self._next_cache_after_failure(path, fp.url, error)
+        retry = self._next_cache_after_failure(path, fp.url, error, attempt)
         if retry is None:
             return False
         url = retry[0]
@@ -1265,14 +1276,8 @@ class PelicanFileSystem(AsyncFileSystem):
                     fp.r = None
                 fp.url = url
             case fshttp.HTTPStreamFile(loc=0):
-                # The sync stream holds an open response, so it has to be reopened here
                 fp.r.close()
                 fp.url = url
-                try:
-                    fp.r = sync(self.loop, self._open_stream_response, fp)
-                except Exception as e:
-                    if not self._retarget_after_failure(fp, path, e):
-                        raise
             case _:
                 return False
         return True
@@ -1292,13 +1297,20 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
-        def io_wrapper(*args, **kwargs):
+        def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
+            tries = 1
+            reopen = False
             while True:
                 try:
+                    if reopen:
+                        fp.r = sync(self.loop, self._open_stream_response, fp)
+                        reopen = False
                     return read(*args, **kwargs)
                 except Exception as e:
-                    if not self._retarget_after_failure(fp, path, e):
+                    if not self._retarget_after_failure(fp, path, e, tries):
                         raise
+                    tries += 1
+                    reopen = isinstance(fp, fshttp.HTTPStreamFile)
 
         return io_wrapper
 
@@ -1308,13 +1320,15 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
-        async def io_wrapper(*args, **kwargs):
+        async def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
+            tries = 1
             while True:
                 try:
                     return await read(*args, **kwargs)
                 except Exception as e:
-                    if not self._retarget_after_failure(fp, path, e):
+                    if not self._retarget_after_failure(fp, path, e, tries):
                         raise
+                    tries += 1
 
         return io_wrapper
 
@@ -1438,6 +1452,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         data_url, director_response = sync(self.loop, self._resolve_data_url, path)  # type: ignore[misc]
         operation = self._get_token_operation("open")
+        tries = 1
         while True:
             sync(self.loop, self._handle_token_generation, data_url, director_response, operation)
             logger.debug("Running open on %s...", data_url)
@@ -1445,10 +1460,11 @@ class PelicanFileSystem(AsyncFileSystem):
                 fp = self.http_file_system.open(data_url, mode, **kwargs)
                 break
             except Exception as e:
-                retry = self._next_cache_after_failure(path, data_url, e)
+                retry = self._next_cache_after_failure(path, data_url, e, tries)
                 if retry is None:
                     raise
                 data_url, director_response = retry
+                tries += 1
         # Text mode wraps the binary file; its reads go through the binary file's read
         raw = fp.buffer if isinstance(fp, io.TextIOWrapper) else fp
         if isinstance(raw, fshttp.HTTPFile | fshttp.HTTPStreamFile):
@@ -1490,7 +1506,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
 
-            async def attempt(data_url: str):
+            async def attempt(data_url: str) -> T:
                 logger.debug("Calling %s using the following url: %s", func, data_url)
                 return await func(self, data_url, *rest, **kwargs)
 
