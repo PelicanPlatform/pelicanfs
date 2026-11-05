@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from scitokens import SciToken
 from scitokens.utils.keycache import KeyCache
 
+from pelicanfs.dir_header_parser import DirectorResponse, XPelNs, XPelTokGen
 from pelicanfs.token_generator import (
     TokenOperation,
     is_valid_token,
@@ -165,21 +166,20 @@ def test_multiple_audiences(ec_keys, issuer, scope, caplog):
 # ------------------------
 
 
-def mock_dir_resp(ns, issuers):
-    class MockDirResp:
-        class XPelNsHdr:
-            Namespace = ns
-
-        class XPelTokGenHdr:
-            Issuers = issuers
-
-    return MockDirResp()
+def mock_dir_resp(ns, issuers, base_paths=None):
+    """A director response as parse_director_response builds it: scopes are relative to the base path, or to the namespace without one."""
+    return DirectorResponse(
+        object_servers=[],
+        location=None,
+        x_pel_ns_hdr=XPelNs(namespace=ns, require_token=True),
+        x_pel_tok_gen_hdr=XPelTokGen(issuers=issuers, base_paths=base_paths or []),
+    )
 
 
 def test_token_is_acceptable_read_scope(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.read")
 
-    valid, expiry = token_is_valid_and_acceptable(token, object_name="namespace/file.txt", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenRead)
+    valid, expiry = token_is_valid_and_acceptable(token, object_name="/namespace/file.txt", dir_resp=mock_dir_resp("/namespace", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
     assert expiry > datetime.now(UTC)
 
@@ -187,45 +187,47 @@ def test_token_is_acceptable_read_scope(ec_keys, issuer):
 def test_token_scope_mismatch_for_write(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.read")
 
-    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/data", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenWrite)
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/namespace/data", dir_resp=mock_dir_resp("/namespace", [issuer]), operation=TokenOperation.TokenWrite)
     assert not valid
 
 
 def test_token_valid_shared_write(ec_keys, issuer):
     token = create_token(ec_keys, issuer, 3600, "storage.modify storage.create")
 
-    valid, _ = token_is_valid_and_acceptable(token, object_name="namespace/upload", dir_resp=mock_dir_resp("namespace", [issuer]), operation=TokenOperation.TokenSharedWrite)
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/namespace/upload", dir_resp=mock_dir_resp("/namespace", [issuer]), operation=TokenOperation.TokenSharedWrite)
     assert valid
+
+
+def test_token_from_other_issuer_is_not_acceptable(ec_keys, issuer):
+    other_issuer = "https://other-issuer.test"
+    KeyCache.getinstance().addkeyinfo(issuer=other_issuer, key_id="key1", public_key=ec_keys["public_key_obj"], cache_timer=3600)
+    token = create_token(ec_keys, other_issuer, 3600, "storage.read")
+
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/namespace/file.txt", dir_resp=mock_dir_resp("/namespace", [issuer]), operation=TokenOperation.TokenRead)
+    assert not valid
 
 
 def test_path_prefix_matching(ec_keys, issuer):
     """Test that path prefix matching works correctly for directory boundaries."""
-    # Create tokens with different resource scopes
-    token1 = create_token(ec_keys, issuer, 3600, "storage.read:/foo/bar")
-    token2 = create_token(ec_keys, issuer, 3600, "storage.read:/foo/bartest")
+    # Scopes are relative to the /foo namespace, so /bar covers /foo/bar/...
+    token1 = create_token(ec_keys, issuer, 3600, "storage.read:/bar")
+    token2 = create_token(ec_keys, issuer, 3600, "storage.read:/bartest")
 
-    # Test that /foo/bar scope matches /foo/bar/file.txt but not /foo/barz/file.txt
-    valid1, _ = token_is_valid_and_acceptable(token1, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    # Test that /bar scope matches /foo/bar/file.txt but not /foo/barz/file.txt
+    valid1, _ = token_is_valid_and_acceptable(token1, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert valid1
 
-    valid2, _ = token_is_valid_and_acceptable(token1, object_name="/foo/barz/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    valid2, _ = token_is_valid_and_acceptable(token1, object_name="/foo/barz/file.txt", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert not valid2
 
-    # Test that /foo/bartest scope doesn't match /foo/bar/file.txt
-    valid3, _ = token_is_valid_and_acceptable(token2, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    # Test that /bartest scope doesn't match /foo/bar/file.txt
+    valid3, _ = token_is_valid_and_acceptable(token2, object_name="/foo/bar/file.txt", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert not valid3
 
 
 def _live_dir_resp(issuer, base_paths=None):
     """Headers as the OSDF tutorial director sends them (scopes are relative to the base path)."""
-    from pelicanfs.dir_header_parser import DirectorResponse, XPelNs, XPelTokGen
-
-    return DirectorResponse(
-        object_servers=[],
-        location=None,
-        x_pel_ns_hdr=XPelNs(namespace="/osdf-tutorial", require_token=True),
-        x_pel_tok_gen_hdr=XPelTokGen(issuers=[issuer], base_paths=base_paths or []),
-    )
+    return mock_dir_resp("/osdf-tutorial", [issuer], base_paths)
 
 
 @pytest.mark.parametrize("object_name", ["/osdf-tutorial/protected", "/osdf-tutorial/protected/", "/osdf-tutorial/protected/file.txt"])
@@ -262,5 +264,5 @@ def test_root_scope_matches_every_path(ec_keys, issuer):
 
     valid, _ = token_is_valid_and_acceptable(token, object_name="/osdf-tutorial/protected/file.txt", dir_resp=_live_dir_resp(issuer, ["/osdf-tutorial"]), operation=TokenOperation.TokenRead)
     assert valid
-    valid, _ = token_is_valid_and_acceptable(token, object_name="/foo/bar", dir_resp=mock_dir_resp("foo", [issuer]), operation=TokenOperation.TokenRead)
+    valid, _ = token_is_valid_and_acceptable(token, object_name="/foo/bar", dir_resp=mock_dir_resp("/foo", [issuer]), operation=TokenOperation.TokenRead)
     assert valid
