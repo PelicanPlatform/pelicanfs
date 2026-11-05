@@ -59,6 +59,44 @@ def test_info(httpserver: HTTPServer, get_client, get_webdav_client):
     assert result["name"] == "/foo/bar"
     assert result["size"] == 13
     assert result["type"] == "file"
+    assert result["mimetype"] == "text/plain"
+    assert result["mtime"] == "Mon, 01 Jan 2024 00:00:00 GMT"
+
+
+def test_info_percent_encoded_path(httpserver: HTTPServer, get_client, get_webdav_client):
+    """An encoded path reaches the server encoded once, not twice."""
+    url = httpserver.url_for("foo/a%20b")
+    propfind_response = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/a%20b</D:href>
+    <D:propstat>
+      <D:prop><D:getcontentlength>13</D:getcontentlength></D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/a b", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": "namespace=/foo",
+        },
+    )
+    httpserver.expect_request("/foo/a b", method="HEAD").respond_with_data("hello, world!")
+    httpserver.expect_request("/foo/a b", method="PROPFIND").respond_with_data(propfind_response, status=207, content_type="application/xml")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        get_webdav_client=get_webdav_client,
+        skip_instance_cache=True,
+    )
+
+    assert pelfs.info("/foo/a%20b")["size"] == 13
 
 
 def test_info_collection(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):

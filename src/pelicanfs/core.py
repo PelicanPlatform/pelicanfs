@@ -27,6 +27,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, TypeVar, cast, overload
@@ -34,14 +35,13 @@ from typing import Any, NoReturn, TypeVar, cast, overload
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import Client, ClientOptions
-from aiowebdav2.exceptions import (
+from aiowebdav2 import (
+    Client,
+    ClientOptions,
     MethodNotSupportedError,
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
 )
-from aiowebdav2.parser import WebDavXmlUtils
-from aiowebdav2.urn import Urn
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.mapping import FSMap
 from fsspec.utils import glob_translate
@@ -206,9 +206,9 @@ def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.Trace
     Return a trace config that keeps a session from holding on to its responses.
 
     aiowebdav2 hands back raw aiohttp responses and does not reliably release them.
-    Client.check, which backs exists(), only looks at response.status, and
-    execute_request abandons the response altogether when it raises for an error status
-    (401, 403, 404, 405, 423 and 507). A response that is never released keeps its
+    _resource_exists only looks at response.status, and Client.request abandons the
+    response altogether when it raises for an error status (401, 403, 404, 405, 423 and
+    507). A response that is never released keeps its
     connection checked out until it is garbage collected, at which point aiohttp reports
     an "Unclosed connection".
 
@@ -226,10 +226,10 @@ def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.Trace
     would break the assumption, since the second to start would release the first's
     response while it was still being read.
 
-    The one method this reasoning does not cover is download_iter, which returns a
-    generator over its response, so the response outlives the call. pelicanfs does not use
-    it; a caller who does must not start another request on the same client until they
-    have finished consuming the generator.
+    The one method this reasoning does not cover is iter_read, which returns an iterator
+    over its response, so the response outlives the call. pelicanfs does not use it; a
+    caller who does must not start another request on the same client until they have
+    finished consuming the iterator.
     """
     trace_config = aiohttp.TraceConfig()
 
@@ -250,8 +250,8 @@ def _release_responses(responses: list[aiohttp.ClientResponse]) -> None:
 
     This releases rather than reads the bodies, since a body may be arbitrarily large and
     is of no interest by this point. The cost is that aiohttp closes a connection whose
-    body was left unread instead of returning it to the pool, so repeated check() calls on
-    one client each pay a fresh handshake. The bodies pelicanfs actually wants are read by
+    body was left unread instead of returning it to the pool, so repeated _resource_exists
+    calls on one client each pay a fresh handshake. The bodies pelicanfs actually wants are read by
     aiowebdav2 itself, and releasing those is a no-op that leaves them pooled as normal.
     """
     while responses:
@@ -278,8 +278,7 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     responses: list[aiohttp.ClientResponse] = []
     session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses)])
     clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
-    client = Client(url=base_url, username="", password="", options=clientopts)
-    client._close_session = True
+    client = Client(base_url, options=clientopts)
 
     try:
         yield client
@@ -290,8 +289,30 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
         try:
             _release_responses(responses)
         finally:
-            await client.close()
+            # aiowebdav2 leaves a session it was handed for its owner to close
+            await session.close()
             logger.debug("WebDAV client closed")
+
+
+async def _resource_exists(client: Client, path: str) -> bool:
+    """
+    Whether the server has a resource at `path`.
+
+    Client.exists also requires the reply to name `path`, so a reply that names the
+    resource another way, or carries no body, would read as missing. The status settles it.
+    """
+    try:
+        await client.request("PROPFIND", path, headers={"Depth": "0"})
+    except RemoteResourceNotFoundError:
+        return False
+    return True
+
+
+def _webdav_path(url: str) -> str:
+    """
+    The decoded path of `url`. aiowebdav2 encodes paths itself and takes "%" literally.
+    """
+    return urllib.parse.unquote(urllib.parse.urlparse(url).path)
 
 
 def _path_arg_splitter(func: Callable[..., Any]) -> Callable[[tuple[Any, ...], dict[str, Any]], tuple[Any, tuple[Any, ...]]]:
@@ -995,38 +1016,33 @@ class PelicanFileSystem(AsyncFileSystem):
                 return await self._ls_real(url, detail=detail, client=client_ctx)
 
         # Now that we have a client, we can proceed with the listing
-        remote_dir = parts.path
-        list_files = client.list_with_infos if detail else client.list_files
+        remote_dir = _webdav_path(url)
         try:
-            items: list[Any] = await list_files(remote_dir)
+            items: list[Any] = await client.list(remote_dir)
         except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
             if isinstance(e, ResponseErrorCodeError) and e.code != 500:
                 raise
 
             remote_dir = remote_dir.removesuffix("/")
-            exists = await client.check(remote_dir)
-            if exists:
+            if await _resource_exists(client, remote_dir):
                 return set()
             raise FileNotFoundError from e
 
         if detail:
 
-            def get_item_detail(item: dict[str, Any]) -> dict[str, Any]:
-                full_path = f"{base_url}{item['path']}"
-                isdir = item.get("isdir") == "True"
-                if isdir and not full_path.endswith("/"):
+            def get_item_detail(item: Any) -> dict[str, Any]:
+                full_path = f"{base_url}{item.path}"
+                if item.is_dir and not full_path.endswith("/"):
                     full_path += "/"
-                modtimestr = item["modified"]
-                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
                 return {
                     "name": full_path,
-                    "size": int(item["size"]),
-                    "type": "directory" if isdir else "file",
-                    "modified": modtime,
+                    "size": item.size or 0,
+                    "type": "directory" if item.is_dir else "file",
+                    "modified": item.modified and item.modified.replace(tzinfo=None),
                 }
 
             return [get_item_detail(item) for item in items]
-        return sorted(set(items))
+        return sorted({item.path for item in items})
 
     async def _isdir(self, path: str) -> bool:
         """
@@ -1054,11 +1070,10 @@ class PelicanFileSystem(AsyncFileSystem):
         operation = self._get_token_operation("_is_collection")
         await self._handle_token_generation(list_url, director_response, operation)
 
-        parts = urllib.parse.urlparse(list_url)
         # Probe the trailing-slash form: origins answer a collection's slash form
         # directly and reject an object's with a 500 -- the same convention _ls_real
         # keys on to tell the two apart
-        probe_path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
+        probe_path = f"{_webdav_path(list_url).removesuffix('/')}/"
         async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             try:
                 return await client.is_dir(probe_path)
@@ -1412,9 +1427,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_cache_dec
     async def _exists(self, path: str, **kwargs: Any) -> bool:
-        parts = urllib.parse.urlparse(path)
         async with self.get_webdav_client(self._webdav_options(path)) as client:
-            return await client.check(parts.path)
+            return await _resource_exists(client, _webdav_path(path))
 
     async def _get_file(self, rpath: str, lpath: str, _collection_roots: set[str] | None = None, **kwargs: Any) -> None:
         """
@@ -1436,31 +1450,20 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_cache_dec
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
-        parts = urllib.parse.urlparse(path)
-        options = self._webdav_options(path)
-        async with self.get_webdav_client(options) as client:
-            # Client.info drops resourcetype, so do its PROPFIND here and parse both
-            remote_path = Urn(parts.path).path()
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
             try:
-                response = await client.execute_request(action="info", path=remote_path)
-                resource = WebDavXmlUtils.extract_response_for_path(
-                    content=await response.read(),
-                    path=remote_path,
-                    hostname=options["hostname"],
-                )
+                result = await client.stat(_webdav_path(path))
             except RemoteResourceNotFoundError:
                 raise FileNotFoundError(path) from None
-            result = WebDavXmlUtils.get_info_from_response(resource)
-            isdir = resource.find(".//{DAV:}resourcetype/{DAV:}collection") is not None
             # Match the names _ls_real gives collections
-            if isdir and not path.endswith("/"):
+            if result.is_dir and not path.endswith("/"):
                 path += "/"
             info = {
                 "name": path,
-                "type": "directory" if isdir else "file",
-                "size": int(result.get("size", 0)),
-                "mimetype": result.get("content_type", ""),
-                "mtime": result.get("modified", ""),
+                "type": "directory" if result.is_dir else "file",
+                "size": result.size or 0,
+                "mimetype": result.content_type or "",
+                "mtime": format_datetime(result.modified.astimezone(UTC), usegmt=True) if result.modified else "",
             }
             return self._remove_host_from_paths(info)
 

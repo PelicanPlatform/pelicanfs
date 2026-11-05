@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from datetime import datetime
+
 import pytest
 from aiowebdav2.exceptions import UnauthorizedError
 from fsspec.asyn import sync
@@ -74,6 +76,36 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
         "/foo/bar/folder1/",
         "/foo/bar/folder2/",
     ]
+
+
+def test_ls_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    foo_bar_url = httpserver.url_for("foo/bar")
+
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
+        },
+    )
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+    )
+
+    entries = {entry["name"]: entry for entry in pelfs.ls("/foo/bar", detail=True)}
+    for entry in entries.values():
+        assert isinstance(entry["size"], int)
+        assert isinstance(entry["modified"], datetime)
+        assert entry["modified"].tzinfo is None
+    assert entries["/foo/bar/folder1/"]["type"] == "directory"
+    assert entries["/foo/bar/file1.txt"]["type"] == "file"
 
 
 def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client):
