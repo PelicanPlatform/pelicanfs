@@ -29,6 +29,7 @@ repos:
     rev: 1aa6dfeb849ae43fb6f16fc17228bcbd358a19c3  # frozen: v1.1.414
     hooks:
     -   id: pyright
+        language_version: "3.13"
         pass_filenames: false
         additional_dependencies:
           - aiohttp
