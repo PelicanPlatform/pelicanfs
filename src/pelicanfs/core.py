@@ -347,6 +347,18 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
     return wrapper
 
 
+def _cache_failure(error: BaseException) -> BaseException | None:
+    """
+    Return the transport or HTTP failure behind error, or None for any other error,
+    a missing object included. fsspec's _info reports every failed GET as
+    FileNotFoundError, with the real error as the cause.
+    """
+    failure = error.__cause__ if isinstance(error, FileNotFoundError) else error
+    if isinstance(failure, FileNotFoundError) or (isinstance(failure, aiohttp.ClientResponseError) and failure.status == 404):
+        return None
+    return failure if isinstance(failure, aiohttp.ClientError | OSError) else None
+
+
 def _url_origin(url: object) -> tuple[str, str | None, int | None]:
     """Return the scheme, host and port of `url`, with the default port filled in."""
     parts = urllib.parse.urlsplit(str(url))
@@ -922,14 +934,12 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Matching namespace found, using cache at %s", cache_url)
         return cache_url, namespace_info.cache_manager.director_response
 
-    def _bad_cache(self, url: str, e: Exception) -> None:
+    def _bad_cache(self, url: str, e: BaseException) -> None:
         """
         Given a URL of a cache transfer that failed, record
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
-        if isinstance(e, FileNotFoundError):
-            return
         logger.debug("Marking cache at %s as bad", url)
         path = urllib.parse.urlparse(url).path
         bad_cache = _host_of(url)
@@ -1221,9 +1231,10 @@ class PelicanFileSystem(AsyncFileSystem):
         already in memory are considered; rediscovery would hand back the cache that
         just failed. Reads are idempotent, so repeating them on another cache is safe.
         """
-        if self.direct_reads or not isinstance(error, aiohttp.ClientError | OSError) or isinstance(error, FileNotFoundError):
+        failure = _cache_failure(error)
+        if self.direct_reads or failure is None:
             return None
-        self._bad_cache(failed_url, error)
+        self._bad_cache(failed_url, failure)
         if attempt >= MAX_CACHE_ATTEMPTS:
             logger.debug("Tried %d caches for %s, giving up", attempt, path)
             return None
@@ -1231,7 +1242,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if retry is None:
             logger.debug("No further cache to retry %s on", path)
             return None
-        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, error, retry[0])
+        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, failure, retry[0])
         return retry
 
     async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt: Callable[[str], Awaitable[T]]) -> T:
@@ -1256,30 +1267,31 @@ class PelicanFileSystem(AsyncFileSystem):
             self._access_stats.add_response(path, _AccessResp(data_url, True))
         return result
 
-    def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception, attempt: int) -> bool:
+    async def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception, attempt: int) -> bool:
         """
         Point an open fsspec http file at the next cache after a read failed. Range-based
         files resume at the current offset. A streaming file can only be restarted before
         any data was read; a sync stream must then be reopened with _open_stream_response.
-        Returns False when the read should not be retried.
+        Prepares the token for the next cache. Returns False when the read should not be
+        retried.
         """
         retry = self._next_cache_after_failure(path, fp.url, error, attempt)
         if retry is None:
             return False
-        url = retry[0]
+        url, director_response = retry
         match fp:
             case fshttp.HTTPFile():
-                fp.url = url
+                pass
             case fshttp.AsyncStreamFile(loc=0):
                 if fp.r is not None:
                     fp.r.close()
                     fp.r = None
-                fp.url = url
             case fshttp.HTTPStreamFile(loc=0):
                 fp.r.close()
-                fp.url = url
             case _:
                 return False
+        await self._handle_token_generation(url, director_response, self._get_token_operation("open"))
+        fp.url = url
         return True
 
     @staticmethod
@@ -1307,7 +1319,7 @@ class PelicanFileSystem(AsyncFileSystem):
                         reopen = False
                     return read(*args, **kwargs)
                 except Exception as e:
-                    if not self._retarget_after_failure(fp, path, e, tries):
+                    if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
                         raise
                     tries += 1
                     reopen = isinstance(fp, fshttp.HTTPStreamFile)
@@ -1326,7 +1338,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 try:
                     return await read(*args, **kwargs)
                 except Exception as e:
-                    if not self._retarget_after_failure(fp, path, e, tries):
+                    if not await self._retarget_after_failure(fp, path, e, tries):
                         raise
                     tries += 1
 

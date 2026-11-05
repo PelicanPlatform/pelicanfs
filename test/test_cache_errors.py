@@ -20,7 +20,7 @@ from fsspec.asyn import sync
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
-from pelicanfs.core import MAX_CACHE_ATTEMPTS, PelicanFileSystem
+from pelicanfs.core import MAX_CACHE_ATTEMPTS, PelicanFileSystem, _cache_failure
 from pelicanfs.exceptions import NoAvailableSource
 
 
@@ -251,6 +251,68 @@ def test_open_text_read_retries_on_next_cache(httpserver: HTTPServer, httpserver
     with pelfs.open("/foo/bar", "r", cache_type="none") as fp:
         assert fp.read() == "hello"
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize("status", [401, 500, 503])
+def test_open_metadata_failure_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """fsspec wraps a failed metadata GET as FileNotFoundError, which must still switch cache."""
+    _setup_director(httpserver, httpserver2)
+    # The working-cache probe passes; open's own HEAD and GET then fail
+    httpserver.expect_oneshot_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=status)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+    httpserver2.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "rb", cache_type="none") as fp:
+        assert fp.read() == b"hello"
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_missing_object_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A 404 during open is not a cache failure, so no cache is evicted or retried."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=404)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=404)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(FileNotFoundError):
+        pelfs.open("/foo/bar", "rb")
+    hosts = pelfs._get_prefix_info("/foo/bar").cache_manager._cache_list
+    assert hosts == [httpserver.url_for("").rstrip("/"), httpserver2.url_for("").rstrip("/")]
+    assert not [req for req, _ in httpserver2.log if req.path == "/foo/bar"]
+
+
+def _wrapped(cause):
+    error = FileNotFoundError("/foo/bar")
+    error.__cause__ = cause
+    return error
+
+
+def _response_error(status):
+    return aiohttp.ClientResponseError(None, (), status=status)
+
+
+@pytest.mark.parametrize(
+    ("error", "failure"),
+    [
+        (connection := aiohttp.ClientConnectionError("refused"), connection),
+        (_wrapped(connection), connection),
+        (server_error := _response_error(500), server_error),
+        (_wrapped(server_error), server_error),
+        (_wrapped(timeout := TimeoutError()), timeout),
+        (_response_error(404), None),
+        (_wrapped(_response_error(404)), None),
+        (FileNotFoundError("/foo/bar"), None),
+        (_wrapped(ValueError("bad header")), None),
+        (ValueError("not a cache problem"), None),
+    ],
+)
+def test_cache_failure(error, failure):
+    assert _cache_failure(error) is failure
 
 
 def test_non_transport_error_does_not_evict_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch):

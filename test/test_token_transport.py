@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fsspec.asyn import get_loop, sync
 from pytest_httpserver import HTTPServer
+from werkzeug.wrappers import Response
 
 from pelicanfs.core import PelicanFileSystem
 from pelicanfs.token_generator import TokenGenerator, TokenInfo
@@ -32,6 +33,13 @@ GENERATED = "Bearer gen-token"
 
 def requests_to(server: HTTPServer, method: str):
     return [request for request, _ in server.log if request.method == method]
+
+
+def _short_body(_request):
+    """A 200 whose body is shorter than its Content-Length, so reading it fails."""
+    response = Response(iter([b"he"]), status=200, direct_passthrough=True)
+    response.headers["Content-Length"] = "5"
+    return response
 
 
 @pytest.fixture(name="generated_token")
@@ -68,6 +76,54 @@ def fixture_federation(httpserver: HTTPServer, httpserver2: HTTPServer, get_clie
         return PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, **kwargs)
 
     return make_fs
+
+
+def _sync_read(fs, **kwargs):
+    with fs.open("/foo/bar", "rb", **kwargs) as fp:
+        return fp.read()
+
+
+def _async_read(fs):
+    async def read():
+        fp = await fs.open_async("/foo/bar")
+        try:
+            return await fp.read()
+        finally:
+            await fp.close()
+
+    return sync(fs.loop, read)
+
+
+@pytest.mark.usefixtures("generated_token")
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(lambda fs: _sync_read(fs, cache_type="none"), id="range"),
+        pytest.param(lambda fs: _sync_read(fs, block_size=0), id="stream"),
+        pytest.param(_async_read, id="async"),
+    ],
+)
+def test_read_retry_sends_token_to_replacement_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, read):
+    """A cache first seen by a read retry is prepared for the token before the retry."""
+    httpserver2.clear()
+    urls = [server.url_for("/foo/bar") for server in (httpserver, httpserver2)]
+    link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo, require-token=true"},
+    )
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    # The stream file starts its GET while opening, so open succeeds and the first read fails
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_handler(_short_body)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    fs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert read(fs) == b"hello"
+    assert [request.headers.get("Authorization") for request in requests_to(httpserver2, "GET")] == [GENERATED]
 
 
 @pytest.mark.usefixtures("generated_token")
