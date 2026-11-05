@@ -58,6 +58,7 @@ dev = [{ include-group = "testing" }]
 
 [tool.uv]
 exclude-newer = "3 days"
+exclude-newer-package = { aiowebdav2 = "2026-11-04T00:00:00Z" }
 
 [tool.pytest]
 minversion = "9.0"
