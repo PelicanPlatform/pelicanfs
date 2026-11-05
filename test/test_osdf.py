@@ -20,18 +20,18 @@ import pelicanfs.core
 
 
 def test_osdf():
-    with fsspec.open("osdf:///ospool/uc-shared/public/OSG-Staff/validation/test.txt") as of:
+    with fsspec.open("osdf:///pelicanplatform/test/hello-world.txt") as of:
         data = of.read()
-    assert data == b"Hello, World!\n"
+    assert data == b"If you are seeing this message, getting an object from OSDF was successful.\n"
 
 
 def test_osdf_pelicanurl():
-    with fsspec.open("pelican://osg-htc.org/ospool/uc-shared/public/OSG-Staff/validation/test.txt") as of:
+    with fsspec.open("pelican://osg-htc.org/pelicanplatform/test/hello-world.txt") as of:
         data = of.read()
-    assert data == b"Hello, World!\n"
+    assert data == b"If you are seeing this message, getting an object from OSDF was successful.\n"
 
 
 def test_osdf_direct():
     pelfs = pelicanfs.core.PelicanFileSystem("pelican://osg-htc.org", direct_reads=True)
-    data = pelfs.cat("/ospool/uc-shared/public/OSG-Staff/validation/test.txt")
-    assert data == b"Hello, World!\n"
+    data = pelfs.cat("/pelicanplatform/test/hello-world.txt")
+    assert data == b"If you are seeing this message, getting an object from OSDF was successful.\n"
