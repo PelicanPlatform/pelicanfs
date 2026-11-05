@@ -15,10 +15,12 @@ limitations under the License.
 """
 
 import errno
+import gzip
 import socketserver
 import threading
 
 import aiohttp
+import fsspec.implementations.http as fshttp
 import pytest
 from aiowebdav2.exceptions import (
     AccessDeniedError,
@@ -162,6 +164,17 @@ def _serve_range(data: bytes):
 def _broken_body(request):
     """A 200 whose body is shorter than its Content-Length, so the client fails on its first read."""
     response = Response(iter([b"he"]), status=200, direct_passthrough=True)
+    response.headers["Content-Length"] = "5"
+    return response
+
+
+def _server_error(_request):
+    return Response("", status=500)
+
+
+def _empty_broken_body(_request):
+    """A 200 that ends before its first byte, so a stream fails while it can still fail over."""
+    response = Response(iter([b""]), status=200, direct_passthrough=True)
     response.headers["Content-Length"] = "5"
     return response
 
@@ -385,6 +398,167 @@ def test_info_auth_failure_keeps_caches(httpserver: HTTPServer, httpserver2: HTT
     with pytest.raises(error):
         pelfs.info("/foo/bar")
     _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "failure"),
+    [
+        pytest.param({"cache_type": "none"}, _server_error, id="range"),
+        pytest.param({"block_size": 0}, _empty_broken_body, id="stream"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["rb", "rt"])
+def test_open_compressed_read_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, kwargs, failure, mode):
+    """fsspec wraps the file in the codec, and its reads must still fail over."""
+    data = gzip.compress(b"hello")
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data(data)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(failure)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(data))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", mode, compression="gzip", **kwargs) as fp:
+        assert fp.read() in {b"hello", "hello"}
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def test_open_compressed_stream_failure_marks_cache_bad(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A compressed stream that already returned data cannot fail over, but the cache is still marked."""
+    data = gzip.compress(b"hello")
+    _setup_director(httpserver, httpserver2)
+
+    def truncated(_request):
+        response = Response(iter([data[:4]]), status=200, direct_passthrough=True)
+        response.headers["Content-Length"] = str(len(data))
+        return response
+
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data(data)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(truncated)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "rb", compression="gzip", block_size=0) as fp:
+        # GzipFile does not close the file it wraps
+        stream = fp.fileobj
+        with pytest.raises(aiohttp.ClientError):
+            fp.read()
+    stream.close()
+    _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
+
+
+def _stream_read(pelfs):
+    with pelfs.open("/foo/bar", "rb", block_size=0) as fp:
+        return fp.read()
+
+
+def _async_read(pelfs):
+    async def read():
+        fp = await pelfs.open_async("/foo/bar")
+        try:
+            return await fp.read()
+        finally:
+            await fp.close()
+
+    return sync(pelfs.loop, read)
+
+
+@pytest.mark.parametrize("read", [pytest.param(_stream_read, id="sync"), pytest.param(_async_read, id="async")])
+def test_failed_stream_reopen_closes_response(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch, read):
+    """A stream reopen that gets an error status must not leak that response."""
+    checked = []
+    closed = []
+    check_status = fshttp.HTTPFileSystem._raise_not_found_for_status
+    close = aiohttp.ClientResponse.close
+
+    def spy_check_status(self, response, url):
+        checked.append(response)
+        check_status(self, response, url)
+
+    def spy_close(self):
+        closed.append(self)
+        close(self)
+
+    monkeypatch.setattr(fshttp.HTTPFileSystem, "_raise_not_found_for_status", spy_check_status)
+    monkeypatch.setattr(aiohttp.ClientResponse, "close", spy_close)
+
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(_broken_body)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("", status=503)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="503"):
+        read(pelfs)
+    assert any(response is checked[-1] for response in closed)
+
+
+def test_read_after_failed_stream_reopen_reopens(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """A read after a failed reopen must not take the closed response for end of file."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(_broken_body)
+    httpserver2.expect_oneshot_request("/foo/bar", method="GET").respond_with_data("", status=503)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pelfs.open("/foo/bar", "rb", block_size=0) as fp:
+        with pytest.raises(aiohttp.ClientResponseError, match="503"):
+            fp.read()
+        assert fp.read() == b"hello"
+
+
+@pytest.mark.parametrize("status", [400, 403])
+def test_non_retryable_failure_is_recorded(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """A failure that keeps the cache still appears in the access data."""
+    url, _ = _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=200)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match=str(status)):
+        pelfs.cat("/foo/bar")
+    responses, _ = pelfs.get_access_data().get_responses("/foo/bar")
+    assert [(r.access_path, r.success) for r in responses] == [(url, False)]
+    assert str(status) in responses[0].error
+    _assert_all_caches_kept(pelfs, httpserver, httpserver2)
+
+
+def test_missing_object_is_not_recorded_as_failure(httpserver: HTTPServer, get_client):
+    _setup_director(httpserver)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=200)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=404)
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(FileNotFoundError):
+        pelfs.cat("/foo/bar")
+    assert pelfs.get_access_data().get_responses("/foo/bar") == ([], False)
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(lambda pelfs: pelfs.open("/foo/bar", "rb", cache_type="none").read(), id="range"),
+        pytest.param(_stream_read, id="stream"),
+        pytest.param(_async_read, id="async"),
+    ],
+)
+def test_read_failover_records_success(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, read):
+    """A read that recovered on the next cache records that cache's success."""
+    urls = _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_handler(_broken_body)
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_handler(_serve_range(b"hello"))
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert read(pelfs) == b"hello"
+    responses, _ = pelfs.get_access_data().get_responses("/foo/bar")
+    assert (responses[-1].access_path, responses[-1].success) == (urls[1], True)
 
 
 @pytest.mark.parametrize("status", [401, 403])

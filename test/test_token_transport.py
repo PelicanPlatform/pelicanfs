@@ -281,3 +281,43 @@ def test_session_does_not_keep_filesystem_alive(federation):
 
     assert ref() is None
     assert session.closed
+
+
+def _two_cache_token_federation(httpserver, httpserver2):
+    urls = [server.url_for("/foo/bar") for server in (httpserver, httpserver2)]
+    link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/bar", method="GET").respond_with_data(
+        "",
+        status=307,
+        headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo, require-token=true"},
+    )
+    return [url.removesuffix("/foo/bar") for url in urls]
+
+
+@pytest.mark.usefixtures("generated_token")
+@pytest.mark.parametrize("status", [401, 403])
+def test_probe_moves_past_cache_that_refuses_token(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, status):
+    """A cache that refuses a valid token must not stay first while another works."""
+    hosts = _two_cache_token_federation(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=status)
+    httpserver2.expect_request("/foo/bar").respond_with_data("hello")
+
+    fs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    assert fs.cat("/foo/bar") == b"hello"
+    assert fs._get_prefix_info("/foo/bar").cache_manager._cache_list == hosts[::-1]
+
+
+@pytest.mark.usefixtures("generated_token")
+def test_probe_token_refused_everywhere_reports_auth_error(httpserver: HTTPServer, httpserver2: HTTPServer, get_client):
+    """When every cache refuses the token, the caller sees the auth error, not NoAvailableSource."""
+    hosts = _two_cache_token_federation(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar").respond_with_data("", status=403)
+    httpserver2.expect_request("/foo/bar").respond_with_data("", status=403)
+
+    fs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(aiohttp.ClientResponseError, match="403"):
+        fs.cat("/foo/bar")
+    assert fs._get_prefix_info("/foo/bar").cache_manager._cache_list == hosts
