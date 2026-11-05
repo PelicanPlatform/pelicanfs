@@ -16,6 +16,7 @@ limitations under the License.
 
 import itertools
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fsspec.asyn import sync
@@ -67,10 +68,9 @@ def handle(pelfs, dir_resp):
 
 
 def authorization_header(pelfs):
-    http_fs = pelfs.http_file_system
-    if getattr(http_fs, "session", None):
-        return http_fs.session.headers.get("Authorization")
-    return http_fs._default_headers.get("Authorization")
+    params = SimpleNamespace(url=DATA_URL, headers={})
+    pelfs._add_token_header(params)
+    return params.headers.get("Authorization")
 
 
 def test_expired_generated_token_is_regenerated(pelfs, token_required_dir_resp, monkeypatch):

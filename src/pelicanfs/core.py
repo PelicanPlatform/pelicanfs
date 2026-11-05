@@ -1,5 +1,5 @@
 """
-Copyright (C) 2024, Pelican Project, Morgridge Institute for Research
+Copyright (C) 2026, Pelican Project, Morgridge Institute for Research
 
 Licensed under the Apache License, Version 2.0 (the "License"); you
 may not use this file except in compliance with the License.  You may
@@ -22,6 +22,7 @@ import logging
 import re
 import threading
 import urllib.parse
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from copy import copy
@@ -339,6 +340,12 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
     return wrapper
 
 
+def _url_origin(url: object) -> tuple[str, str | None, int | None]:
+    """Return the scheme, host and port of `url`, with the default port filled in."""
+    parts = urllib.parse.urlsplit(str(url))
+    return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+
+
 class PelicanFileSystem(AsyncFileSystem):
     """
     Access a pelican namespace as if it were a file system.
@@ -376,17 +383,24 @@ class PelicanFileSystem(AsyncFileSystem):
         self._namespace_lock = threading.Lock()
         self._access_stats = _AccessStats()
 
-        self.token = kwargs.get("headers", {}).get("Authorization")
+        headers = kwargs.get("headers") or {}
+        self.token = next((value for name, value in headers.items() if name.lower() == "authorization"), None)
         # Expiry of a token this filesystem generated itself. None means no expiry is
         # known, which covers both "no token" and a token the caller supplied in headers;
         # a caller-supplied token is never re-checked here.
         self._token_expiry: datetime | None = None
+        # Caches and origins that serve a require-token namespace. Only these get the token.
+        self._token_origins: set[tuple[str, str | None, int | None]] = set()
 
         request_options = copy(kwargs)
         self.use_listings_cache = request_options.pop("use_listings_cache", False)
 
         # The internal filesystem
-        self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, **kwargs)
+        # IMPORTANT: We need to disable caching for HTTPFileSystem to avoid shared state
+        # issues. Without skip_instance_cache=True, multiple PelicanFileSystem instances
+        # could share the same HTTPFileSystem, causing method binding conflicts.
+        self.http_file_system = fshttp.HTTPFileSystem(asynchronous=asynchronous, loop=loop, skip_instance_cache=True, **kwargs)
+        self._install_token_hook()
 
         if federation_discovery_url and not federation_discovery_url.endswith("/"):
             federation_discovery_url = federation_discovery_url + "/"
@@ -529,29 +543,34 @@ class PelicanFileSystem(AsyncFileSystem):
         # Default to read for unknown operations
         return TokenOperation.TokenRead
 
-    def _set_http_filesystem_token(self, token: str, session: aiohttp.ClientSession | None = None) -> None:
+    def _install_token_hook(self) -> None:
         """
-        Set the Authorization header in the HTTP filesystem's session.
+        Make each session of the HTTP filesystem call `_add_token_header` before a request.
 
-        Args:
-            token: The token to set (without "Bearer " prefix)
-            session: Optional specific session to set token in (in addition to HTTP filesystem session)
+        fsspec only forwards its request kwargs on some paths and a per-call `headers`
+        replaces them, so the header is added in aiohttp, after all of that. A custom
+        `get_client` must pass its keyword arguments to `aiohttp.ClientSession`.
+
+        This is set after construction to keep the hook out of `storage_options`, and the
+        hook holds a weak reference because fsspec keeps the session alive until the HTTP
+        filesystem is collected, which a strong reference here would prevent.
         """
-        if not token:
-            return
+        add_token_header = weakref.WeakMethod(self._add_token_header)
 
-        # Set the token in the HTTP filesystem's session headers
-        if hasattr(self.http_file_system, "session") and self.http_file_system.session:
-            self.http_file_system.session.headers.update({"Authorization": f"Bearer {token}"})
-        else:
-            # If session doesn't exist yet, set it in the default headers
-            if not hasattr(self.http_file_system, "_default_headers"):
-                self.http_file_system._default_headers = {}
-            self.http_file_system._default_headers["Authorization"] = f"Bearer {token}"
+        async def on_request_start(_session: aiohttp.ClientSession, _context: object, params: aiohttp.TraceRequestStartParams) -> None:
+            if (add := add_token_header()) is not None:
+                add(params)
 
-        # Also set token in the specific session if provided
-        if session:
-            session.headers["Authorization"] = f"Bearer {token}"
+        trace_config = aiohttp.TraceConfig()
+        trace_config.on_request_start.append(on_request_start)
+        client_kwargs = self.http_file_system.client_kwargs
+        self.http_file_system.client_kwargs = {**client_kwargs, "trace_configs": [*client_kwargs.get("trace_configs", ()), trace_config]}
+
+    def _add_token_header(self, params: aiohttp.TraceRequestStartParams) -> None:
+        """Add the current token to a request for a token origin, unless the request has its own."""
+        token = self._get_token()
+        if token and "Authorization" not in params.headers and _url_origin(params.url) in self._token_origins:
+            params.headers["Authorization"] = f"Bearer {token}"
 
     async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
@@ -571,6 +590,8 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
+        self._token_origins.add(_url_origin(url))
+
         # A token we generated earlier is only good until it expires; once it has, or is
         # about to, forget it so a fresh one is generated below instead of being sent
         # until the server rejects it.
@@ -585,7 +606,6 @@ class PelicanFileSystem(AsyncFileSystem):
             trace(logger, "_handle_token_generation path=%s token=%s", urllib.parse.urlparse(url).path, TokenForLog(existing_token))
         if existing_token:
             logger.debug("Using existing token from headers for %s", url)
-            self._set_http_filesystem_token(existing_token)
             return existing_token
 
         try:
@@ -622,11 +642,11 @@ class PelicanFileSystem(AsyncFileSystem):
             token = token_generator.get_token()
             trace(logger, "generated token=%s", TokenForLog(token))
             if token:
-                self._set_http_filesystem_token(token)
-                # Also update self.token so _ls_real can use it
                 self.token = f"Bearer {token}"
                 # Remember when it expires so the check above can retire it in time
                 self._token_expiry = token_generator.token.Expiry if token_generator.token else None
+            else:
+                logger.warning("token_generator.get_token returned falsy value: %r", token)
             return token
         except Exception as e:
             logger.warning("Failed to generate token for %s: %s", url, e)
@@ -757,14 +777,6 @@ class PelicanFileSystem(AsyncFileSystem):
                 operation = self._get_token_operation("get_working_cache")
                 await self._handle_token_generation(updated_url, director_response, operation)
 
-                # Set token in session headers if we have one (either existing or newly generated)
-                token_to_use = self._get_token()
-                if token_to_use:
-                    self._set_http_filesystem_token(token_to_use, session)
-                else:
-                    pass
-            else:
-                pass
             try:
                 logger.debug("Checking to see if the cache at %s is working and returns a valid response code", updated_url)
                 async with session.head(updated_url, timeout=timeout) as resp:
@@ -958,6 +970,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Note: We do NOT remove hosts from the results because HTTPFileSystem needs
         full URLs to download files.
         """
+
         # Extract the path from the URL
         parsed = urllib.parse.urlparse(url)
         path = parsed.path
