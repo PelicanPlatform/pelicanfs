@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import getpass
+import html
 import io
 import json
 import logging
@@ -38,6 +40,7 @@ _IS_WINDOWS = platform.system() == "Windows"
 if not _IS_WINDOWS:
     import pty
     import select
+    import termios
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -45,6 +48,41 @@ logger = logging.getLogger("fsspec.pelican")
 DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
 DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
+
+_JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# A prompt line ends with ":" (pelican prints it with or without a trailing newline).
+# Prose such as "asked for this password whenever a new session is started." must not match.
+_PASSWORD_PROMPT_PATTERN = re.compile(r"[Pp]assword[^:\n]*:\s*$")
+_DEVICE_URL_PATTERN = re.compile(r"https?://\S+/(?:device|activate|authorize|login|oauth)\S*")
+
+
+def _redact(text: str) -> str:
+    return _JWT_PATTERN.sub("[TOKEN_REDACTED]", text)
+
+
+def _running_in_ipykernel() -> bool:
+    """True inside a Jupyter kernel (ZMQ shell), False in a terminal or plain IPython."""
+    ipython = sys.modules.get("IPython")
+    if ipython is None:
+        return False
+    shell = ipython.get_ipython()
+    return shell is not None and type(shell).__name__ == "ZMQInteractiveShell"
+
+
+def _send_password(master_fd: int) -> None:
+    """Ask through getpass (a masked box in notebooks) and answer the prompt on the pty."""
+    password = getpass.getpass("")
+    os.write(master_fd, (password + "\n").encode())
+    del password
+
+
+def _display_device_url(url: str) -> None:
+    """Show a clickable link in notebook output, in addition to the plain-text line."""
+    try:
+        from IPython.display import HTML, display  # noqa: PLC0415
+    except ImportError:
+        return
+    display(HTML(f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(url)}</a>'))
 
 
 def get_token_from_file(token_location: str) -> str:
@@ -173,7 +211,8 @@ class TokenContentIterator:
         Invoke pelican binary to get token via OIDC device flow.
 
         Uses platform-specific approach for secure password input:
-        - Unix: pty module with stdin from /dev/tty
+        - Unix terminal: pty module with stdin from /dev/tty
+        - Unix IPython kernel (Jupyter): pty as stdin, password via getpass
         - Windows: subprocess with inherited stdin
 
         Returns:
@@ -188,6 +227,12 @@ class TokenContentIterator:
         cmd = ["pelican", "token", "fetch", self.pelican_url, *flags]
 
         logger.info("Invoking OIDC device flow via pelican binary: %s", " ".join(cmd))
+
+        if _running_in_ipykernel():
+            if _IS_WINDOWS:
+                logger.debug("IPython kernel detected on Windows; no pty support, using the console path")
+            else:
+                return self._get_token_from_pelican_binary_jupyter(cmd)
 
         try:
             # Run the pelican binary with a PTY (pseudo-terminal) to allow interactive OIDC device flow
@@ -316,10 +361,7 @@ class TokenContentIterator:
                     # Filter sensitive information before echoing to terminal
                     decoded_data = data.decode("utf-8", errors="replace")
 
-                    # Hide passwords and tokens using regex patterns
-                    # Pattern for JWT tokens
-                    jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
-                    filtered_data = re.sub(jwt_pattern, "[TOKEN_REDACTED]", decoded_data)
+                    filtered_data = _redact(decoded_data)
 
                     # Try to write to stdout.buffer (for real terminals)
                     # Fall back to stdout.write() for Jupyter/IPython environments
@@ -377,22 +419,85 @@ class TokenContentIterator:
                 logger.debug("Pelican binary exited with code %s", returncode)
                 return None
 
-            # Extract JWT token from captured output
-            full_output = b"".join(output_data).decode("utf-8", errors="replace")
-            jwt_pattern = r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
-            matches = re.findall(jwt_pattern, full_output)
-
-            if matches:
-                token = matches[-1]
-                logger.info("Successfully acquired token via OIDC device flow")
-                return token
-            logger.warning("Could not extract JWT token from pelican binary output")
-            logger.debug("Output was: %s", full_output)
-            return None
+            return self._extract_token(b"".join(output_data).decode("utf-8", errors="replace"))
 
         except Exception as err:
             logger.debug("Error invoking pelican binary: %s", err, exc_info=True)
             return None
+
+    def _extract_token(self, full_output: str) -> str | None:
+        """Return the last JWT in the pelican binary output, or None."""
+        matches = _JWT_PATTERN.findall(full_output)
+        if matches:
+            logger.info("Successfully acquired token via OIDC device flow")
+            return matches[-1]
+        logger.warning("Could not extract JWT token from pelican binary output")
+        logger.debug("Output was: %s", _redact(full_output))
+        return None
+
+    def _get_token_from_pelican_binary_jupyter(self, cmd: list[str]) -> str | None:
+        """
+        Run the pelican binary inside a Jupyter kernel (Unix only).
+
+        The kernel has no controlling terminal, so the child gets a pty as stdin.
+        Output is echoed to the cell, the password prompt is answered through
+        getpass (a masked input box in the notebook), and the device-flow URL is
+        shown as a clickable link.
+        """
+        master_fd, slave_fd = pty.openpty()
+        # The binary turns echo off itself; do it here too so a password never lands in the cell.
+        attrs = termios.tcgetattr(slave_fd)
+        attrs[3] &= ~termios.ECHO
+        termios.tcsetattr(slave_fd, termios.TCSANOW, attrs)
+        process = subprocess.Popen(cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=True)
+        os.close(slave_fd)
+
+        output: list[str] = []
+        pending = ""  # text read but not yet printed (no trailing newline)
+        start_time = time.time()
+        try:
+            while True:
+                if time.time() - start_time > self.oidc_timeout_seconds:
+                    process.kill()
+                    logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
+                    return None
+
+                ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
+                data = b""
+                if ready:
+                    try:
+                        data = os.read(master_fd, self.pty_buffer_size)
+                    except OSError:
+                        data = b""
+                if data:
+                    text = data.decode("utf-8", errors="replace")
+                    output.append(text)
+                    pending += text
+                    lines = pending.splitlines(keepends=True)
+                    pending = "" if lines and lines[-1].endswith("\n") else lines.pop()
+                    for line in lines:
+                        print(_redact(line), end="", flush=True)  # noqa: T201
+                        if match := _DEVICE_URL_PATTERN.search(line):
+                            _display_device_url(match.group(0))
+                        elif _PASSWORD_PROMPT_PATTERN.search(line):
+                            _send_password(master_fd)
+                    if _PASSWORD_PROMPT_PATTERN.search(pending):
+                        print(pending, end="", flush=True)  # noqa: T201
+                        pending = ""
+                        _send_password(master_fd)
+                elif process.poll() is not None:
+                    break
+        finally:
+            os.close(master_fd)
+
+        if pending:
+            print(_redact(pending), flush=True)  # noqa: T201
+
+        process.wait()
+        if process.returncode != 0:
+            logger.debug("Pelican binary exited with code %s", process.returncode)
+            return None
+        return self._extract_token("".join(output))
 
     def get_method_index(self, method: TokenDiscoveryMethod) -> int:
         """

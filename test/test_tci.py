@@ -17,7 +17,7 @@ limitations under the License.
 import json
 import os
 import sys
-from unittest.mock import mock_open, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
@@ -498,3 +498,187 @@ def test_pelican_binary_exists():
     # We just test that the method works without error
     result = iterator._pelican_binary_exists()
     assert isinstance(result, bool)
+
+
+FAKE_JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+PELICAN_PREAMBLE = (
+    b"The client is able to save the authorization in a local file.\n"
+    b"This prevents the need to reinitialize the authorization for each transfer.\n"
+    b"You will be asked for this password whenever a new session is started.\n"
+)
+# pelican 7.23 wording; the prompt has no trailing newline.
+PELICAN_PROMPT = b"Please provide a new password to encrypt the local OSDF client configuration file:"
+# Current pelican wording (config/encrypted.go); the prompt is written with Fprintln.
+PELICAN_PROMPT_LN = b"Please create a new password to protect your local credentials: \n"
+PELICAN_URL_LINE = b"To approve credentials for this operation, please navigate to the following URL and approve the request:\nhttps://issuer.example/device?user_code=ABC-123\n"
+
+
+def _jupyter_iterator(**kwargs):
+    from pelicanfs.token_generator import TokenOperation
+
+    iterator = TokenContentIterator(location=None, name="token_name", operation=TokenOperation.TokenRead, pelican_url="pelican://example.com/path", **kwargs)
+    iterator.method_index = iterator.get_method_index(TokenDiscoveryMethod.OIDC_DEVICE_FLOW)
+    return iterator
+
+
+def _select_for(chunks):
+    """Signal readable once per chunk, then idle."""
+    return [([100], [], [])] * len(chunks) + [([], [], [])] * 3
+
+
+@pytest.fixture
+def jupyter_pty():
+    """Mock the pty machinery and pretend to run inside an IPython kernel."""
+    with (
+        patch("shutil.which", return_value="/usr/bin/pelican"),
+        patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=True),
+        patch("pty.openpty", return_value=(100, 101)),
+        patch("termios.tcgetattr", return_value=[0, 0, 0, 0, 0, 0, []]),
+        patch("termios.tcsetattr"),
+        patch("subprocess.Popen") as mock_popen,
+        patch("os.read") as mock_read,
+        patch("os.write") as mock_write,
+        patch("os.close"),
+        patch("os.open") as mock_open_fd,
+        patch("select.select") as mock_select,
+        patch("getpass.getpass", return_value="hunter2") as mock_getpass,
+    ):
+        mock_open_fd.side_effect = AssertionError("/dev/tty must not be opened in the Jupyter path")
+        process = mock_popen.return_value
+        process.returncode = 0
+
+        def feed(chunks, returncode=0):
+            chunks = list(chunks)
+            mock_read.side_effect = [*chunks, b""]
+            mock_select.side_effect = _select_for(chunks)
+            process.poll.return_value = returncode
+            process.returncode = returncode
+
+        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select}
+
+
+@needs_pty
+def test_oidc_jupyter_password_prompt(jupyter_pty, capsys):
+    jupyter_pty["feed"]([PELICAN_PREAMBLE + PELICAN_PROMPT, b"\n" + PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    token = next(_jupyter_iterator())
+
+    assert token == FAKE_JWT
+    jupyter_pty["getpass"].assert_called_once()
+    jupyter_pty["write"].assert_called_once_with(100, b"hunter2\n")
+    popen_kwargs = jupyter_pty["popen"].call_args.kwargs
+    assert popen_kwargs["stdin"] == 101
+    out = capsys.readouterr().out
+    assert "configuration file:" in out
+    assert "https://issuer.example/device?user_code=ABC-123" in out
+    assert "hunter2" not in out
+    assert FAKE_JWT not in out
+    assert "[TOKEN_REDACTED]" in out
+
+
+@needs_pty
+def test_oidc_jupyter_password_prompt_with_newline(jupyter_pty, capsys):
+    jupyter_pty["feed"]([PELICAN_PROMPT_LN, b"\n" + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    jupyter_pty["getpass"].assert_called_once()
+    jupyter_pty["write"].assert_called_once_with(100, b"hunter2\n")
+    assert "local credentials:" in capsys.readouterr().out
+
+
+@needs_pty
+def test_oidc_jupyter_prose_password_line_does_not_prompt(jupyter_pty):
+    jupyter_pty["feed"]([PELICAN_PREAMBLE, FAKE_JWT.encode() + b"\n"])
+
+    token = next(_jupyter_iterator())
+
+    assert token == FAKE_JWT
+    jupyter_pty["getpass"].assert_not_called()
+    jupyter_pty["write"].assert_not_called()
+
+
+@needs_pty
+def test_oidc_jupyter_prompt_split_across_reads(jupyter_pty):
+    jupyter_pty["feed"]([b"Please provide a new pass", b"word to encrypt the file:", b"\n" + FAKE_JWT.encode() + b"\n"])
+
+    token = next(_jupyter_iterator())
+
+    assert token == FAKE_JWT
+    jupyter_pty["getpass"].assert_called_once()
+
+
+@needs_pty
+def test_oidc_jupyter_url_is_displayed(jupyter_pty, monkeypatch):
+    import types
+
+    shown = []
+    fake_display_module = types.ModuleType("IPython.display")
+    fake_display_module.HTML = lambda data: ("HTML", data)
+    fake_display_module.display = shown.append
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
+
+    jupyter_pty["feed"]([PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert len(shown) == 1
+    kind, markup = shown[0]
+    assert kind == "HTML"
+    assert 'href="https://issuer.example/device?user_code=ABC-123"' in markup
+    assert 'target="_blank"' in markup
+
+
+@needs_pty
+def test_oidc_jupyter_timeout(jupyter_pty):
+    jupyter_pty["feed"]([b"waiting...\n"])
+    jupyter_pty["process"].poll.return_value = None
+
+    iterator = _jupyter_iterator(oidc_timeout_seconds=0)
+    assert iterator._get_token_from_pelican_binary() is None
+    jupyter_pty["process"].kill.assert_called_once()
+
+
+@needs_pty
+def test_oidc_jupyter_nonzero_exit(jupyter_pty):
+    jupyter_pty["feed"]([b"error: nope\n"], returncode=1)
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+
+
+@needs_pty
+@patch("shutil.which", return_value="/usr/bin/pelican")
+@patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=False)
+@patch("pty.openpty", return_value=(100, 101))
+@patch("subprocess.Popen")
+@patch("os.read")
+@patch("os.write")
+@patch("os.close")
+@patch("os.open", return_value=7)
+@patch("select.select")
+@patch("getpass.getpass")
+def test_oidc_terminal_path_unchanged_outside_kernel(mock_getpass, mock_select, mock_open_fd, mock_close, mock_write, mock_read, mock_popen, mock_openpty, mock_kernel, mock_which):
+    process = mock_popen.return_value
+    process.returncode = 0
+    process.poll.side_effect = [None, 0]
+    mock_read.side_effect = [PELICAN_PROMPT + b"\n" + FAKE_JWT.encode() + b"\n", b""]
+    mock_select.side_effect = _select_for([1])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    mock_open_fd.assert_called_once_with("/dev/tty", os.O_RDWR)
+    assert mock_popen.call_args.kwargs["stdin"] == 7
+    mock_getpass.assert_not_called()
+
+
+def test_running_in_ipykernel_detection(monkeypatch):
+    import types
+
+    from pelicanfs.token_content_iterator import _running_in_ipykernel
+
+    monkeypatch.delitem(sys.modules, "IPython", raising=False)
+    assert _running_in_ipykernel() is False
+
+    fake_ipython = types.ModuleType("IPython")
+    monkeypatch.setitem(sys.modules, "IPython", fake_ipython)
+    for shell, expected in [(None, False), (type("TerminalInteractiveShell", (), {})(), False), (type("ZMQInteractiveShell", (), {})(), True)]:
+        fake_ipython.get_ipython = MagicMock(return_value=shell)
+        assert _running_in_ipykernel() is expected
