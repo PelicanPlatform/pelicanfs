@@ -25,13 +25,14 @@ import shutil
 import traceback
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from typing import Self
 
 from igwn_auth_utils.scitokens import (
     _find_condor_creds_token_paths,
     default_bearer_token_file,
 )
 
-from pelicanfs.log_utils import format_token_for_log
+from pelicanfs.log_utils import TokenForLog
 
 # Platform-specific pexpect/wexpect (PTY interaction for OIDC device flow)
 _IS_WINDOWS = platform.system() == "Windows"
@@ -383,7 +384,7 @@ class TokenContentIterator:
         """
         return self.methods.index(method)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.methods = list(TokenDiscoveryMethod)
         # Ensure HTCONDOR_FALLBACK is always available after HTCONDOR_DISCOVERY
         if TokenDiscoveryMethod.HTCONDOR_DISCOVERY in self.methods and TokenDiscoveryMethod.HTCONDOR_FALLBACK not in self.methods:
@@ -391,7 +392,7 @@ class TokenContentIterator:
             discovery_index = self.methods.index(TokenDiscoveryMethod.HTCONDOR_DISCOVERY)
             self.methods.insert(discovery_index + 1, TokenDiscoveryMethod.HTCONDOR_FALLBACK)
 
-    def __iter__(self):
+    def __iter__(self) -> Self:
         return self
 
     def __next__(self) -> str:
@@ -436,7 +437,7 @@ class TokenContentIterator:
                         logger.debug("Using token from default bearer token file: %s", token_file)
                         try:
                             token = get_token_from_file(token_file)
-                            logger.debug("Successfully read token from default file: %s", format_token_for_log(token))
+                            logger.debug("Successfully read token from default file: %s", TokenForLog(token))
                             return token
                         except Exception as err:
                             logger.warning("Could not read default bearer token: %s", err)
