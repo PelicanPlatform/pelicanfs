@@ -440,6 +440,8 @@ You may also be prompted for a password to encrypt or decrypt the local token fi
 Enter a password for the token file:
 ```
 
+In a Jupyter notebook (Linux and macOS), the same output appears in the cell. The password prompt becomes a masked input box in the notebook and the authorization URL is shown as a clickable link.
+
 You can configure the timeout (default 300 seconds) for the device flow:
 
 ```python
