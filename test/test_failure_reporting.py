@@ -82,6 +82,78 @@ def test_authz_query_is_not_in_access_data(httpserver: HTTPServer, pelfs):
     assert "SECRET" not in repr(responses)
 
 
+def assert_no_secret(error: BaseException) -> None:
+    while error:
+        assert "SECRET" not in str(error)
+        assert "SECRET" not in repr(error)
+        error = error.__cause__ or error.__context__
+
+
+@pytest.mark.parametrize(("status", "error"), [(500, aiohttp.ClientResponseError), (404, FileNotFoundError)])
+def test_authz_query_is_not_in_raised_error(httpserver: HTTPServer, pelfs, status, error):
+    serve_director(httpserver, httpserver.url_for("/foo/bar"))
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=200)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=status)
+
+    with pytest.raises(error) as excinfo:
+        pelfs.cat("/foo/bar?authz=SECRET")
+
+    assert_no_secret(excinfo.value)
+    assert "/foo/bar" in str(excinfo.value)
+
+
+def test_redacted_response_error_keeps_status(httpserver: HTTPServer, pelfs):
+    serve_director(httpserver, httpserver.url_for("/foo/bar"))
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=200)
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    with pytest.raises(aiohttp.ClientResponseError) as excinfo:
+        pelfs.cat("/foo/bar?authz=SECRET")
+
+    assert excinfo.value.status == 500
+
+
+def test_authz_query_is_not_in_raised_error_for_direct_reads(httpserver: HTTPServer, get_client):
+    serve_discovery(httpserver)
+    # The director can echo the query in the redirect.
+    origin = httpserver.url_for("/foo/bar") + "?authz=SECRET"
+    httpserver.expect_request("/api/v1.0/director/origin/foo/bar", method="GET").respond_with_data("", status=307, headers={"Location": origin})
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, direct_reads=True)
+
+    with pytest.raises(aiohttp.ClientResponseError) as excinfo:
+        pelfs.cat("/foo/bar?authz=SECRET")
+
+    assert_no_secret(excinfo.value)
+
+
+@pytest.mark.parametrize("block_size", [0, 4])
+def test_authz_query_is_not_in_raised_error_from_open_file(httpserver: HTTPServer, pelfs, block_size):
+    serve_director(httpserver, httpserver.url_for("/foo/bar"))
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("0123456789")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    with pytest.raises(aiohttp.ClientResponseError) as excinfo, pelfs.open("/foo/bar?authz=SECRET", "rb", block_size=block_size) as fp:
+        fp.read()
+
+    assert_no_secret(excinfo.value)
+
+
+def test_authz_query_is_not_in_raised_error_from_open_async(httpserver: HTTPServer, pelfs):
+    serve_director(httpserver, httpserver.url_for("/foo/bar"))
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("0123456789")
+    httpserver.expect_request("/foo/bar", method="GET").respond_with_data("", status=500)
+
+    async def read() -> None:
+        async with await pelfs.open_async("/foo/bar?authz=SECRET") as fp:
+            await fp.read()
+
+    with pytest.raises(aiohttp.ClientResponseError) as excinfo:
+        sync(pelfs.loop, read)
+
+    assert_no_secret(excinfo.value)
+
+
 def test_all_probes_failing_reports_each_cache(httpserver: HTTPServer, pelfs, caplog):
     cache = httpserver.url_for("/foo/bar")
     serve_director(httpserver, cache, DEAD_CACHE)
@@ -109,6 +181,30 @@ def test_probe_failure_is_logged_when_a_later_cache_works(httpserver: HTTPServer
         assert sync(pelfs.loop, pelfs.get_working_cache, "/foo/bar")[0] == good_cache
 
     assert f"{httpserver.url_for('/foo/bar')}: HTTP 503" in caplog.text
+
+
+def test_authz_query_is_not_in_raised_error_from_put(httpserver: HTTPServer, pelfs, tmp_path):
+    serve_discovery(httpserver)
+    origin = httpserver.url_for("/foo/bar") + "?authz=SECRET"
+    httpserver.expect_request("/api/v1.0/director/origin/foo/bar", method="GET").respond_with_data("", status=307, headers={"Location": origin})
+    httpserver.expect_request("/foo/bar", method="PUT").respond_with_data("", status=500)
+    source = tmp_path / "source"
+    source.write_text("data")
+
+    with pytest.raises(aiohttp.ClientResponseError) as excinfo:
+        pelfs.put_file(str(source), "/foo/bar?authz=SECRET")
+
+    assert_no_secret(excinfo.value)
+
+
+def test_server_disconnect_moves_on_to_the_next_cache(httpserver: HTTPServer, pelfs):
+    serve_director(httpserver, httpserver.url_for("/foo/bar"))
+
+    with (
+        patch.object(aiohttp.ClientSession, "head", side_effect=aiohttp.ServerDisconnectedError()),
+        pytest.raises(NoAvailableSource, match="Server disconnected"),
+    ):
+        sync(pelfs.loop, pelfs.get_working_cache, "/foo/bar")
 
 
 def test_director_list_without_caches_is_reported(httpserver: HTTPServer, pelfs):
@@ -164,6 +260,29 @@ def test_metadata_without_director_is_reported(httpserver: HTTPServer, pelfs):
 
     with pytest.raises(InvalidMetadata, match="director_endpoint"):
         pelfs.cat("/foo/bar")
+
+
+@pytest.mark.parametrize("direct_reads", [False, True])
+@pytest.mark.parametrize("status", [503, 200])
+def test_discovery_query_is_not_in_raised_error(httpserver: HTTPServer, get_client, status, direct_reads):
+    response = {"status": 503} if status == 503 else {"response_data": "{}"}
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_data(**response)
+    url = httpserver.url_for("/") + "?authz=SECRET"
+    pelfs = PelicanFileSystem(url, get_client=get_client, skip_instance_cache=True, direct_reads=direct_reads)
+
+    with pytest.raises(InvalidMetadata) as excinfo:
+        pelfs.cat("/foo/bar")
+
+    assert_no_secret(excinfo.value)
+
+
+def test_discovery_mismatch_does_not_show_query(httpserver: HTTPServer, get_client):
+    pelfs = PelicanFileSystem(httpserver.url_for("/") + "?authz=SECRET", get_client=get_client, skip_instance_cache=True)
+
+    with pytest.raises(InvalidMetadata, match="does not match") as excinfo:
+        pelfs.cat("pelican://other.example/foo/bar")
+
+    assert_no_secret(excinfo.value)
 
 
 def test_propfind_without_link_reports_status(httpserver: HTTPServer, pelfs):

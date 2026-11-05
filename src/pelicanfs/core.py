@@ -64,7 +64,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .log_utils import TRACE, TokenForLog, redact_query, trace
+from .log_utils import TRACE, TokenForLog, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
@@ -734,7 +734,7 @@ class PelicanFileSystem(AsyncFileSystem):
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
-                msg = f"Federation discovery at {discovery_url.geturl()} returned HTTP {resp.status}"
+                msg = redact_query(f"Federation discovery at {discovery_url.geturl()} returned HTTP {resp.status}")
                 logger.error("%s", msg)
                 raise InvalidMetadata(msg)
             return await resp.json(content_type="")
@@ -752,7 +752,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                msg = f"No director_endpoint in the metadata for {self.discovery_url}"
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
                 logger.error("%s", msg)
                 raise InvalidMetadata(msg)
 
@@ -857,7 +857,7 @@ class PelicanFileSystem(AsyncFileSystem):
                         break
                     failure = f"HTTP {resp.status}"
             except _RETRYABLE_ERRORS as e:
-                failure = str(e) or type(e).__name__
+                failure = redact_query(str(e)) or type(e).__name__
             failures.append(f"{redact_query(updated_url)}: {failure}")
             logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
@@ -898,7 +898,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                msg = f"No director_endpoint in the metadata for {self.discovery_url}"
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
                 raise InvalidMetadata(msg)
 
             if not director_url.endswith("/"):
@@ -1016,6 +1016,7 @@ class PelicanFileSystem(AsyncFileSystem):
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
+        redact_exception(e)
         logger.debug("Marking cache at %s as bad: %s", url, e)
         path = urllib.parse.urlparse(url).path
         bad_cache = _host_of(url)
@@ -1304,6 +1305,7 @@ class PelicanFileSystem(AsyncFileSystem):
         hand back the cache that just failed. Reads are idempotent, so repeating them
         on another cache is safe.
         """
+        redact_exception(error)
         if self.direct_reads:
             return None
         failure = _cache_failure(error)
@@ -1443,7 +1445,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not self.discovery_url:
             self.discovery_url = discovery_str
         elif self.discovery_url != discovery_str:
-            msg = f"Discovery URL {self.discovery_url} does not match {discovery_str}"
+            msg = redact_query(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
             logger.error("%s", msg)
             raise InvalidMetadata(msg)
 
@@ -1518,7 +1520,11 @@ class PelicanFileSystem(AsyncFileSystem):
         async def upload_file() -> None:
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
-        await asyncio.create_task(upload_file())
+        try:
+            await asyncio.create_task(upload_file())
+        except Exception as e:
+            redact_exception(e)
+            raise
 
     async def _put(self, lpath: str | list[str], rpath: str | list[str], *args: Any, **kwargs: Any) -> Any:
         # fsspec's _put calls _makedirs for each local directory in a recursive upload before

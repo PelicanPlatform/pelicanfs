@@ -687,7 +687,7 @@ logger.setLevel(logging.DEBUG)
 - `WARNING`: Issues that don't prevent operation but may indicate problems (e.g., falling back to alternate caches)
 - `ERROR`: Operation failures and exceptions
 
-Query string values, such as `authz` tokens, appear as `<redacted>` in `fsspec.pelican` and `fsspec.http` logs and in `get_access_data()`.
+Query string values, such as `authz` tokens, appear as `<redacted>` in `fsspec.pelican` and `fsspec.http` logs, in `get_access_data()`, and in errors raised for failed reads and uploads.
 
 ## API Reference
 
