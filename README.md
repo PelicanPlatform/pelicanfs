@@ -682,10 +682,12 @@ logger.setLevel(logging.DEBUG)
 
 **Logging levels and what they show:**
 - `TRACE` (level 5): Token call flow, including allowed issuers and the required and token scopes. Tokens appear as JWT header and payload, which contain claims such as `sub`. The signature is not logged. Enable with `logger.setLevel(5)`
-- `DEBUG`: Detailed information including cache URLs being tried, token discovery, reasons for token rejection, and Director responses
+- `DEBUG`: Detailed information including cache URLs being tried, token discovery, reasons for token rejection, Director responses, each HTTP request with its status and duration, and the start and end of each operation
 - `INFO`: OIDC device flow progress
 - `WARNING`: Issues that don't prevent operation but may indicate problems (e.g., falling back to alternate caches)
 - `ERROR`: Operation failures and exceptions
+
+Each log line inside an operation starts with its ID, such as `[a1b2c3]`. In a bulk operation, each object gets a child ID, such as `[a1b2c3.2]`, so you can follow one object with a search for its ID. Requests that a file object makes after `open()` returns have no ID.
 
 Query string values, such as `authz` tokens, appear as `<redacted>` in `fsspec.pelican` and `fsspec.http` logs, in `get_access_data()`, and in errors raised for failed reads and uploads.
 

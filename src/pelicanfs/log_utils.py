@@ -14,8 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextvars
+import itertools
 import logging
 import re
+import secrets
+import time
+from collections.abc import Iterator, Sized
+from contextlib import contextmanager
 from typing import Any
 
 import aiohttp
@@ -23,6 +29,8 @@ from multidict import CIMultiDictProxy
 
 # Finer than DEBUG for internal call-flow tracing (not enabled by default).
 TRACE = 5
+
+logger = logging.getLogger("fsspec.pelican")
 
 _QUERY_VALUE = re.compile(r"""([?&][^=&?\s'"<>]*=)[^&\s'"<>]+""")
 
@@ -76,10 +84,49 @@ def redact_exception(error: BaseException) -> None:
         current = current.__cause__ or current.__context__
 
 
-class _RedactQueryFilter(logging.Filter):
+class _Operation:
+    def __init__(self, op_id: str) -> None:
+        self.id = op_id
+        self.children = itertools.count(1)
+
+
+_current_operation: contextvars.ContextVar[_Operation | None] = contextvars.ContextVar("pelicanfs_operation", default=None)
+
+
+@contextmanager
+def log_operation(name: str, target: object = "") -> Iterator[None]:
+    """
+    Log the start and end of an operation, and put its ID on each log line inside it.
+
+    A nested operation gets a child ID: `a1b2c3.2` is the second child of `a1b2c3`. The ID
+    is a context variable, so tasks started inside inherit it, and it does not reach
+    fsspec's IO thread from a sync call. Enter it in a coroutine, not around a `sync()`.
+    """
+    parent = _current_operation.get()
+    op_id = f"{parent.id}.{next(parent.children)}" if parent else secrets.token_hex(3)
+    token = _current_operation.set(_Operation(op_id))
+    described = f"{len(target)} paths" if isinstance(target, Sized) and not isinstance(target, str) else target
+    logger.debug("Start %s %s", name, described)
+    start = time.perf_counter()
+    try:
+        yield
+    except Exception as e:
+        logger.debug("%s failed after %.3fs: %s: %s", name, time.perf_counter() - start, type(e).__name__, e)
+        raise
+    else:
+        logger.debug("%s finished in %.3fs", name, time.perf_counter() - start)
+    finally:
+        _current_operation.reset(token)
+
+
+class _PelicanLogFilter(logging.Filter):
+    """Redact query values, and put the current operation ID on the line."""
+
     def filter(self, record: logging.LogRecord) -> bool:
+        operation = _current_operation.get()
+        prefix = f"[{operation.id}] " if operation else ""
         try:
-            record.msg = redact_query(record.getMessage())
+            record.msg = prefix + redact_query(record.getMessage())
             record.args = None
         except Exception:
             # The handler reports bad format args without raising, and prints them.
@@ -94,4 +141,4 @@ class _RedactQueryFilter(logging.Filter):
 
 # fsspec.http also logs each URL we hand it.
 for _name in ("fsspec.pelican", "fsspec.http"):
-    logging.getLogger(_name).addFilter(_RedactQueryFilter())
+    logging.getLogger(_name).addFilter(_PelicanLogFilter())

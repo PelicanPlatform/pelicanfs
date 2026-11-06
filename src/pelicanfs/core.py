@@ -21,6 +21,7 @@ import inspect
 import logging
 import re
 import threading
+import time
 import urllib.parse
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
@@ -64,7 +65,7 @@ from .exceptions import (
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .log_utils import TRACE, TokenForLog, redact_exception, redact_query, trace
+from .log_utils import TRACE, TokenForLog, log_operation, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
@@ -257,6 +258,33 @@ def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.Trace
     return trace_config
 
 
+def _log_requests() -> aiohttp.TraceConfig:
+    """
+    Return a trace config that logs each HTTP request at DEBUG.
+
+    The duration runs to the response headers, so it does not include reading the body.
+    """
+    trace_config = aiohttp.TraceConfig()
+
+    async def on_request_start(_session: aiohttp.ClientSession, context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
+        context.start = time.perf_counter()
+
+    async def on_request_redirect(_session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
+        logger.debug("HTTP %s %s -> %s to %s", params.method, params.url, params.response.status, params.response.headers.get("Location"))
+
+    async def on_request_end(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
+        logger.debug("HTTP %s %s -> %s in %.3fs", params.method, params.url, params.response.status, time.perf_counter() - context.start)
+
+    async def on_request_exception(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
+        logger.debug("HTTP %s %s failed after %.3fs: %r", params.method, params.url, time.perf_counter() - context.start, params.exception)
+
+    trace_config.on_request_start.append(on_request_start)
+    trace_config.on_request_redirect.append(on_request_redirect)
+    trace_config.on_request_end.append(on_request_end)
+    trace_config.on_request_exception.append(on_request_exception)
+    return trace_config
+
+
 def _release_responses(responses: list[aiohttp.ClientResponse]) -> None:
     """
     Release the recorded responses, freeing the connections they hold, and forget them.
@@ -289,7 +317,7 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     token = options["token"]
 
     responses: list[aiohttp.ClientResponse] = []
-    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses)])
+    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses), _log_requests()])
     clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
     client = Client(url=base_url, username="", password="", options=clientopts)
     client._close_session = True
@@ -329,6 +357,19 @@ def _path_arg_splitter(func: Callable[..., Any]) -> Callable[[tuple[Any, ...], d
             raise TypeError(msg) from None
 
     return split
+
+
+def _traced(func: Callable[..., Awaitable[T]]) -> Callable[..., Coroutine[Any, Any, T]]:
+    """Run a filesystem coroutine as a logged operation, named after the function."""
+    split_path_arg = _path_arg_splitter(func)
+
+    @functools.wraps(func)
+    async def wrapper(self: "PelicanFileSystem", *args: Any, **kwargs: Any) -> T:
+        target, rest = split_path_arg(args, kwargs)
+        with log_operation(func.__name__, target):
+            return await func(self, target, *rest, **kwargs)
+
+    return wrapper
 
 
 def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFileSystem | None = None) -> Callable[..., Iterator[T]]:
@@ -624,7 +665,7 @@ class PelicanFileSystem(AsyncFileSystem):
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(on_request_start)
         client_kwargs = self.http_file_system.client_kwargs
-        self.http_file_system.client_kwargs = {**client_kwargs, "trace_configs": [*client_kwargs.get("trace_configs", ()), trace_config]}
+        self.http_file_system.client_kwargs = {**client_kwargs, "trace_configs": [*client_kwargs.get("trace_configs", ()), trace_config, _log_requests()]}
 
     def _add_token_header(self, params: aiohttp.TraceRequestStartParams) -> None:
         """Add the current token to a request for a token origin, unless the request has its own."""
@@ -1050,7 +1091,8 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Running %s with url: %s", func, data_url)
             return await func(self, data_url, *rest, **kwargs)
 
-        return wrapper
+        functools.update_wrapper(wrapper, func)
+        return _traced(wrapper)
 
     @_dirlist_dec
     async def _ls(self, path: str, detail: bool = True, **kwargs: Any) -> Any:
@@ -1192,6 +1234,7 @@ class PelicanFileSystem(AsyncFileSystem):
         results = await self.http_file_system._find(path, maxdepth, withdirs, **kwargs)
         return self._remove_host_from_paths(results)
 
+    @_traced
     async def _glob(self, path: str, maxdepth: int | None = None, **kwargs: Any) -> list[str] | dict[str, dict[str, Any]]:
         """
         Find files by glob-matching.
@@ -1252,6 +1295,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         return list(out)
 
+    @_traced
     async def _du(self, path: str, total: bool = True, maxdepth: int | None = None, **kwargs: Any) -> int | dict[str, int]:
         # Don't use @_dirlist_dec here because http_file_system._du will call
         # _walk which calls _ls_from_http which handles the collections URL conversion
@@ -1508,6 +1552,7 @@ class PelicanFileSystem(AsyncFileSystem):
             return self._check_fspath(path)
         return [self._check_fspath(p) for p in path]
 
+    @_traced
     async def _put_file(self, lpath: str, rpath: str, **kwargs: Any) -> None:
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
@@ -1526,6 +1571,7 @@ class PelicanFileSystem(AsyncFileSystem):
             redact_exception(e)
             raise
 
+    @_traced
     async def _put(self, lpath: str | list[str], rpath: str | list[str], *args: Any, **kwargs: Any) -> Any:
         # fsspec's _put calls _makedirs for each local directory in a recursive upload before
         # uploading the objects inside it. Those uploads are what create the collections in
@@ -1555,6 +1601,11 @@ class PelicanFileSystem(AsyncFileSystem):
         # fsspec's open strips the scheme, which _check_fspath validates
         return super().open(self._check_fspath(path), mode, **kwargs)
 
+    async def _open_with_cache_retry(self, path: str, name: str, attempt: Callable[[str], Awaitable[T]]) -> T:
+        """Open through `_with_cache_retry` as a logged operation."""
+        with log_operation(name, path):
+            return await self._with_cache_retry(path, self._get_token_operation(name), attempt)
+
     def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> fshttp.HTTPFile | fshttp.HTTPStreamFile:
         """Open the binary file. fsspec's open adds any compression and text layers on top."""
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
@@ -1567,7 +1618,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # A thread, since the sync open blocks on this event loop
             return await asyncio.to_thread(self.http_file_system.open, data_url, mode, **kwargs)
 
-        fp = cast("fshttp.HTTPFile | fshttp.HTTPStreamFile", sync(self.loop, self._with_cache_retry, path, self._get_token_operation("open"), attempt))  # type: ignore[misc]
+        fp = cast("fshttp.HTTPFile | fshttp.HTTPStreamFile", sync(self.loop, self._open_with_cache_retry, path, "open", attempt))  # type: ignore[misc]
         fp.read = self._io_wrapper(fp, path)  # type: ignore[method-assign]
         return fp
 
@@ -1583,7 +1634,7 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Running open_async on %s...", data_url)
             return await self.http_file_system.open_async(data_url, **kwargs)
 
-        fp = await self._with_cache_retry(path, self._get_token_operation("open_async"), attempt)
+        fp = await self._open_with_cache_retry(path, "open_async", attempt)
         fp.read = self._async_io_wrapper(fp, path)
         return fp
 
@@ -1610,7 +1661,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
             return await self._with_cache_retry(path, self._get_token_operation(func.__name__), attempt)
 
-        return wrapper
+        functools.update_wrapper(wrapper, func)
+        return _traced(wrapper)
 
     @_cache_dec
     async def _cat_file(self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any) -> bytes:
@@ -1692,6 +1744,7 @@ class PelicanFileSystem(AsyncFileSystem):
             }
             return self._remove_host_from_paths(info)
 
+    @_traced
     async def _get(self, rpath: str | list[str], lpath: str | list[str], **kwargs: Any) -> Any:
         """
         Copy an object, or a whole collection, to local files.
@@ -1727,6 +1780,7 @@ class PelicanFileSystem(AsyncFileSystem):
             kwargs["_collection_roots"] = collection_roots
         return await super()._get(rpath, lpath, **kwargs)
 
+    @_traced
     async def _cat(self, path: str | list[str], recursive: bool = False, on_error: str = "raise", batch_size: int | None = None, **kwargs: Any) -> Any:
         """
         Read the contents of one or more objects.
