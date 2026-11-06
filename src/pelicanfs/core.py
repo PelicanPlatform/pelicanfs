@@ -258,6 +258,22 @@ def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.Trace
     return trace_config
 
 
+async def _log_request_start(_session: aiohttp.ClientSession, context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
+    context.start = time.perf_counter()
+
+
+async def _log_request_redirect(_session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
+    logger.debug("HTTP %s %s -> %s to %s", params.method, params.url, params.response.status, params.response.headers.get("Location"))
+
+
+async def _log_request_end(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
+    logger.debug("HTTP %s %s -> %s in %.3fs", params.method, params.url, params.response.status, time.perf_counter() - context.start)
+
+
+async def _log_request_exception(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
+    logger.debug("HTTP %s %s failed after %.3fs: %r", params.method, params.url, time.perf_counter() - context.start, params.exception)
+
+
 def _log_requests() -> aiohttp.TraceConfig:
     """
     Return a trace config that logs each HTTP request at DEBUG.
@@ -265,23 +281,10 @@ def _log_requests() -> aiohttp.TraceConfig:
     The duration runs to the response headers, so it does not include reading the body.
     """
     trace_config = aiohttp.TraceConfig()
-
-    async def on_request_start(_session: aiohttp.ClientSession, context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
-        context.start = time.perf_counter()
-
-    async def on_request_redirect(_session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
-        logger.debug("HTTP %s %s -> %s to %s", params.method, params.url, params.response.status, params.response.headers.get("Location"))
-
-    async def on_request_end(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
-        logger.debug("HTTP %s %s -> %s in %.3fs", params.method, params.url, params.response.status, time.perf_counter() - context.start)
-
-    async def on_request_exception(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
-        logger.debug("HTTP %s %s failed after %.3fs: %r", params.method, params.url, time.perf_counter() - context.start, params.exception)
-
-    trace_config.on_request_start.append(on_request_start)
-    trace_config.on_request_redirect.append(on_request_redirect)
-    trace_config.on_request_end.append(on_request_end)
-    trace_config.on_request_exception.append(on_request_exception)
+    trace_config.on_request_start.append(_log_request_start)
+    trace_config.on_request_redirect.append(_log_request_redirect)
+    trace_config.on_request_end.append(_log_request_end)
+    trace_config.on_request_exception.append(_log_request_exception)
     return trace_config
 
 
