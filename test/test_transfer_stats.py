@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import asyncio
+from collections import Counter
 
 import aiohttp
 import pytest
@@ -103,6 +104,7 @@ def test_retry_is_a_failed_request_but_not_a_failed_operation(httpserver: HTTPSe
     assert stats.operations == 1
     assert stats.failed_operations == 0
     assert stats.operation_success_rate == 1.0
+    assert stats.failed_caches == Counter({httpserver.url_for("/").rstrip("/"): 1})
 
 
 def test_exhausted_retries_fail_the_operation(httpserver: HTTPServer, httpserver2: HTTPServer, pelfs):
@@ -118,6 +120,26 @@ def test_exhausted_retries_fail_the_operation(httpserver: HTTPServer, httpserver
     assert stats.failed_requests == 2
     assert stats.failed_operations == 1
     assert stats.operation_success_rate == 0.0
+
+
+def test_failed_probe_is_counted_by_cache(httpserver: HTTPServer, httpserver2: HTTPServer, pelfs):
+    setup_director(httpserver, httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=500)
+    httpserver2.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+    httpserver2.expect_request("/foo/bar", method="GET").respond_with_data("hello")
+
+    assert pelfs.cat("/foo/bar") == b"hello"
+
+    assert pelfs.get_transfer_stats().failed_caches == Counter({httpserver.url_for("/").rstrip("/"): 1})
+
+
+def test_snapshot_does_not_change(httpserver: HTTPServer, pelfs):
+    before = pelfs.get_transfer_stats()
+
+    pelfs._transfers.add_failed_cache("https://cache.example.com")
+
+    assert not before.failed_caches
+    assert pelfs.get_transfer_stats().failed_caches == Counter({"https://cache.example.com": 1})
 
 
 def test_connection_failure_is_a_failed_request(httpserver: HTTPServer, pelfs):
@@ -149,6 +171,7 @@ def test_missing_object_is_not_a_failure(httpserver: HTTPServer, pelfs):
     assert stats.operations == 1
     assert stats.failed_requests == 0
     assert stats.failed_operations == 0
+    assert not stats.failed_caches
 
 
 def test_get_counts_streamed_bytes_and_keeps_the_callback(httpserver: HTTPServer, pelfs, tmp_path):

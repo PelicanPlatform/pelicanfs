@@ -16,9 +16,10 @@ limitations under the License.
 
 import threading
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import aiohttp
@@ -34,6 +35,9 @@ class TransferStats:
     operation is one call that moves data: cat_file, get_file, put_file, or read on an
     open file. An operation fails only when no retry could save it. A missing object
     (404) is not a failure of either kind.
+
+    `failed_caches` counts failed attempts by cache, as `scheme://host:port`. This includes
+    failed probes, and failures while reading a body, which are not failed requests.
     """
 
     requests: int = 0
@@ -43,6 +47,7 @@ class TransferStats:
     bytes_read: int = 0
     bytes_written: int = 0
     busy_seconds: float = 0.0
+    failed_caches: Counter[str] = field(default_factory=Counter, hash=False)
 
     @property
     def request_success_rate(self) -> float | None:
@@ -99,6 +104,7 @@ class _TransferRecorder:
         self._busy_seconds = 0.0
         self._active = 0
         self._busy_since = 0.0
+        self._failed_caches: Counter[str] = Counter()
 
         self.trace_config = aiohttp.TraceConfig()
         self.trace_config.on_request_start.append(self._on_request_start)
@@ -121,6 +127,10 @@ class _TransferRecorder:
     def _add_failed_request(self) -> None:
         with self._lock:
             self._failed_requests += 1
+
+    def add_failed_cache(self, cache: str) -> None:
+        with self._lock:
+            self._failed_caches[cache] += 1
 
     def add_read(self, size: int) -> None:
         with self._lock:
@@ -171,4 +181,5 @@ class _TransferRecorder:
                 bytes_read=self._bytes_read,
                 bytes_written=self._bytes_written,
                 busy_seconds=busy,
+                failed_caches=Counter(self._failed_caches),
             )

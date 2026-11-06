@@ -925,6 +925,7 @@ class PelicanFileSystem(AsyncFileSystem):
             except _RETRYABLE_ERRORS as e:
                 failure = redact_query(_error_text(e))
             failures.append(f"{redact_query(updated_url)}: {failure}")
+            self._transfers.add_failed_cache(_host_of(updated_url))
             logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
 
@@ -1088,6 +1089,7 @@ class PelicanFileSystem(AsyncFileSystem):
         bad_cache = _host_of(url)
 
         self._record_failed_access(url, e)
+        self._transfers.add_failed_cache(bad_cache)
 
         namespace_info = self._get_prefix_info(path)
         if not namespace_info:
