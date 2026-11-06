@@ -58,4 +58,11 @@ jobs:
     - name: Install Dependencies
       run: uv pip install . --group testing --system
     - name: Test with pytest
-      run: pytest
+      shell: bash
+      env:
+        PYTHONTRACEMALLOC: "50"
+      run: |
+        for attempt in 1 2 3 4 5; do
+          pytest || status=1
+        done
+        exit "${status:-0}"
