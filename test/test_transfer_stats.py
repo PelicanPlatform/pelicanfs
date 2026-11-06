@@ -75,6 +75,21 @@ def test_concurrent_operations_share_busy_time(monkeypatch):
     assert recorder.snapshot().operations == 3
 
 
+def test_concurrent_attempts_share_cache_busy_time(monkeypatch):
+    now = 0.0
+    monkeypatch.setattr("pelicanfs.transfer_stats.time.perf_counter", lambda: now)
+    recorder = _TransferRecorder()
+
+    with recorder.cache_active("https://a"):
+        now = 1.0
+        with recorder.cache_active("https://a"), recorder.cache_active("https://b"):
+            now = 3.0
+            assert recorder.snapshot().cache_busy_seconds == {"https://a": 3.0, "https://b": 2.0}
+        now = 4.0
+
+    assert recorder.snapshot().cache_busy_seconds == {"https://a": 4.0, "https://b": 2.0}
+
+
 def test_cat(httpserver: HTTPServer, pelfs):
     setup_director(httpserver, httpserver)
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
@@ -105,6 +120,7 @@ def test_retry_is_a_failed_request_but_not_a_failed_operation(httpserver: HTTPSe
     assert stats.failed_operations == 0
     assert stats.operation_success_rate == 1.0
     assert stats.failed_caches == Counter({httpserver.url_for("/").rstrip("/"): 1})
+    assert stats.cache_busy_seconds.keys() == {httpserver.url_for("/").rstrip("/"), httpserver2.url_for("/").rstrip("/")}
 
 
 def test_exhausted_retries_fail_the_operation(httpserver: HTTPServer, httpserver2: HTTPServer, pelfs):
@@ -183,6 +199,7 @@ def test_get_counts_streamed_bytes_and_keeps_the_callback(httpserver: HTTPServer
     pelfs.get_file("/foo/bar", tmp_path / "bar", callback=callback)
 
     stats = pelfs.get_transfer_stats()
+    assert stats.cache_busy_seconds.keys() == {httpserver.url_for("/").rstrip("/")}
     assert (tmp_path / "bar").read_bytes() == b"hello"
     assert stats.bytes_read == 5
     assert stats.operations == 1
@@ -200,6 +217,7 @@ def test_put_counts_bytes_written(httpserver: HTTPServer, pelfs, tmp_path):
 
     stats = pelfs.get_transfer_stats()
     assert stats.bytes_written == 5
+    assert not stats.cache_busy_seconds
     assert stats.bytes_read == 0
     assert stats.operations == 1
     assert stats.failed_operations == 0
@@ -214,6 +232,7 @@ def test_read_of_open_file(httpserver: HTTPServer, pelfs):
         assert f.read() == b"hello"
 
     stats = pelfs.get_transfer_stats()
+    assert stats.cache_busy_seconds.keys() == {httpserver.url_for("/").rstrip("/")}
     assert stats.bytes_read == 5
     assert stats.operations == 1
 
@@ -232,6 +251,7 @@ def test_read_of_async_open_file(httpserver: HTTPServer, get_client, get_webdav_
         return pelfs
 
     stats = asyncio.run(read()).get_transfer_stats()
+    assert stats.cache_busy_seconds.keys() == {httpserver.url_for("/").rstrip("/")}
     assert stats.bytes_read == 5
     assert stats.operations == 1
 

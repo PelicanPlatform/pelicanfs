@@ -1470,9 +1470,10 @@ class PelicanFileSystem(AsyncFileSystem):
             tries = 1
             while True:
                 try:
-                    if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
-                        fp.r = sync(self.loop, self._open_stream_response, fp)
-                    result = read(*args, **kwargs)
+                    with self._transfers.cache_active(_host_of(fp.url)):
+                        if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
+                            fp.r = sync(self.loop, self._open_stream_response, fp)
+                        result = read(*args, **kwargs)
                 except Exception as e:
                     if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
                         raise
@@ -1496,9 +1497,10 @@ class PelicanFileSystem(AsyncFileSystem):
             tries = 1
             while True:
                 try:
-                    if fp.r is None:
-                        fp.r = await self._open_stream_response(fp)
-                    result = await read(*args, **kwargs)
+                    with self._transfers.cache_active(_host_of(fp.url)):
+                        if fp.r is None:
+                            fp.r = await self._open_stream_response(fp)
+                        result = await read(*args, **kwargs)
                 except Exception as e:
                     if not await self._retarget_after_failure(fp, path, e, tries):
                         raise
@@ -1714,7 +1716,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 end = max(size + end, 0) if end < 0 else end
             if start >= end:
                 return b""
-        result = await self.http_file_system._cat_file(path, start, end, **kwargs)
+        with self._transfers.cache_active(_host_of(path)):
+            result = await self.http_file_system._cat_file(path, start, end, **kwargs)
         self._transfers.add_read(len(result))
         return result
 
@@ -1748,7 +1751,8 @@ class PelicanFileSystem(AsyncFileSystem):
     @_counted_operation
     @_cache_dec
     async def _get_file_from_cache(self, rpath: str, lpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
-        return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, self._transfers.add_read), **kwargs)
+        with self._transfers.cache_active(_host_of(rpath)):
+            return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, self._transfers.add_read), **kwargs)
 
     @_cache_dec
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:

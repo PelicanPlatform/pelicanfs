@@ -680,6 +680,7 @@ stats.average_rate  # bytes per second while an operation was active
 stats.request_success_rate  # fraction of HTTP requests that succeeded
 stats.operation_success_rate  # fraction of operations that succeeded after retries
 stats.failed_caches  # Counter of failed attempts by cache
+stats.cache_busy_seconds  # dict of read time by cache
 ```
 
 An operation is one `cat_file`, `get_file`, `put_file`, or `read` call on an open file. The object also has `failed_requests`, `operations`, `failed_operations`, `bytes_read`, `bytes_written`, and `busy_seconds`. A rate is `None` until there is data for it.
@@ -689,6 +690,7 @@ An operation is one `cat_file`, `get_file`, `put_file`, or `read` call on an ope
 - A failure while reading a response body lowers only the operation rate.
 - `failed_caches` includes failed cache probes and failures while reading a response body. Its keys have the form `https://cache.example.com:8443`.
 - `busy_seconds` is the time that one or more operations were active, so concurrent transfers do not lower the average rate.
+- `cache_busy_seconds` uses the same keys, and counts overlapping reads on a cache once. It includes failed attempts, and excludes uploads, which have no cache. A direct read appears under its origin.
 - For open files, `bytes_read` counts the bytes given to the caller, not the bytes fsspec fetched for its read-ahead cache.
 - Totals are per process. Each Dask worker keeps its own.
 
