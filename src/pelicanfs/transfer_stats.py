@@ -14,8 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import enum
 import threading
 import time
+import urllib.parse
 from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -24,6 +26,18 @@ from types import SimpleNamespace
 
 import aiohttp
 from fsspec.callbacks import Callback, NoOpCallback
+
+
+class ResponseFailure(enum.Enum):
+    """Stands in for the status in `TransferStats.responses` when no status tells the result."""
+
+    NO_RESPONSE = "no response"
+    BODY = "body"
+
+
+def _host_of(url: object) -> str:
+    """Strip a URL down to scheme://host, the identity of a cache."""
+    return urllib.parse.urlparse(str(url))._replace(path="", query="", fragment="").geturl()
 
 
 @dataclass(frozen=True)
@@ -36,8 +50,11 @@ class TransferStats:
     open file. An operation fails only when no retry could save it. A missing object
     (404) is not a failure of either kind.
 
-    `failed_caches` counts failed attempts by cache, as `scheme://host:port`. This includes
-    failed probes, and failures while reading a body, which are not failed requests.
+    `responses` counts HTTP responses by (server, method, status), with the server as
+    `scheme://host:port`. Each redirect hop is a response. It covers every server, not only
+    caches. A request that got no response has `ResponseFailure.NO_RESPONSE` for its status.
+    A body that broke off adds a `ResponseFailure.BODY` entry for "GET", beside the status
+    that arrived with its headers.
 
     `cache_busy_seconds` is the read time by cache, with failed attempts included. An
     upload has no cache, and a direct read appears under its origin.
@@ -53,7 +70,7 @@ class TransferStats:
     bytes_read: int = 0
     bytes_written: int = 0
     busy_seconds: float = 0.0
-    failed_caches: Counter[str] = field(default_factory=Counter, hash=False)
+    responses: Counter[tuple[str, str, int | ResponseFailure]] = field(default_factory=Counter, hash=False)
     cache_busy_seconds: dict[str, float] = field(default_factory=dict, hash=False)
     cache_bytes_read: Counter[str] = field(default_factory=Counter, hash=False)
 
@@ -135,7 +152,7 @@ class _TransferRecorder:
     bytes_read: int = 0
     bytes_written: int = 0
     busy: _BusyTimer = field(default_factory=_BusyTimer)
-    failed_caches: Counter[str] = field(default_factory=Counter)
+    responses: Counter[tuple[str, str, int | ResponseFailure]] = field(default_factory=Counter)
     cache_busy: defaultdict[str, _BusyTimer] = field(default_factory=lambda: defaultdict(_BusyTimer))
     cache_bytes_read: Counter[str] = field(default_factory=Counter)
     trace_config: aiohttp.TraceConfig = field(default_factory=aiohttp.TraceConfig, init=False, repr=False)
@@ -144,6 +161,7 @@ class _TransferRecorder:
 
     def __post_init__(self) -> None:
         self.trace_config.on_request_start.append(self._on_request_start)
+        self.trace_config.on_request_redirect.append(self._on_request_redirect)
         self.trace_config.on_request_end.append(self._on_request_end)
         self.trace_config.on_request_exception.append(self._on_request_exception)
 
@@ -151,22 +169,32 @@ class _TransferRecorder:
         with self._lock:
             self.requests += 1
 
+    async def _on_request_redirect(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
+        self._add_response(params.response.url, params.method, params.response.status)
+
     async def _on_request_end(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
+        self._add_response(params.response.url, params.method, params.response.status)
         if params.response.status >= 400 and params.response.status != 404:
             self._add_failed_request()
 
     async def _on_request_exception(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
         # A cancelled request is not a failure.
         if isinstance(params.exception, Exception):
+            self._add_response(params.url, params.method, ResponseFailure.NO_RESPONSE)
             self._add_failed_request()
+
+    def _add_response(self, url: object, method: str, status: int | ResponseFailure) -> None:
+        with self._lock:
+            self.responses[_host_of(url), method, status] += 1
 
     def _add_failed_request(self) -> None:
         with self._lock:
             self.failed_requests += 1
 
-    def add_failed_cache(self, cache: str) -> None:
-        with self._lock:
-            self.failed_caches[cache] += 1
+    def add_body_failure(self, url: str) -> None:
+        # The caller does not know the method. This assumes GET, the data read, so the rare
+        # broken PROPFIND body from info() shows as GET.
+        self._add_response(url, "GET", ResponseFailure.BODY)
 
     def add_read(self, size: int, cache: str) -> None:
         with self._lock:
@@ -223,7 +251,7 @@ class _TransferRecorder:
                 bytes_read=self.bytes_read,
                 bytes_written=self.bytes_written,
                 busy_seconds=self.busy.seconds(),
-                failed_caches=Counter(self.failed_caches),
+                responses=Counter(self.responses),
                 cache_busy_seconds={cache: timer.seconds() for cache, timer in self.cache_busy.items()},
                 cache_bytes_read=Counter(self.cache_bytes_read),
             )

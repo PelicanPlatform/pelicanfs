@@ -68,7 +68,7 @@ from .exceptions import (
 )
 from .log_utils import TRACE, TokenForLog, log_operation, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
-from .transfer_stats import TransferStats, _ByteCounter, _TransferRecorder
+from .transfer_stats import TransferStats, _ByteCounter, _host_of, _TransferRecorder
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -210,11 +210,6 @@ class _CacheManager:
         with self._lock:
             if bad_cache_url in self._cache_list:
                 self._cache_list.remove(bad_cache_url)
-
-
-def _host_of(url: str) -> str:
-    """Strip a URL down to scheme://host, the identity of a cache."""
-    return urllib.parse.urlparse(url)._replace(path="", query="", fragment="").geturl()
 
 
 def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
@@ -925,7 +920,6 @@ class PelicanFileSystem(AsyncFileSystem):
             except _RETRYABLE_ERRORS as e:
                 failure = redact_query(_error_text(e))
             failures.append(f"{redact_query(updated_url)}: {failure}")
-            self._transfers.add_failed_cache(_host_of(updated_url))
             logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
 
@@ -1089,7 +1083,6 @@ class PelicanFileSystem(AsyncFileSystem):
         bad_cache = _host_of(url)
 
         self._record_failed_access(url, e)
-        self._transfers.add_failed_cache(bad_cache)
 
         namespace_info = self._get_prefix_info(path)
         if not namespace_info:
@@ -1377,6 +1370,8 @@ class PelicanFileSystem(AsyncFileSystem):
         on another cache is safe.
         """
         redact_exception(error)
+        if isinstance(_underlying_error(error), aiohttp.ClientPayloadError):
+            self._transfers.add_body_failure(failed_url)
         if self.direct_reads:
             return None
         failure = _cache_failure(error)
