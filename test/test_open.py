@@ -24,6 +24,7 @@ from pytest_httpserver import HTTPServer
 import pelicanfs.core
 from pelicanfs.core import PelicanFileSystem
 from pelicanfs.exceptions import NoAvailableSource
+from pelicanfs.transfer_stats import _TransferRecorder
 
 
 def test_open(httpserver: HTTPServer, get_client):
@@ -249,6 +250,7 @@ def test_io_wrapper_error_handling():
     pelfs._loop = get_loop()
     pelfs._pid = os.getpid()
     pelfs.direct_reads = True  # no cache to fail over to
+    pelfs._transfers = _TransferRecorder()
 
     class FakeFile:
         url = "https://origin.example.com/test/path"
