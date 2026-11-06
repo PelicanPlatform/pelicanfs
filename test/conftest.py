@@ -32,13 +32,18 @@ limitations under the License.
 #
 import asyncio
 import asyncio.proactor_events
+import os
 import ssl
 import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import aiohttp
 import fsspec.asyn
+import fsspec.exceptions
+import fsspec.implementations.http
 import pytest
 import trustme
 from pytest_httpserver import HTTPServer
@@ -69,6 +74,44 @@ if sys.version_info < (3, 14, 11) or (3, 15) <= sys.version_info < (3, 15, 3):
             self._called_connection_lost = True
 
     asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost = close_after_failed_shutdown
+
+
+CLOSE_TIMEOUT = float(os.environ.get("CLOSE_SESSION_TIMEOUT", "0.1"))
+close_times: list[float] = []
+close_fallbacks: list[str] = []
+
+
+def traced_close_session(loop, session):
+    """`HTTPFileSystem.close_session` that records each use of the connector fallback."""
+    start = time.monotonic()
+    if loop is None or not loop.is_running():
+        reason = "loop not running"
+    else:
+        try:
+            fsspec.asyn.sync(loop, session.close, timeout=CLOSE_TIMEOUT)
+        except (TimeoutError, fsspec.exceptions.FSTimeoutError, NotImplementedError) as err:
+            reason = type(err).__name__
+        else:
+            close_times.append(time.monotonic() - start)
+            return
+    elapsed = time.monotonic() - start
+    close_times.append(elapsed)
+    test = os.environ.get("PYTEST_CURRENT_TEST", "no test")
+    close_fallbacks.append(f"{reason} after {elapsed:.3f}s on {threading.current_thread().name} in {test}")
+    connector = getattr(session, "_connector", None)
+    if connector is not None:
+        connector._close()
+
+
+fsspec.implementations.http.HTTPFileSystem.close_session = staticmethod(traced_close_session)
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminalreporter.section("close_session")
+    slowest = max(close_times, default=0.0)
+    terminalreporter.line(f"timeout={CLOSE_TIMEOUT} closes={len(close_times)} fallbacks={len(close_fallbacks)} slowest={slowest:.3f}s")
+    for line in close_fallbacks:
+        terminalreporter.line(line)
 
 
 @pytest.fixture(scope="session", name="ca")
