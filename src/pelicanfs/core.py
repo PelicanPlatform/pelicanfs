@@ -314,6 +314,14 @@ def _webdav_path(url: str) -> str:
     return urllib.parse.unquote(urllib.parse.urlparse(url).path)
 
 
+def _listed_path(resource: Resource) -> str:
+    """
+    The URL-encoded path of `resource`, the form every path here takes. Characters that
+    are legal in a URL path stay readable. ";" is encoded because urlparse splits on it.
+    """
+    return urllib.parse.quote(resource.path, safe="/:@!$&'()*+,=")
+
+
 def _not_a_collection(error: Exception) -> bool:
     """
     Whether `error`, from a PROPFIND of a path's trailing-slash form, says the path is
@@ -1207,8 +1215,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if detail:
             # A resource's path carries a trailing slash exactly when it is a collection
-            return [_resource_entry(f"{base_url}{resource.path}", resource) for resource in resources]
-        return sorted({resource.path for resource in resources})
+            return [_resource_entry(f"{base_url}{_listed_path(resource)}", resource) for resource in resources]
+        return sorted({_listed_path(resource) for resource in resources})
 
     async def _isdir(self, path: str) -> bool:
         """

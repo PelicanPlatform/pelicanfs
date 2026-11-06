@@ -95,6 +95,48 @@ def _listing_filesystem(httpserver: HTTPServer, get_client, get_webdav_client, l
     return pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
 
+def _listing_of(href):
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/bar/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>{href}</D:href>
+    <D:propstat><D:prop><D:getcontentlength>13</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+
+@pytest.mark.parametrize(
+    ("name", "listed"),
+    [
+        ("a%20b", "a%2520b"),
+        ("a b", "a%20b"),
+        ("a?b", "a%3Fb"),
+        ("a#b", "a%23b"),
+        ("a;b", "a%3Bb"),
+        ("a+b:c=d", "a+b:c=d"),
+    ],
+)
+def test_ls_name_reaches_the_listed_resource(httpserver: HTTPServer, get_client, get_webdav_client, name, listed):
+    """A listed name is URL-encoded, so passing it back asks for the same resource."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of(f"/foo/bar/{listed}"))
+    path = f"/foo/bar/{listed}"
+
+    assert pelfs.ls("/foo/bar", detail=False) == [path]
+    assert [entry["name"] for entry in pelfs.ls("/foo/bar", detail=True)] == [path]
+
+    # The namespace is known from the listing, so this goes straight to the collections endpoint
+    multistatus = f"""<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>{path}</D:href>
+<D:propstat><D:prop><D:getcontentlength>13</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+</D:response></D:multistatus>"""
+    httpserver.expect_request(f"/foo/bar/{name}", method="PROPFIND").respond_with_data(multistatus, status=207, content_type="application/xml")
+
+    assert pelfs.info(path)["size"] == 13
+
+
 def test_ls_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
     pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
 
