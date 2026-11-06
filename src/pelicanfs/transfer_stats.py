@@ -162,32 +162,43 @@ class _TransferRecorder:
     def __post_init__(self) -> None:
         self.trace_config.on_request_start.append(self._on_request_start)
         self.trace_config.on_request_redirect.append(self._on_request_redirect)
+        self.trace_config.on_connection_create_start.append(self._on_connection)
+        self.trace_config.on_connection_reuseconn.append(self._on_connection)
         self.trace_config.on_request_end.append(self._on_request_end)
         self.trace_config.on_request_exception.append(self._on_request_exception)
 
-    async def _on_request_start(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
+    async def _on_request_start(self, _session: aiohttp.ClientSession, context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
+        context.redirected = False
         with self._lock:
             self.requests += 1
 
-    async def _on_request_redirect(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
+    async def _on_request_redirect(self, _session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
         # With no target, aiohttp stops here and on_request_end reports this response.
         headers = params.response.headers
         if aiohttp.hdrs.LOCATION not in headers and aiohttp.hdrs.URI not in headers:
             return
         self._add_response(params.response.url, params.method, params.response.status)
-        # aiohttp sends no on_request_start for the next hop.
-        with self._lock:
-            self.requests += 1
+        context.redirected = True
+
+    async def _on_connection(self, _session: aiohttp.ClientSession, context: SimpleNamespace, _params: object) -> None:
+        # aiohttp sends no on_request_start for a redirect's next hop, and it can stop
+        # before that hop. Only a request about to go out needs a connection.
+        if context.redirected:
+            context.redirected = False
+            with self._lock:
+                self.requests += 1
 
     async def _on_request_end(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
         self._add_response(params.response.url, params.method, params.response.status)
         if params.response.status >= 400 and params.response.status != 404:
             self._add_failed_request()
 
-    async def _on_request_exception(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
+    async def _on_request_exception(self, _session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
         # A cancelled request is not a failure.
         if isinstance(params.exception, Exception):
-            self._add_response(params.url, params.method, ResponseFailure.NO_RESPONSE)
+            # A redirect that stopped here already has its response.
+            if not context.redirected:
+                self._add_response(params.url, params.method, ResponseFailure.NO_RESPONSE)
             self._add_failed_request()
 
     def _add_response(self, url: object, method: str, status: int | ResponseFailure) -> None:
