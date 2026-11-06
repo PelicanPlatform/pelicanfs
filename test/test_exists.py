@@ -74,9 +74,17 @@ def test_exists_nonexistent_object(httpserver: HTTPServer, get_client, get_webda
     assert pelfs.exists("/foo/bar") is False
 
 
-def test_exists_existing_object(httpserver: HTTPServer, get_client, get_webdav_client):
+@pytest.mark.parametrize(
+    ("body", "status"),
+    [
+        pytest.param("hello, world!", 200, id="object"),
+        # A cache refuses to describe a collection, which is not a denial that it exists
+        pytest.param("Unable to locate /foo/bar; is a directory", 409, id="collection-refused-by-cache"),
+    ],
+)
+def test_exists_existing_object(httpserver: HTTPServer, get_client, get_webdav_client, body, status):
     """
-    Test that exists() returns True when cache returns 200 for an existing object.
+    Test that exists() returns True when the cache's PROPFIND shows something is there.
 
     This is a complementary test to ensure the normal case still works correctly.
     """
@@ -102,10 +110,7 @@ def test_exists_existing_object(httpserver: HTTPServer, get_client, get_webdav_c
     )
 
     # Mock the PROPFIND request used by _exists via WebDAV client
-    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(
-        "hello, world!",
-        status=200,
-    )
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(body, status=status)
 
     pelfs = pelicanfs.core.PelicanFileSystem(
         httpserver.url_for("/"),

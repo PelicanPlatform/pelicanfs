@@ -1755,7 +1755,14 @@ class PelicanFileSystem(AsyncFileSystem):
     @_cache_dec
     async def _exists_via_cache(self, path: str, **kwargs: Any) -> bool:
         async with self.get_webdav_client(self._webdav_options(path)) as client:
-            return await client.exists(_webdav_path(path))
+            try:
+                return await client.exists(_webdav_path(path))
+            except ResponseError as e:
+                # A cache refuses to describe a collection: 409, "is a directory". That
+                # is a refusal to say more about the path, not a denial that it exists.
+                if e.status == 409:
+                    return True
+                raise
 
     async def _get_file(self, rpath: str, lpath: str, _collection_roots: set[str] | None = None, **kwargs: Any) -> None:
         """
