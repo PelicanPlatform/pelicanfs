@@ -51,9 +51,11 @@ exclude = ["/.github"]
 
 [dependency-groups]
 testing = [
+    "awkward>=2",
     "pytest>=9",
     "pytest-httpserver",
     "trustme",
+    "uproot>=5.7",
 ]
 dev = [{ include-group = "testing" }]
 

@@ -34,7 +34,7 @@ import asyncio
 import asyncio.proactor_events
 import ssl
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import aiohttp
@@ -150,6 +150,17 @@ def _reset_httpserver2(request):
         request.getfixturevalue("httpserver2").clear()
 
 
+@contextmanager
+def _threaded_server(address, ssl_context):
+    host, port = address
+    server = HTTPServer(host=host or HTTPServer.DEFAULT_LISTEN_HOST, port=port or HTTPServer.DEFAULT_LISTEN_PORT, ssl_context=ssl_context, threaded=True)
+    server.start()
+    yield server
+    server.clear()
+    if server.is_running():
+        server.stop()
+
+
 @pytest.fixture(scope="session", name="threaded_httpserver")
 def fixture_threaded_httpserver(httpserver_listen_address, httpserver_ssl_context):
     """
@@ -161,18 +172,15 @@ def fixture_threaded_httpserver(httpserver_listen_address, httpserver_ssl_contex
     the default server that request waits for aiohttp's connect timeout and fails on
     that instead of on the thing it set out to assert.
     """
-    host, port = httpserver_listen_address
-    if not host:
-        host = HTTPServer.DEFAULT_LISTEN_HOST
-    if not port:
-        port = HTTPServer.DEFAULT_LISTEN_PORT
+    with _threaded_server(httpserver_listen_address, httpserver_ssl_context) as server:
+        yield server
 
-    server = HTTPServer(host=host, port=port, ssl_context=httpserver_ssl_context, threaded=True)
-    server.start()
-    yield server
-    server.clear()
-    if server.is_running():
-        server.stop()
+
+@pytest.fixture(scope="session", name="threaded_httpserver2")
+def fixture_threaded_httpserver2(httpserver_listen_address, httpserver_ssl_context):
+    """A second parallel server, for tests that need two caches under concurrent reads."""
+    with _threaded_server(httpserver_listen_address, httpserver_ssl_context) as server:
+        yield server
 
 
 @pytest.fixture(scope="session", name="run_async")
