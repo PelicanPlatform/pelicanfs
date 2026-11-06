@@ -31,6 +31,7 @@ jobs:
     permissions:
       contents: read  # checkout
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version:
