@@ -655,6 +655,7 @@ class PelicanFileSystem(AsyncFileSystem):
             "_cat_file",
             "_exists_via_cache",
             "_info",
+            "_info_from_cache",
             "_get_file_from_cache",
             "_is_collection",
             "get_working_cache",
@@ -1029,7 +1030,8 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if not collections_url:
             msg = f"No collections endpoint found for {fparsed.path}"
-            logger.error("%s", msg)
+            # Not an error in itself: info() and isdir() go on without one
+            logger.debug("%s", msg)
             raise NoCollectionsUrl(msg)
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
@@ -1776,8 +1778,41 @@ class PelicanFileSystem(AsyncFileSystem):
         with self._transfers.cache_active(cache):
             return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
 
-    @_cache_dec
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        """
+        Describe the object or collection at `path`.
+
+        Asked of the collections endpoint first: caches refuse a PROPFIND on a collection
+        (409, "is a directory"), and report their fetch time as an object's mtime. The
+        caches answer when the namespace has no collections endpoint, or when the origin
+        fails in a way a cache could recover from. Any other answer from the origin is
+        final, and so is its failure if the caches cannot answer either. Only the origin's
+        own failure leads to the caches, not the director's.
+        """
+        path = self._check_fspath(path)
+        try:
+            list_url = await self._collections_url(path, "_info")
+        except NoCollectionsUrl:
+            return await self._info_from_cache(path)
+        try:
+            return await self._stat(list_url)
+        except Exception as origin_error:
+            if _cache_failure(origin_error) is None:
+                raise
+            logger.debug("Collections endpoint failed for %s, asking the caches: %r", path, origin_error)
+            try:
+                return await self._info_from_cache(path)
+            except Exception as cache_error:
+                raise origin_error from cache_error
+
+    @_cache_dec
+    async def _info_from_cache(self, path: str) -> dict[str, Any]:
+        return await self._stat(path)
+
+    async def _stat(self, path: str) -> dict[str, Any]:
+        """
+        PROPFIND the resource at the full url `path` and describe it in fsspec's info form.
+        """
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             try:
                 resource = await client.stat(_webdav_path(path))
