@@ -271,7 +271,7 @@ async def _log_request_end(_session: aiohttp.ClientSession, context: SimpleNames
 
 
 async def _log_request_exception(_session: aiohttp.ClientSession, context: SimpleNamespace, params: aiohttp.TraceRequestExceptionParams) -> None:
-    logger.debug("HTTP %s %s failed after %.3fs: %r", params.method, params.url, time.perf_counter() - context.start, params.exception)
+    logger.debug("HTTP %s %s failed after %.3fs: %s: %s", params.method, params.url, time.perf_counter() - context.start, type(params.exception).__name__, params.exception)
 
 
 def _log_requests() -> aiohttp.TraceConfig:

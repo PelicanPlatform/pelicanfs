@@ -18,6 +18,7 @@ import asyncio
 import logging
 import re
 
+import aiohttp
 import pytest
 from fsspec.asyn import get_loop, sync
 from pytest_httpserver import HTTPServer
@@ -80,6 +81,23 @@ def test_request_failure_is_logged(httpserver: HTTPServer, pelfs, caplog):
         sync(pelfs.loop, pelfs.get_working_cache, "/foo/bar")
 
     assert any(re.search(rf"HTTP HEAD {re.escape(url)} failed after \d+\.\d{{3}}s: ", message) for message in pelican_messages(caplog))
+
+
+def test_request_failure_log_omits_authorization_header(httpserver: HTTPServer, pelfs, caplog):
+    url = httpserver.url_for("/loop")
+    httpserver.expect_request("/loop").respond_with_data("", status=302, headers={"Location": url})
+
+    async def fetch() -> None:
+        session = await pelfs.http_file_system.set_session()
+        async with session.get(url, headers={"Authorization": "Bearer SECRET"}):
+            pass
+
+    with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"), pytest.raises(aiohttp.TooManyRedirects):
+        sync(pelfs.loop, fetch)
+
+    messages = pelican_messages(caplog)
+    assert not any("SECRET" in message for message in messages)
+    assert any(re.search(rf"HTTP GET {re.escape(url)} failed after \d+\.\d{{3}}s: TooManyRedirects: ", message) for message in messages)
 
 
 def test_redirect_is_logged(httpserver: HTTPServer, pelfs, caplog):
