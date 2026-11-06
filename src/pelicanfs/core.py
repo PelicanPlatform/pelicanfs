@@ -37,9 +37,13 @@ import cachetools
 import fsspec.implementations.http as fshttp
 from aiowebdav2.client import Client, ClientOptions
 from aiowebdav2.exceptions import (
+    AccessDeniedError,
+    ConnectionExceptionError,
     MethodNotSupportedError,
+    NoConnectionError,
     RemoteResourceNotFoundError,
     ResponseErrorCodeError,
+    UnauthorizedError,
 )
 from aiowebdav2.parser import WebDavXmlUtils
 from aiowebdav2.urn import Urn
@@ -54,17 +58,23 @@ from .dir_header_parser import (
 )
 from .exceptions import (
     BadDirectorResponse,
+    DirectorError,
     InvalidDestinationURL,
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .log_utils import TRACE, TokenForLog, trace
+from .log_utils import TRACE, TokenForLog, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
 
 T = TypeVar("T")
+_HTTPReadFile = fshttp.HTTPFile | fshttp.HTTPStreamFile | fshttp.AsyncStreamFile
+
+
+# The most caches one read tries before it gives up and raises the last error.
+MAX_CACHE_ATTEMPTS = 5
 
 # How long before a generated token's expiry it is retired and a new one generated. A
 # token sent right at its expiry would be expired by the time it reaches the server.
@@ -93,7 +103,7 @@ class _AccessResp:
     """
 
     def __init__(self, path: str, success: bool, error: str | None = None) -> None:
-        self.access_path = path
+        self.access_path = redact_query(path)
         self.success = success
         self.error = error
 
@@ -172,13 +182,11 @@ class _CacheManager:
         # Work around any bugs where the director may return the same cache twice
         cache_set: set[str] = set()
         for cache_url in cache_list:
-            parsed_url = urllib.parse.urlparse(cache_url)
-            parsed_url = parsed_url._replace(path="", query="", fragment="")
-            cache_str = parsed_url.geturl()
+            cache_str = _host_of(cache_url)
             if cache_str in cache_set:
                 continue
             cache_set.add(cache_str)
-            self._cache_list.append(parsed_url.geturl())
+            self._cache_list.append(cache_str)
 
     def get_url(self, obj_name: str) -> str:
         """
@@ -186,7 +194,8 @@ class _CacheManager:
         """
         with self._lock:
             if not self._cache_list:
-                raise NoAvailableSource
+                msg = f"No caches left for {obj_name}"
+                raise NoAvailableSource(msg)
 
             return urllib.parse.urljoin(self._cache_list[0], obj_name)
 
@@ -194,12 +203,15 @@ class _CacheManager:
         """
         Remove the given cache_url from the list of possible caches to try
         """
-        cache_url_parsed = urllib.parse.urlparse(cache_url)
-        cache_url_parsed = cache_url_parsed._replace(path="", query="", fragment="")
-        bad_cache_url = cache_url_parsed.geturl()
+        bad_cache_url = _host_of(cache_url)
         with self._lock:
             if bad_cache_url in self._cache_list:
                 self._cache_list.remove(bad_cache_url)
+
+
+def _host_of(url: str) -> str:
+    """Strip a URL down to scheme://host, the identity of a cache."""
+    return urllib.parse.urlparse(url)._replace(path="", query="", fragment="").geturl()
 
 
 def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
@@ -338,6 +350,54 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
             yield item
 
     return wrapper
+
+
+_RETRYABLE_ERRORS = (aiohttp.ClientError, ConnectionError, TimeoutError, NoConnectionError)
+
+
+def _error_text(error: BaseException) -> str:
+    """Return the message of error, or its type name if the message is blank, as for TimeoutError()."""
+    return str(error).strip() or type(error).__name__
+
+
+def _is_retryable_status(status: int) -> bool:
+    return status == 429 or status >= 500
+
+
+def _underlying_error(error: BaseException) -> BaseException | None:
+    """Return the error that a wrapper from fsspec's _info or aiowebdav2 reports."""
+    match error:
+        case FileNotFoundError():
+            return error.__cause__
+        case ConnectionExceptionError():
+            return error.exception
+    return error
+
+
+def _http_status(error: BaseException | None) -> int | None:
+    """Return the HTTP status that error reports, if any."""
+    match error:
+        case aiohttp.ClientResponseError(status=status) | ResponseErrorCodeError(code=status):
+            return status
+        case UnauthorizedError():
+            return 401
+        case AccessDeniedError():
+            return 403
+    return None
+
+
+def _cache_failure(error: BaseException) -> BaseException | None:
+    """
+    Return the failure behind error if another cache could succeed, else None.
+
+    As in the Go client's IsRetryable, connection failures, timeouts, 429 and 5xx are
+    retryable. Other 4xx, a missing object and local errors are not.
+    """
+    failure = _underlying_error(error)
+    status = _http_status(failure)
+    if status is not None:
+        return failure if _is_retryable_status(status) else None
+    return failure if isinstance(failure, _RETRYABLE_ERRORS) else None
 
 
 def _url_origin(url: object) -> tuple[str, str | None, int | None]:
@@ -521,7 +581,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # strings at their call sites. Unknown names default to read below.
         read_operations = {
             "_cat_file",
-            "_exists",
+            "_exists_via_cache",
             "_info",
             "_get_file_from_cache",
             "_is_collection",
@@ -572,6 +632,9 @@ class PelicanFileSystem(AsyncFileSystem):
         if token and "Authorization" not in params.headers and _url_origin(params.url) in self._token_origins:
             params.headers["Authorization"] = f"Bearer {token}"
 
+    def _token_is_expiring(self) -> bool:
+        return self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN
+
     async def _handle_token_generation(self, url: str, director_response: DirectorResponse, operation: TokenOperation) -> str | None:
         """
         Handle token generation if required by the director response.
@@ -595,7 +658,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # A token we generated earlier is only good until it expires; once it has, or is
         # about to, forget it so a fresh one is generated below instead of being sent
         # until the server rejects it.
-        if self._token_expiry is not None and self._token_expiry <= datetime.now(UTC) + TOKEN_REFRESH_MARGIN:
+        if self._token_is_expiring():
             logger.debug("Remembered token expires at %s, regenerating for %s", self._token_expiry, url)
             self.token = None
             self._token_expiry = None
@@ -649,7 +712,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 logger.warning("token_generator.get_token returned falsy value: %r", token)
             return token
         except Exception as e:
-            logger.warning("Failed to generate token for %s: %s", url, e)
+            logger.warning("Failed to generate token for %s: %s", url, _error_text(e))
             trace(logger, "token generation failed", exc_info=True)
             return None
 
@@ -671,8 +734,9 @@ class PelicanFileSystem(AsyncFileSystem):
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
-                logger.error("Failed to get metadata from %s", discovery_url.geturl())
-                raise InvalidMetadata
+                msg = redact_query(f"Federation discovery at {discovery_url.geturl()} returned HTTP {resp.status}")
+                logger.error("%s", msg)
+                raise InvalidMetadata(msg)
             return await resp.json(content_type="")
 
     async def get_director_headers(self, fileloc: str, origin: bool = False) -> Mapping[str, str]:
@@ -688,8 +752,9 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                logger.error("No director endpoint found in metadata")
-                raise InvalidMetadata
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
+                logger.error("%s", msg)
+                raise InvalidMetadata(msg)
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
@@ -702,6 +767,10 @@ class PelicanFileSystem(AsyncFileSystem):
             url = urllib.parse.urljoin(self.director_url, fileloc)
         session = await self.http_file_system.set_session()
         async with session.get(url, allow_redirects=False) as resp:
+            if resp.status >= 400:
+                msg = f"Director returned HTTP {resp.status} for {redact_query(url)}"
+                logger.error("%s", msg)
+                raise DirectorError(msg)
             return resp.headers
 
     async def get_working_cache(self, fileloc: str) -> tuple[str, DirectorResponse]:
@@ -711,22 +780,10 @@ class PelicanFileSystem(AsyncFileSystem):
         namespace = None
         logger.debug("Choosing a cache for %s...", fileloc)
         fparsed = urllib.parse.urlparse(fileloc)
-        # Removing the query if need be
-        try:
-            cached_url, cached_director_response = self._match_namespace(fparsed.path)
-            if cached_url and cached_director_response is not None:
-                # _CacheManager keeps bare scheme://host entries, so a namespace hit
-                # comes back without the query string the caller asked for. Put it back:
-                # it can carry an authz token, and dropping it turns an authorized
-                # request into an unauthorized one.
-                if fparsed.query:
-                    cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
-                logger.debug("Found previously working cache: %s", cached_url)
-                return cached_url, cached_director_response
-        except NoAvailableSource:
-            # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
-            # Fall through to discover caches
-            logger.debug("Namespace found but no caches available, discovering caches")
+        known = self._known_cache(fileloc)
+        if known is not None:
+            logger.debug("Found previously working cache: %s", known[0])
+            return known
 
         # Calculate the list of applicable caches; this takes into account the
         # preferredCaches for the filesystem.  If '+' is a preferred cache, we
@@ -735,7 +792,13 @@ class PelicanFileSystem(AsyncFileSystem):
         cache_list: list[str] = []
 
         # Always check with director to get namespace information and require-token
-        headers = await self.get_director_headers(fileloc)
+        try:
+            headers = await self.get_director_headers(fileloc)
+        except DirectorError:
+            # Preferred caches do not depend on the director's answer
+            if not self.preferred_caches:
+                raise
+            headers = {}
         director_response = parse_director_response(headers)
 
         # Extract data directly from director_response
@@ -765,6 +828,10 @@ class PelicanFileSystem(AsyncFileSystem):
             # Use director-provided caches
             cache_list = [urllib.parse.urlparse(server)._replace(query=fparsed.query).geturl() for server in director_response.object_servers]
 
+        require_token = bool(director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token)
+        refused_token: list[str] = []
+        failures: list[str] = []
+
         while cache_list:
             updated_url = cache_list[0]
             # Timeout response in seconds - the default response is 5 minutes
@@ -773,29 +840,36 @@ class PelicanFileSystem(AsyncFileSystem):
             session = await self.http_file_system.set_session()
 
             # Handle token generation for cache requests if required
-            if director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token:
+            if require_token:
                 operation = self._get_token_operation("get_working_cache")
                 await self._handle_token_generation(updated_url, director_response, operation)
 
             try:
                 logger.debug("Checking to see if the cache at %s is working and returns a valid response code", updated_url)
                 async with session.head(updated_url, timeout=timeout) as resp:
-                    # Accept both successful responses (2xx/3xx) and 404 (object doesn't exist)
-                    # as indicators that the cache is working. Other error codes indicate
-                    # the cache itself is having problems.
-                    if resp.status >= 200 and resp.status < 400:
-                        logger.debug("Cache found")
+                    # A 404 or an auth error is an answer from a working cache, and
+                    # the request that follows reports it to the caller. A cache that
+                    # refuses a token may lack the issuer's keys, so try the others first.
+                    if require_token and resp.status in {401, 403}:
+                        refused_token.append(updated_url)
+                    elif not _is_retryable_status(resp.status):
+                        logger.debug("Cache found (status %d)", resp.status)
                         break
-                    if resp.status == 404:
-                        logger.debug("Cache is working (returned 404 for non-existent object)")
-                        break
-            except (TimeoutError, aiohttp.ClientConnectorError):
-                pass
+                    failure = f"HTTP {resp.status}"
+            except _RETRYABLE_ERRORS as e:
+                failure = redact_query(_error_text(e))
+            failures.append(f"{redact_query(updated_url)}: {failure}")
+            logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
 
+        # If no other cache works, the caller sees the auth error from the first of these
+        cache_list += refused_token
+
         if not cache_list:
-            logger.error("No working cache found")
-            raise NoAvailableSource
+            detail = "; ".join(failures) or "the director listed no caches"
+            msg = f"No working cache for {fparsed.path}: {detail}"
+            logger.error("%s", msg)
+            raise NoAvailableSource(msg)
 
         working_url = cache_list[0]
         with self._namespace_lock:
@@ -810,7 +884,8 @@ class PelicanFileSystem(AsyncFileSystem):
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
-            raise NoAvailableSource
+            msg = f"The director listed no origin for {urllib.parse.urlparse(fileloc).path}"
+            raise NoAvailableSource(msg)
 
         # Parse the headers to get the full director response
         director_response = parse_director_response(headers)
@@ -823,7 +898,8 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                raise InvalidMetadata
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
+                raise InvalidMetadata(msg)
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
@@ -853,7 +929,8 @@ class PelicanFileSystem(AsyncFileSystem):
             session = await self.http_file_system.set_session()
             async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
                 if "Link" not in resp.headers:
-                    raise BadDirectorResponse
+                    msg = f"Director returned HTTP {resp.status} with no Link header for {redact_query(url)}"
+                    raise BadDirectorResponse(msg)
                 collections_url = get_collections_url(resp.headers)
 
                 # Parse the headers to get the full director response
@@ -869,8 +946,9 @@ class PelicanFileSystem(AsyncFileSystem):
                             self._namespace_cache[namespace] = _CacheManager(existing._cache_list if existing else [], director_response)
 
         if not collections_url:
-            logger.error("No collections endpoint found for %s", fileloc)
-            raise NoCollectionsUrl
+            msg = f"No collections endpoint found for {fparsed.path}"
+            logger.error("%s", msg)
+            raise NoCollectionsUrl(msg)
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
         director_response.location = dirlist_url
@@ -892,6 +970,28 @@ class PelicanFileSystem(AsyncFileSystem):
                     break
         return None
 
+    def _known_cache(self, fileloc: str) -> tuple[str, DirectorResponse] | None:
+        """
+        Return the current cache for fileloc from memory, or None if the namespace
+        is unknown or has no caches left.
+        """
+        fparsed = urllib.parse.urlparse(fileloc)
+        try:
+            cached_url, director_response = self._match_namespace(fparsed.path)
+        except NoAvailableSource:
+            # Namespace exists but cache list is empty (e.g., from get_dirlist_url caching)
+            logger.debug("Namespace found but no caches available")
+            return None
+        if not cached_url or director_response is None:
+            return None
+        # _CacheManager keeps bare scheme://host entries, so a namespace hit
+        # comes back without the query string the caller asked for. Put it back:
+        # it can carry an authz token, and dropping it turns an authorized
+        # request into an unauthorized one.
+        if fparsed.query:
+            cached_url = urllib.parse.urlparse(cached_url)._replace(query=fparsed.query).geturl()
+        return cached_url, director_response
+
     def _match_namespace(self, fileloc: str) -> tuple[str | None, DirectorResponse | None]:
         """
         Search for a matching namespace and return both the cache URL and requires_token status
@@ -905,22 +1005,23 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Matching namespace found, using cache at %s", cache_url)
         return cache_url, namespace_info.cache_manager.director_response
 
-    def _bad_cache(self, url: str, e: Exception) -> None:
+    def _record_failed_access(self, url: str, e: BaseException) -> None:
+        """Add a failed access to the stats. A missing object is not a failed access."""
+        if not isinstance(e, FileNotFoundError):
+            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, redact_query(_error_text(e))))
+
+    def _bad_cache(self, url: str, e: BaseException) -> None:
         """
         Given a URL of a cache transfer that failed, record
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
-        if isinstance(e, FileNotFoundError):
-            return
-        logger.debug("Marking cache at %s as bad", url)
-        cache_url = urllib.parse.urlparse(url)
-        path = cache_url.path
-        cache_url = cache_url._replace(query="", path="", fragment="")
-        bad_cache = cache_url.geturl()
+        redact_exception(e)
+        logger.debug("Marking cache at %s as bad: %s", url, e)
+        path = urllib.parse.urlparse(url).path
+        bad_cache = _host_of(url)
 
-        ar = _AccessResp(url, False, str(e))
-        self._access_stats.add_response(path, ar)
+        self._record_failed_access(url, e)
 
         namespace_info = self._get_prefix_info(path)
         if not namespace_info:
@@ -1190,33 +1291,148 @@ class PelicanFileSystem(AsyncFileSystem):
 
     fastwalk = sync_generator(_walk)
 
-    def _io_wrapper(self, func: Callable[..., T], path: str) -> Callable[..., T]:
+    def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception, attempt: int) -> tuple[str, DirectorResponse] | None:
         """
-        A wrapper around calls to the file which intercepts
-        failures and marks the corresponding cache as bad
-        """
+        Return the cache to retry on after error, marking the cache behind failed_url
+        as bad if it is to blame. attempt counts the attempts of this request so far.
 
-        def io_wrapper(*args: Any, **kwargs: Any) -> T:
+        An expired token is not the cache's fault: the request repeats on the same
+        cache, and the retry generates a new token.
+
+        Returns None when the request should not be retried: direct reads, an error
+        that _cache_failure rejects, the MAX_CACHE_ATTEMPTS limit, or no cache left for
+        the namespace. Only caches already in memory are considered; rediscovery would
+        hand back the cache that just failed. Reads are idempotent, so repeating them
+        on another cache is safe.
+        """
+        redact_exception(error)
+        if self.direct_reads:
+            return None
+        failure = _cache_failure(error)
+        if failure is not None:
+            self._bad_cache(failed_url, failure)
+        else:
+            self._record_failed_access(failed_url, error)
+            if _http_status(_underlying_error(error)) not in {401, 403} or not self._token_is_expiring():
+                return None
+        if attempt >= MAX_CACHE_ATTEMPTS:
+            logger.debug("Tried %d caches for %s, giving up", attempt, path)
+            return None
+        retry = self._known_cache(path)
+        if retry is None:
+            logger.debug("No further cache to retry %s on", path)
+            return None
+        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, _error_text(failure or error), retry[0])
+        return retry
+
+    async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt: Callable[[str], Awaitable[T]]) -> T:
+        """
+        Call attempt(data_url) on the current cache, moving to the next cache on failure.
+        Records a successful access and returns attempt's result.
+        """
+        data_url, director_response = await (self.get_origin_url(path) if self.direct_reads else self.get_working_cache(path))
+        tries = 1
+        while True:
+            await self._handle_token_generation(data_url, director_response, operation)
             try:
-                return func(*args, **kwargs)
+                result = await attempt(data_url)
+                break
             except Exception as e:
-                self._bad_cache(path, e)
-                raise
+                retry = self._next_cache_after_failure(path, data_url, e, tries)
+                if retry is None:
+                    raise
+                data_url, director_response = retry
+                tries += 1
+        if not self.direct_reads:
+            self._access_stats.add_response(path, _AccessResp(data_url, True))
+        return result
+
+    async def _retarget_after_failure(self, fp: _HTTPReadFile, path: str, error: Exception, attempt: int) -> bool:
+        """
+        Point an open fsspec http file at the next cache after a read failed. Range-based
+        files resume at the current offset. A streaming file can only be restarted before
+        any data was read: its response is dropped, and the next read opens a new one.
+        Prepares the token for the next cache. Returns False when the read should not be
+        retried.
+        """
+        retry = self._next_cache_after_failure(path, fp.url, error, attempt)
+        if retry is None:
+            return False
+        url, director_response = retry
+        match fp:
+            case fshttp.HTTPFile():
+                pass
+            case fshttp.AsyncStreamFile(loc=0) | fshttp.HTTPStreamFile(loc=0):
+                if fp.r is not None:
+                    fp.r.close()
+                    fp.r = None
+            case _:
+                return False
+        await self._handle_token_generation(url, director_response, self._get_token_operation("open"))
+        fp.url = url
+        return True
+
+    @staticmethod
+    async def _open_stream_response(fp: fshttp.HTTPStreamFile | fshttp.AsyncStreamFile) -> aiohttp.ClientResponse:
+        """
+        Start the GET behind an fsspec stream file, as fsspec does, but close the response
+        if its status is an error: a retry can reach this once per cache.
+        """
+        session = await fp.fs.set_session()
+        r = await session.get(fp.fs.encode_url(fp.url), **fp.kwargs).__aenter__()
+        try:
+            fp.fs._raise_not_found_for_status(r, fp.url)
+        except BaseException:
+            r.close()
+            raise
+        return r
+
+    def _io_wrapper(self, fp: fshttp.HTTPFile | fshttp.HTTPStreamFile, path: str) -> Callable[..., bytes]:
+        """
+        Wrap fp.read so a failure marks the cache as bad and the read is retried
+        on the next cache.
+        """
+        read = fp.read
+
+        def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
+            tries = 1
+            while True:
+                try:
+                    if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
+                        fp.r = sync(self.loop, self._open_stream_response, fp)
+                    result = read(*args, **kwargs)
+                except Exception as e:
+                    if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
+                        raise
+                    tries += 1
+                else:
+                    if tries > 1:
+                        self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    return result
 
         return io_wrapper
 
-    def _async_io_wrapper(self, func: Callable[..., Awaitable[T]], path: str) -> Callable[..., Coroutine[Any, Any, T]]:
+    def _async_io_wrapper(self, fp: fshttp.AsyncStreamFile, path: str) -> Callable[..., Awaitable[bytes]]:
         """
-        An async wrapper around calls to the file which intercepts
-        failures and marks the corresponding cache as bad
+        Async counterpart of _io_wrapper.
         """
+        read = fp.read
 
-        async def io_wrapper(*args: Any, **kwargs: Any) -> T:
-            try:
-                return await func(*args, **kwargs)
-            except Exception as e:
-                self._bad_cache(path, e)
-                raise
+        async def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
+            tries = 1
+            while True:
+                try:
+                    if fp.r is None:
+                        fp.r = await self._open_stream_response(fp)
+                    result = await read(*args, **kwargs)
+                except Exception as e:
+                    if not await self._retarget_after_failure(fp, path, e, tries):
+                        raise
+                    tries += 1
+                else:
+                    if tries > 1:
+                        self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    return result
 
         return io_wrapper
 
@@ -1229,8 +1445,9 @@ class PelicanFileSystem(AsyncFileSystem):
         if not self.discovery_url:
             self.discovery_url = discovery_str
         elif self.discovery_url != discovery_str:
-            logger.error("Discovery URL %s does not match %s", self.discovery_url, discovery_str)
-            raise InvalidMetadata
+            msg = redact_query(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
+            logger.error("%s", msg)
+            raise InvalidMetadata(msg)
 
     def _check_fspath(self, path: str) -> str:
         """
@@ -1303,7 +1520,11 @@ class PelicanFileSystem(AsyncFileSystem):
         async def upload_file() -> None:
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
-        await asyncio.create_task(upload_file())
+        try:
+            await asyncio.create_task(upload_file())
+        except Exception as e:
+            redact_exception(e)
+            raise
 
     async def _put(self, lpath: str | list[str], rpath: str | list[str], *args: Any, **kwargs: Any) -> Any:
         # fsspec's _put calls _makedirs for each local directory in a recursive upload before
@@ -1330,29 +1551,24 @@ class PelicanFileSystem(AsyncFileSystem):
         msg = "makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe()."
         raise NotImplementedError(msg)
 
-    def open(self, path: str, mode: str, **kwargs: Any) -> Any:
-        path = self._check_fspath(path)
+    def open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
+        # fsspec's open strips the scheme, which _check_fspath validates
+        return super().open(self._check_fspath(path), mode, **kwargs)
 
+    def _open(self, path: str, mode: str = "rb", **kwargs: Any) -> fshttp.HTTPFile | fshttp.HTTPStreamFile:
+        """Open the binary file. fsspec's open adds any compression and text layers on top."""
         # Check if this is a write mode (w, wb, a, ab, x, xb, w+, r+, etc.)
         if any(char in mode for char in ["w", "a", "x", "+"]):
             msg = "Write mode is not supported for open(). Use put() or pipe() to write files."
             raise NotImplementedError(msg)
 
-        if self.direct_reads:
-            data_url, director_response = sync(self.loop, self.get_origin_url, path)  # type: ignore[misc]
-        else:
-            data_url, director_response = sync(self.loop, self.get_working_cache, path)  # type: ignore[misc]
+        async def attempt(data_url: str) -> Any:
+            logger.debug("Running open on %s...", data_url)
+            # A thread, since the sync open blocks on this event loop
+            return await asyncio.to_thread(self.http_file_system.open, data_url, mode, **kwargs)
 
-        # Handle token generation if required
-        operation = self._get_token_operation("open")
-        sync(self.loop, self._handle_token_generation, data_url, director_response, operation)
-
-        logger.debug("Running open on %s...", data_url)
-        fp = self.http_file_system.open(data_url, mode, **kwargs)
-        fp.read = self._io_wrapper(fp.read, path)
-        if not self.direct_reads:
-            ar = _AccessResp(data_url, True)
-            self._access_stats.add_response(path, ar)
+        fp = cast("fshttp.HTTPFile | fshttp.HTTPStreamFile", sync(self.loop, self._with_cache_retry, path, self._get_token_operation("open"), attempt))  # type: ignore[misc]
+        fp.read = self._io_wrapper(fp, path)  # type: ignore[method-assign]
         return fp
 
     async def open_async(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
@@ -1363,21 +1579,12 @@ class PelicanFileSystem(AsyncFileSystem):
             msg = "Write mode is not supported for open_async(). Use put() or pipe() to write files."
             raise NotImplementedError(msg)
 
-        if self.direct_reads:
-            data_url, director_response = await self.get_origin_url(path)
-        else:
-            data_url, director_response = await self.get_working_cache(path)
+        async def attempt(data_url: str) -> fshttp.AsyncStreamFile:
+            logger.debug("Running open_async on %s...", data_url)
+            return await self.http_file_system.open_async(data_url, **kwargs)
 
-        # Handle token generation if required
-        operation = self._get_token_operation("open_async")
-        await self._handle_token_generation(data_url, director_response, operation)
-
-        logger.debug("Running open_async on %s...", data_url)
-        fp = await self.http_file_system.open_async(data_url, **kwargs)
-        fp.read = self._async_io_wrapper(fp.read, path)
-        if not self.direct_reads:
-            ar = _AccessResp(data_url, True)
-            self._access_stats.add_response(path, ar)
+        fp = await self._with_cache_retry(path, self._get_token_operation("open_async"), attempt)
+        fp.read = self._async_io_wrapper(fp, path)
         return fp
 
     @staticmethod
@@ -1396,26 +1603,12 @@ class PelicanFileSystem(AsyncFileSystem):
         async def wrapper(self: "PelicanFileSystem", *args: Any, **kwargs: Any) -> T:
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
-            if self.direct_reads:
-                data_url, director_response = await self.get_origin_url(path)
-            else:
-                data_url, director_response = await self.get_working_cache(path)
 
-            # Handle token generation if required
-            operation = self._get_token_operation(func.__name__)
-            await self._handle_token_generation(data_url, director_response, operation)
-
-            try:
+            async def attempt(data_url: str) -> T:
                 logger.debug("Calling %s using the following url: %s", func, data_url)
-                result = await func(self, data_url, *rest, **kwargs)
-            except Exception as e:
-                if not self.direct_reads:
-                    self._bad_cache(data_url, e)
-                raise
-            if not self.direct_reads:
-                ar = _AccessResp(data_url, True)
-                self._access_stats.add_response(path, ar)
-            return result
+                return await func(self, data_url, *rest, **kwargs)
+
+            return await self._with_cache_retry(path, self._get_token_operation(func.__name__), attempt)
 
         return wrapper
 
@@ -1438,8 +1631,15 @@ class PelicanFileSystem(AsyncFileSystem):
                 return b""
         return await self.http_file_system._cat_file(path, start, end, **kwargs)
 
-    @_cache_dec
     async def _exists(self, path: str, **kwargs: Any) -> bool:
+        try:
+            self._check_fspath(path)
+        except (InvalidDestinationURL, InvalidMetadata, ValueError):
+            return False
+        return await self._exists_via_cache(path, **kwargs)
+
+    @_cache_dec
+    async def _exists_via_cache(self, path: str, **kwargs: Any) -> bool:
         parts = urllib.parse.urlparse(path)
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             return await client.check(parts.path)
@@ -1557,7 +1757,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Still best effort, but worth saying out loud: if warming fails
             # systematically, every object goes back to the director on its own --
             # exactly the stampede this function exists to prevent.
-            logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, e)
+            logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, _error_text(e))
 
     async def _expand_path(self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None, **kwargs: Any) -> list[str]:
         """

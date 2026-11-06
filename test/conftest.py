@@ -102,8 +102,8 @@ def fixture_httpserver2(httpserver_listen_address, httpserver_ssl_context):
     which host was contacted give each role its own server and read the two request logs
     separately (see test_two_host_federation.py and test_catalogue_reads.py).
 
-    Unlike the plugin's own `httpserver`, this one is session-scoped and is not reset
-    between tests, so call `httpserver2.clear()` before registering handlers on it.
+    The server itself is session-scoped; `_reset_httpserver2` clears its handlers
+    before each test, as the plugin does for its own `httpserver`.
     """
     host, port = httpserver_listen_address
     if not host:
@@ -117,6 +117,12 @@ def fixture_httpserver2(httpserver_listen_address, httpserver_ssl_context):
     server.clear()
     if server.is_running():
         server.stop()
+
+
+@pytest.fixture(autouse=True)
+def _reset_httpserver2(request):
+    if "httpserver2" in request.fixturenames:
+        request.getfixturevalue("httpserver2").clear()
 
 
 @pytest.fixture(scope="session", name="threaded_httpserver")

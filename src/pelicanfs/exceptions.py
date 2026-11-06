@@ -33,6 +33,12 @@ class NoAvailableSource(PelicanException):
     """
 
 
+class DirectorError(NoAvailableSource):
+    """
+    The director answered with an error status, so it named no source
+    """
+
+
 class InvalidMetadata(PelicanException):
     """
     No Pelican metadata was found for the federation

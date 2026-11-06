@@ -17,11 +17,14 @@ limitations under the License.
 import asyncio
 import gc
 from contextlib import contextmanager
+from unittest.mock import AsyncMock
 
 import aiohttp.connector
+import pytest
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
+from pelicanfs.exceptions import NoAvailableSource, NoCredentialsException
 
 
 def test_exists_nonexistent_object(httpserver: HTTPServer, get_client, get_webdav_client):
@@ -261,3 +264,40 @@ def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserv
 
     held = asyncio.run(held_after_each_of_several_calls())
     assert held == [1, 1, 1], f"connections accumulated across calls instead of being recycled: {held}"
+
+
+@pytest.mark.parametrize(
+    ("path", "discovery_url"),
+    [
+        pytest.param("s3://bucket/key", "", id="foreign-scheme"),
+        pytest.param("localhost:63371/ns/obj", "", id="host-port-without-scheme"),
+        pytest.param("pelican://[broken/path", "", id="malformed-url"),
+        pytest.param("/ns/obj", "", id="absolute-path-without-federation"),
+        pytest.param("pelican://other.example.com/ns/obj", "pelican://fed.example.com/", id="other-federation"),
+    ],
+)
+@pytest.mark.parametrize("call", ["positional", "keyword", "async"])
+def test_exists_is_false_for_unusable_path(path, discovery_url, call, monkeypatch):
+    is_async = call == "async"
+    fs = pelicanfs.core.PelicanFileSystem(discovery_url, asynchronous=is_async, skip_instance_cache=True)
+    cache = AsyncMock(side_effect=AssertionError("an unusable path must not reach the network"))
+    monkeypatch.setattr(fs, "get_working_cache", cache)
+
+    if is_async:
+        result = asyncio.run(fs._exists(path))
+    elif call == "keyword":
+        result = fs.exists(path=path)
+    else:
+        result = fs.exists(path)
+
+    assert result is False
+    cache.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error", [NoCredentialsException("no token"), NoAvailableSource("no cache")])
+def test_exists_reports_failures_for_usable_path(error, monkeypatch):
+    fs = pelicanfs.core.PelicanFileSystem("pelican://fed.example.com/", skip_instance_cache=True)
+    monkeypatch.setattr(fs, "get_working_cache", AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error)):
+        fs.exists("/ns/obj")

@@ -14,8 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import os
+
 import aiohttp
 import pytest
+from fsspec.asyn import get_loop
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -151,9 +154,7 @@ def test_open_preferred_plus(httpserver: HTTPServer, httpserver2: HTTPServer, ge
         skip_instance_cache=True,
         preferred_caches=[httpserver2.url_for("/"), "+"],
     )
-    with pytest.raises(aiohttp.ClientResponseError):
-        pelfs.cat("/foo/bar")
-
+    # The preferred cache fails with a 500; the read fails over to the director's cache
     assert pelfs.cat("/foo/bar") == b"hello, world"
 
 
@@ -245,15 +246,19 @@ def test_io_wrapper_error_handling():
     """
     # Create a minimal PelicanFileSystem without full initialization
     pelfs = pelicanfs.core.PelicanFileSystem.__new__(pelicanfs.core.PelicanFileSystem)
-    # Patch _bad_cache to avoid side effects
-    pelfs._bad_cache = lambda _path, _e: None
+    pelfs._loop = get_loop()
+    pelfs._pid = os.getpid()
+    pelfs.direct_reads = True  # no cache to fail over to
 
-    def failing_read(*args, **kwargs):
-        msg = "Simulated read failure"
-        raise OSError(msg)
+    class FakeFile:
+        url = "https://origin.example.com/test/path"
+
+        def read(self, *args, **kwargs):
+            msg = "Simulated read failure"
+            raise OSError(msg)
 
     # Call _io_wrapper with a path argument - the fix adds this parameter
-    wrapped_read = pelfs._io_wrapper(failing_read, "/test/path")
+    wrapped_read = pelfs._io_wrapper(FakeFile(), "/test/path")
 
     # This should raise IOError, not AttributeError
     with pytest.raises(IOError, match="Simulated read failure"):
