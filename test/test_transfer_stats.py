@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 import asyncio
+import ssl
 from collections import Counter
 
 import aiohttp
@@ -162,6 +163,38 @@ def test_each_redirect_hop_is_a_response(httpserver: HTTPServer, httpserver2: HT
     stats = pelfs.get_transfer_stats()
     assert stats.responses[httpserver.url_for("/").rstrip("/"), "GET", 302] == 1
     assert stats.responses[httpserver2.url_for("/").rstrip("/"), "GET", 200] == 1
+
+
+def get_with_recorder(url: str, context: ssl.SSLContext) -> TransferStats:
+    """Follow the redirects of one GET with aiohttp alone."""
+    recorder = _TransferRecorder()
+
+    async def get() -> None:
+        async with aiohttp.ClientSession(trace_configs=[recorder.trace_config]) as session, session.get(url, ssl=context):
+            pass
+
+    asyncio.run(get())
+    return recorder.snapshot()
+
+
+def test_each_redirect_hop_is_a_request(httpserver: HTTPServer, httpclient_ssl_context):
+    httpserver.expect_request("/from").respond_with_data("", status=302, headers={"Location": httpserver.url_for("/to")})
+    httpserver.expect_request("/to").respond_with_data("", status=500)
+
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context)
+
+    assert stats.requests == len(httpserver.log) == 2
+    assert stats.failed_requests == 1
+    assert stats.request_success_rate == 0.5
+
+
+def test_redirect_without_location_is_one_request(httpserver: HTTPServer, httpclient_ssl_context):
+    httpserver.expect_request("/from").respond_with_data("", status=302)
+
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context)
+
+    assert stats.requests == len(httpserver.log) == 1
+    assert stats.responses == Counter({(httpserver.url_for("/").rstrip("/"), "GET", 302): 1})
 
 
 def broken_body(_request):
