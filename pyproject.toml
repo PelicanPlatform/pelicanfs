@@ -32,6 +32,7 @@ dependencies = [
     "cachetools >=5.3,<6",
     "fsspec >=2024.3.1",
     "igwn-auth-utils",
+    "multidict",
     "scitokens >=1.8",
 ]
 

@@ -58,12 +58,13 @@ from .dir_header_parser import (
 )
 from .exceptions import (
     BadDirectorResponse,
+    DirectorError,
     InvalidDestinationURL,
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
 )
-from .log_utils import TRACE, TokenForLog, trace
+from .log_utils import TRACE, TokenForLog, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
 
 logger = logging.getLogger("fsspec.pelican")
@@ -102,7 +103,7 @@ class _AccessResp:
     """
 
     def __init__(self, path: str, success: bool, error: str | None = None) -> None:
-        self.access_path = path
+        self.access_path = redact_query(path)
         self.success = success
         self.error = error
 
@@ -193,7 +194,8 @@ class _CacheManager:
         """
         with self._lock:
             if not self._cache_list:
-                raise NoAvailableSource
+                msg = f"No caches left for {obj_name}"
+                raise NoAvailableSource(msg)
 
             return urllib.parse.urljoin(self._cache_list[0], obj_name)
 
@@ -732,8 +734,9 @@ class PelicanFileSystem(AsyncFileSystem):
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
-                logger.error("Failed to get metadata from %s", discovery_url.geturl())
-                raise InvalidMetadata
+                msg = redact_query(f"Federation discovery at {discovery_url.geturl()} returned HTTP {resp.status}")
+                logger.error("%s", msg)
+                raise InvalidMetadata(msg)
             return await resp.json(content_type="")
 
     async def get_director_headers(self, fileloc: str, origin: bool = False) -> Mapping[str, str]:
@@ -749,8 +752,9 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                logger.error("No director endpoint found in metadata")
-                raise InvalidMetadata
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
+                logger.error("%s", msg)
+                raise InvalidMetadata(msg)
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
@@ -763,6 +767,10 @@ class PelicanFileSystem(AsyncFileSystem):
             url = urllib.parse.urljoin(self.director_url, fileloc)
         session = await self.http_file_system.set_session()
         async with session.get(url, allow_redirects=False) as resp:
+            if resp.status >= 400:
+                msg = f"Director returned HTTP {resp.status} for {redact_query(url)}"
+                logger.error("%s", msg)
+                raise DirectorError(msg)
             return resp.headers
 
     async def get_working_cache(self, fileloc: str) -> tuple[str, DirectorResponse]:
@@ -784,7 +792,13 @@ class PelicanFileSystem(AsyncFileSystem):
         cache_list: list[str] = []
 
         # Always check with director to get namespace information and require-token
-        headers = await self.get_director_headers(fileloc)
+        try:
+            headers = await self.get_director_headers(fileloc)
+        except DirectorError:
+            # Preferred caches do not depend on the director's answer
+            if not self.preferred_caches:
+                raise
+            headers = {}
         director_response = parse_director_response(headers)
 
         # Extract data directly from director_response
@@ -816,6 +830,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         require_token = bool(director_response.x_pel_ns_hdr and director_response.x_pel_ns_hdr.require_token)
         refused_token: list[str] = []
+        failures: list[str] = []
 
         while cache_list:
             updated_url = cache_list[0]
@@ -840,16 +855,21 @@ class PelicanFileSystem(AsyncFileSystem):
                     elif not _is_retryable_status(resp.status):
                         logger.debug("Cache found (status %d)", resp.status)
                         break
-            except _RETRYABLE_ERRORS:
-                pass
+                    failure = f"HTTP {resp.status}"
+            except _RETRYABLE_ERRORS as e:
+                failure = redact_query(_error_text(e))
+            failures.append(f"{redact_query(updated_url)}: {failure}")
+            logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
 
         # If no other cache works, the caller sees the auth error from the first of these
         cache_list += refused_token
 
         if not cache_list:
-            logger.error("No working cache found")
-            raise NoAvailableSource
+            detail = "; ".join(failures) or "the director listed no caches"
+            msg = f"No working cache for {fparsed.path}: {detail}"
+            logger.error("%s", msg)
+            raise NoAvailableSource(msg)
 
         working_url = cache_list[0]
         with self._namespace_lock:
@@ -864,7 +884,8 @@ class PelicanFileSystem(AsyncFileSystem):
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
-            raise NoAvailableSource
+            msg = f"The director listed no origin for {urllib.parse.urlparse(fileloc).path}"
+            raise NoAvailableSource(msg)
 
         # Parse the headers to get the full director response
         director_response = parse_director_response(headers)
@@ -877,7 +898,8 @@ class PelicanFileSystem(AsyncFileSystem):
             # Ensure the director url has a '/' at the end
             director_url = metadata_json.get("director_endpoint")
             if not director_url:
-                raise InvalidMetadata
+                msg = redact_query(f"No director_endpoint in the metadata for {self.discovery_url}")
+                raise InvalidMetadata(msg)
 
             if not director_url.endswith("/"):
                 director_url = director_url + "/"
@@ -907,7 +929,8 @@ class PelicanFileSystem(AsyncFileSystem):
             session = await self.http_file_system.set_session()
             async with session.request("PROPFIND", url, timeout=timeout, allow_redirects=False) as resp:
                 if "Link" not in resp.headers:
-                    raise BadDirectorResponse
+                    msg = f"Director returned HTTP {resp.status} with no Link header for {redact_query(url)}"
+                    raise BadDirectorResponse(msg)
                 collections_url = get_collections_url(resp.headers)
 
                 # Parse the headers to get the full director response
@@ -923,8 +946,9 @@ class PelicanFileSystem(AsyncFileSystem):
                             self._namespace_cache[namespace] = _CacheManager(existing._cache_list if existing else [], director_response)
 
         if not collections_url:
-            logger.error("No collections endpoint found for %s", fileloc)
-            raise NoCollectionsUrl
+            msg = f"No collections endpoint found for {fparsed.path}"
+            logger.error("%s", msg)
+            raise NoCollectionsUrl(msg)
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
         director_response.location = dirlist_url
@@ -984,7 +1008,7 @@ class PelicanFileSystem(AsyncFileSystem):
     def _record_failed_access(self, url: str, e: BaseException) -> None:
         """Add a failed access to the stats. A missing object is not a failed access."""
         if not isinstance(e, FileNotFoundError):
-            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, _error_text(e)))
+            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, redact_query(_error_text(e))))
 
     def _bad_cache(self, url: str, e: BaseException) -> None:
         """
@@ -992,7 +1016,8 @@ class PelicanFileSystem(AsyncFileSystem):
         the corresponding cache as a "bad cache" in the namespace
         cache.
         """
-        logger.debug("Marking cache at %s as bad", url)
+        redact_exception(e)
+        logger.debug("Marking cache at %s as bad: %s", url, e)
         path = urllib.parse.urlparse(url).path
         bad_cache = _host_of(url)
 
@@ -1280,6 +1305,7 @@ class PelicanFileSystem(AsyncFileSystem):
         hand back the cache that just failed. Reads are idempotent, so repeating them
         on another cache is safe.
         """
+        redact_exception(error)
         if self.direct_reads:
             return None
         failure = _cache_failure(error)
@@ -1419,8 +1445,9 @@ class PelicanFileSystem(AsyncFileSystem):
         if not self.discovery_url:
             self.discovery_url = discovery_str
         elif self.discovery_url != discovery_str:
-            logger.error("Discovery URL %s does not match %s", self.discovery_url, discovery_str)
-            raise InvalidMetadata
+            msg = redact_query(f"Discovery URL {self.discovery_url} does not match {discovery_str}")
+            logger.error("%s", msg)
+            raise InvalidMetadata(msg)
 
     def _check_fspath(self, path: str) -> str:
         """
@@ -1493,7 +1520,11 @@ class PelicanFileSystem(AsyncFileSystem):
         async def upload_file() -> None:
             await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
 
-        await asyncio.create_task(upload_file())
+        try:
+            await asyncio.create_task(upload_file())
+        except Exception as e:
+            redact_exception(e)
+            raise
 
     async def _put(self, lpath: str | list[str], rpath: str | list[str], *args: Any, **kwargs: Any) -> Any:
         # fsspec's _put calls _makedirs for each local directory in a recursive upload before

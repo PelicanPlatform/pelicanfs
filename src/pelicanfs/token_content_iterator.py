@@ -538,7 +538,7 @@ class TokenContentIterator:
                         logger.debug("Using token from default bearer token file: %s", token_file)
                         try:
                             token = get_token_from_file(token_file)
-                            logger.debug("Successfully read token from default file: %s...", token[:30] if token else "None")
+                            logger.debug("Read token from default file")
                             return token
                         except Exception as err:
                             logger.warning("Could not read default bearer token: %s", err)
