@@ -476,6 +476,9 @@ class PelicanFileSystem(AsyncFileSystem):
 
     protocol = "pelican"
 
+    # What an osdf:// URL keeps after _strip_protocol, to name the OSDF federation
+    _osdf_prefix = "osdf://"
+
     def __init__(
         self,
         federation_discovery_url: str = "",
@@ -551,13 +554,18 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @classmethod
     def _strip_protocol(cls, path: str | list[str]) -> str | list[str]:
-        """For HTTP, we always want to keep the full URL"""
+        """
+        Keep the federation in the path, so that _check_fspath reads the result like the original.
+
+        fsspec calls this before the path reaches _check_fspath, and removing the scheme
+        would turn the first component of the path into a hostname. Like for HTTP, a URL
+        stays a URL. Only the osdf://host/path spelling changes, to osdf:///host/path.
+        """
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
         if path.startswith("osdf://"):
-            path = path[7:]
-        elif path.startswith("pelican://"):
-            path = path[10:]
+            namespace_path = path[7:]
+            return cls._osdf_prefix + (namespace_path if namespace_path.startswith("/") else f"/{namespace_path}")
         return path
 
     @staticmethod
@@ -1547,7 +1555,7 @@ class PelicanFileSystem(AsyncFileSystem):
         elif parsed.scheme != "":
             msg = f"Invalid scheme: {parsed.scheme} - only pelican:// and osdf:// are supported"
             raise InvalidDestinationURL(msg)
-        elif not path.startswith("/"):
+        elif path and not path.startswith("/"):
             # When path has no scheme and is not absolute (e.g., "host.example.com/path"),
             # treat it as a pelican URL where the first component is the hostname
             # This is necessary because some upstream libraries (e.g., xarray) will pass in a path and
@@ -1563,6 +1571,8 @@ class PelicanFileSystem(AsyncFileSystem):
                 raise InvalidMetadata(msg)
             discovery_url = self.discovery_url
 
+        # A URL with no path component is the root of the federation
+        path = path or "/"
         logger.debug("Compatible path: %s", path)
         return path
 
@@ -1626,8 +1636,12 @@ class PelicanFileSystem(AsyncFileSystem):
         msg = "makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe()."
         raise NotImplementedError(msg)
 
+    def get_mapper(self, root: str = "", *args: Any, **kwargs: Any) -> FSMap:
+        # FSMap makes keys by slicing its root off listed paths, which are namespace paths
+        return super().get_mapper(self._check_fspath(root), *args, **kwargs)
+
     def open(self, path: str, mode: str = "rb", **kwargs: Any) -> Any:
-        # fsspec's open strips the scheme, which _check_fspath validates
+        # _open takes a namespace path, and _strip_protocol keeps URLs
         return super().open(self._check_fspath(path), mode, **kwargs)
 
     async def _open_with_cache_retry(self, path: str, name: str, attempt: Callable[[str], Awaitable[T]]) -> T:
@@ -1886,6 +1900,9 @@ class OSDFFileSystem(PelicanFileSystem):
     """
 
     protocol = "osdf"
+
+    # This filesystem is always on the OSDF federation, so the path does not need to name it
+    _osdf_prefix = ""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__("pelican://osg-htc.org", **kwargs)
