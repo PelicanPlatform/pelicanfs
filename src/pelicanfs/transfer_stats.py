@@ -41,6 +41,9 @@ class TransferStats:
 
     `cache_busy_seconds` is the read time by cache, with failed attempts included. An
     upload has no cache, and a direct read appears under its origin.
+
+    `cache_bytes_read` is the bytes read by cache, with those of a failed `get_file`
+    attempt included.
     """
 
     requests: int = 0
@@ -52,6 +55,7 @@ class TransferStats:
     busy_seconds: float = 0.0
     failed_caches: Counter[str] = field(default_factory=Counter, hash=False)
     cache_busy_seconds: dict[str, float] = field(default_factory=dict, hash=False)
+    cache_bytes_read: Counter[str] = field(default_factory=Counter, hash=False)
 
     @property
     def request_success_rate(self) -> float | None:
@@ -67,6 +71,11 @@ class TransferStats:
     def average_rate(self) -> float | None:
         """Bytes per second while an operation was active, or None if no time was measured."""
         return (self.bytes_read + self.bytes_written) / self.busy_seconds if self.busy_seconds else None
+
+    @property
+    def cache_read_rates(self) -> dict[str, float]:
+        """Bytes per second by cache while the cache was reading, for each cache with measured time."""
+        return {cache: self.cache_bytes_read[cache] / seconds for cache, seconds in self.cache_busy_seconds.items() if seconds}
 
 
 class _ByteCounter(NoOpCallback):
@@ -130,6 +139,7 @@ class _TransferRecorder:
         self._busy = _BusyTimer()
         self._failed_caches: Counter[str] = Counter()
         self._cache_busy: defaultdict[str, _BusyTimer] = defaultdict(_BusyTimer)
+        self._cache_bytes_read: Counter[str] = Counter()
 
         self.trace_config = aiohttp.TraceConfig()
         self.trace_config.on_request_start.append(self._on_request_start)
@@ -157,9 +167,10 @@ class _TransferRecorder:
         with self._lock:
             self._failed_caches[cache] += 1
 
-    def add_read(self, size: int) -> None:
+    def add_read(self, size: int, cache: str) -> None:
         with self._lock:
             self._bytes_read += size
+            self._cache_bytes_read[cache] += size
 
     def add_written(self, size: int) -> None:
         with self._lock:
@@ -213,4 +224,5 @@ class _TransferRecorder:
                 busy_seconds=self._busy.seconds(),
                 failed_caches=Counter(self._failed_caches),
                 cache_busy_seconds={cache: timer.seconds() for cache, timer in self._cache_busy.items()},
+                cache_bytes_read=Counter(self._cache_bytes_read),
             )

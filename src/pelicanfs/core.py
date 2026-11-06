@@ -1481,7 +1481,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     if tries > 1:
                         self._access_stats.add_response(path, _AccessResp(fp.url, True))
-                    self._transfers.add_read(len(result))
+                    self._transfers.add_read(len(result), _host_of(fp.url))
                     return result
 
         return io_wrapper
@@ -1508,7 +1508,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     if tries > 1:
                         self._access_stats.add_response(path, _AccessResp(fp.url, True))
-                    self._transfers.add_read(len(result))
+                    self._transfers.add_read(len(result), _host_of(fp.url))
                     return result
 
         return io_wrapper
@@ -1718,7 +1718,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 return b""
         with self._transfers.cache_active(_host_of(path)):
             result = await self.http_file_system._cat_file(path, start, end, **kwargs)
-        self._transfers.add_read(len(result))
+        self._transfers.add_read(len(result), _host_of(path))
         return result
 
     async def _exists(self, path: str, **kwargs: Any) -> bool:
@@ -1751,8 +1751,9 @@ class PelicanFileSystem(AsyncFileSystem):
     @_counted_operation
     @_cache_dec
     async def _get_file_from_cache(self, rpath: str, lpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
-        with self._transfers.cache_active(_host_of(rpath)):
-            return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, self._transfers.add_read), **kwargs)
+        cache = _host_of(rpath)
+        with self._transfers.cache_active(cache):
+            return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
 
     @_cache_dec
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
