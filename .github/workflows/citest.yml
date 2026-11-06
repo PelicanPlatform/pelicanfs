@@ -62,7 +62,7 @@ jobs:
       env:
         PYTHONTRACEMALLOC: "50"
       run: |
-        for timeout in 0.1 0.1 0.1 10 10 10; do
-          CLOSE_SESSION_TIMEOUT="$timeout" pytest || status=1
+        for mode in fallback fallback fallback task task task; do
+          CLOSE_SESSION_MODE="$mode" pytest || status=1
         done
         exit "${status:-0}"

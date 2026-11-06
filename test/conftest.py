@@ -52,6 +52,28 @@ import pelicanfs.core
 
 RESOURCES = Path(__file__).parent / "resources"
 
+original_connection_lost = asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost
+connection_lost_calls = 0
+connection_lost_errors: list[str] = []
+
+
+def current_test() -> str:
+    return os.environ.get("PYTEST_CURRENT_TEST", "no test")
+
+
+def traced_connection_lost(self, exc):
+    """Record exceptions that stop the transport from closing its socket."""
+    global connection_lost_calls  # noqa: PLW0603
+    connection_lost_calls += 1
+    try:
+        original_connection_lost(self, exc)
+    except BaseException as err:
+        connection_lost_errors.append(f"{err!r} with exc={exc!r} in {current_test()}")
+        raise
+
+
+asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost = traced_connection_lost
+
 # Fixed upstream in 3.14.11 and 3.15.3, and not backported to older versions.
 if sys.version_info < (3, 14, 11) or (3, 15) <= sys.version_info < (3, 15, 3):
     proactor_connection_lost = asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost
@@ -76,28 +98,35 @@ if sys.version_info < (3, 14, 11) or (3, 15) <= sys.version_info < (3, 15, 3):
     asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost = close_after_failed_shutdown
 
 
-CLOSE_TIMEOUT = float(os.environ.get("CLOSE_SESSION_TIMEOUT", "0.1"))
+CLOSE_MODE = os.environ.get("CLOSE_SESSION_MODE", "fallback")
 close_times: list[float] = []
 close_fallbacks: list[str] = []
+close_tasks: set[asyncio.Task] = set()
 
 
 def traced_close_session(loop, session):
-    """`HTTPFileSystem.close_session` that records each use of the connector fallback."""
+    """`HTTPFileSystem.close_session` that records each fallback and can close on the loop."""
     start = time.monotonic()
     if loop is None or not loop.is_running():
         reason = "loop not running"
     else:
         try:
-            fsspec.asyn.sync(loop, session.close, timeout=CLOSE_TIMEOUT)
+            fsspec.asyn.sync(loop, session.close, timeout=0.1)
         except (TimeoutError, fsspec.exceptions.FSTimeoutError, NotImplementedError) as err:
             reason = type(err).__name__
+            if CLOSE_MODE == "task" and isinstance(err, NotImplementedError):
+                # sync() refuses to run here because garbage collection is on the loop thread.
+                task = loop.create_task(session.close())
+                close_tasks.add(task)
+                task.add_done_callback(close_tasks.discard)
+                close_times.append(time.monotonic() - start)
+                return
         else:
             close_times.append(time.monotonic() - start)
             return
     elapsed = time.monotonic() - start
     close_times.append(elapsed)
-    test = os.environ.get("PYTEST_CURRENT_TEST", "no test")
-    close_fallbacks.append(f"{reason} after {elapsed:.3f}s on {threading.current_thread().name} in {test}")
+    close_fallbacks.append(f"{reason} after {elapsed:.3f}s on {threading.current_thread().name} in {current_test()}")
     connector = getattr(session, "_connector", None)
     if connector is not None:
         connector._close()
@@ -109,7 +138,12 @@ fsspec.implementations.http.HTTPFileSystem.close_session = staticmethod(traced_c
 def pytest_terminal_summary(terminalreporter):
     terminalreporter.section("close_session")
     slowest = max(close_times, default=0.0)
-    terminalreporter.line(f"timeout={CLOSE_TIMEOUT} closes={len(close_times)} fallbacks={len(close_fallbacks)} slowest={slowest:.3f}s")
+    terminalreporter.line(
+        f"mode={CLOSE_MODE} closes={len(close_times)} fallbacks={len(close_fallbacks)} slowest={slowest:.3f}s "
+        f"connection_lost={connection_lost_calls} connection_lost_errors={len(connection_lost_errors)}"
+    )
+    for line in connection_lost_errors:
+        terminalreporter.line(f"connection_lost: {line}")
     for line in close_fallbacks:
         terminalreporter.line(line)
 
