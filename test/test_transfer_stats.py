@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import asyncio
 import ssl
 from collections import Counter
 
@@ -165,7 +164,7 @@ def test_each_redirect_hop_is_a_response(httpserver: HTTPServer, httpserver2: HT
     assert stats.responses[httpserver2.url_for("/").rstrip("/"), "GET", 200] == 1
 
 
-def get_with_recorder(url: str, context: ssl.SSLContext) -> TransferStats:
+def get_with_recorder(url: str, context: ssl.SSLContext, run_async) -> TransferStats:
     """Follow the redirects of one GET with aiohttp alone."""
     recorder = _TransferRecorder()
 
@@ -173,25 +172,25 @@ def get_with_recorder(url: str, context: ssl.SSLContext) -> TransferStats:
         async with aiohttp.ClientSession(trace_configs=[recorder.trace_config]) as session, session.get(url, ssl=context):
             pass
 
-    asyncio.run(get())
+    run_async(get())
     return recorder.snapshot()
 
 
-def test_each_redirect_hop_is_a_request(httpserver: HTTPServer, httpclient_ssl_context):
+def test_each_redirect_hop_is_a_request(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     httpserver.expect_request("/from").respond_with_data("", status=302, headers={"Location": httpserver.url_for("/to")})
     httpserver.expect_request("/to").respond_with_data("", status=500)
 
-    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context)
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context, run_async)
 
     assert stats.requests == len(httpserver.log) == 2
     assert stats.failed_requests == 1
     assert stats.request_success_rate == 0.5
 
 
-def test_redirect_without_location_is_one_request(httpserver: HTTPServer, httpclient_ssl_context):
+def test_redirect_without_location_is_one_request(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     httpserver.expect_request("/from").respond_with_data("", status=302)
 
-    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context)
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context, run_async)
 
     assert stats.requests == len(httpserver.log) == 1
     assert stats.responses == Counter({(httpserver.url_for("/").rstrip("/"), "GET", 302): 1})
@@ -334,7 +333,7 @@ def test_read_of_open_file(httpserver: HTTPServer, pelfs):
     assert stats.operations == 1
 
 
-def test_read_of_async_open_file(httpserver: HTTPServer, get_client, get_webdav_client):
+def test_read_of_async_open_file(httpserver: HTTPServer, get_client, get_webdav_client, run_async):
     setup_director(httpserver, httpserver)
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
     httpserver.expect_request("/foo/bar", method="GET").respond_with_data("hello")
@@ -347,7 +346,7 @@ def test_read_of_async_open_file(httpserver: HTTPServer, get_client, get_webdav_
         await (await pelfs.http_file_system.set_session()).close()
         return pelfs
 
-    stats = asyncio.run(read()).get_transfer_stats()
+    stats = run_async(read()).get_transfer_stats()
     assert stats.cache_busy_seconds.keys() == {httpserver.url_for("/").rstrip("/")}
     assert stats.cache_bytes_read == Counter({httpserver.url_for("/").rstrip("/"): 5})
     assert stats.bytes_read == 5

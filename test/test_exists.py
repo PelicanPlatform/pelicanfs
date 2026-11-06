@@ -209,7 +209,7 @@ async def check_through_webdav_client(httpserver, httpclient_ssl_context):
         return await client.check("/foo/bar")
 
 
-def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_ssl_context):
+def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
     aiowebdav2's Client.check(), which backs exists(), only looks at response.status and
     leaves the response unreleased, so get_webdav_client has to release it.
@@ -217,13 +217,13 @@ def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_
     expect_propfind(httpserver, status=207)
 
     with connections_finalised_for(httpserver) as (finalised, leaked):
-        assert asyncio.run(check_through_webdav_client(httpserver, httpclient_ssl_context)) is True
+        assert run_async(check_through_webdav_client(httpserver, httpclient_ssl_context)) is True
 
     assert finalised, "no connection to the test server was finalised, so this observed nothing"
     assert leaked == [], "the response was not released, so its connection leaked"
 
 
-def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTPServer, httpclient_ssl_context):
+def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
     aiowebdav2's execute_request abandons the response when it raises for an error status,
     so the object-does-not-exist path leaks unless get_webdav_client releases it too. This
@@ -232,13 +232,13 @@ def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTP
     expect_propfind(httpserver, status=404)
 
     with connections_finalised_for(httpserver) as (finalised, leaked):
-        assert asyncio.run(check_through_webdav_client(httpserver, httpclient_ssl_context)) is False
+        assert run_async(check_through_webdav_client(httpserver, httpclient_ssl_context)) is False
 
     assert finalised, "no connection to the test server was finalised, so this observed nothing"
     assert leaked == [], "the response was not released, so its connection leaked"
 
 
-def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserver: HTTPServer, httpclient_ssl_context):
+def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
     A reused client must not accumulate connections, only ever holding the latest response.
 
@@ -262,7 +262,7 @@ def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserv
                 held.append(connections_held_by(client))
         return held
 
-    held = asyncio.run(held_after_each_of_several_calls())
+    held = run_async(held_after_each_of_several_calls())
     assert held == [1, 1, 1], f"connections accumulated across calls instead of being recycled: {held}"
 
 

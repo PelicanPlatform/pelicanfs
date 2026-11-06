@@ -150,6 +150,28 @@ def fixture_threaded_httpserver(httpserver_listen_address, httpserver_ssl_contex
         server.stop()
 
 
+@pytest.fixture(scope="session", name="run_async")
+def fixture_run_async():
+    """
+    `asyncio.run` for tests that open real TLS connections.
+
+    A closed session can leave socket cleanup pending on the loop. If `asyncio.run` closes
+    the loop first, the socket stays open and raises ResourceWarning on Windows. The delay
+    is the one aiohttp documents for a graceful TLS shutdown.
+    """
+
+    def run(coro):
+        async def settle():
+            try:
+                return await coro
+            finally:
+                await asyncio.sleep(0.25)
+
+        return asyncio.run(settle())
+
+    return run
+
+
 @pytest.fixture(name="get_client")
 def fixture_get_client(httpclient_ssl_context):
     """
