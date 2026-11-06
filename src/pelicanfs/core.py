@@ -1463,23 +1463,23 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
+        @self._transfers.operation()
         def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
             tries = 1
-            with self._transfers.operation():
-                while True:
-                    try:
-                        if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
-                            fp.r = sync(self.loop, self._open_stream_response, fp)
-                        result = read(*args, **kwargs)
-                    except Exception as e:
-                        if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
-                            raise
-                        tries += 1
-                    else:
-                        if tries > 1:
-                            self._access_stats.add_response(path, _AccessResp(fp.url, True))
-                        self._transfers.add_read(len(result))
-                        return result
+            while True:
+                try:
+                    if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
+                        fp.r = sync(self.loop, self._open_stream_response, fp)
+                    result = read(*args, **kwargs)
+                except Exception as e:
+                    if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
+                        raise
+                    tries += 1
+                else:
+                    if tries > 1:
+                        self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    self._transfers.add_read(len(result))
+                    return result
 
         return io_wrapper
 
@@ -1489,23 +1489,23 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
+        @self._transfers.async_operation()
         async def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
             tries = 1
-            with self._transfers.operation():
-                while True:
-                    try:
-                        if fp.r is None:
-                            fp.r = await self._open_stream_response(fp)
-                        result = await read(*args, **kwargs)
-                    except Exception as e:
-                        if not await self._retarget_after_failure(fp, path, e, tries):
-                            raise
-                        tries += 1
-                    else:
-                        if tries > 1:
-                            self._access_stats.add_response(path, _AccessResp(fp.url, True))
-                        self._transfers.add_read(len(result))
-                        return result
+            while True:
+                try:
+                    if fp.r is None:
+                        fp.r = await self._open_stream_response(fp)
+                    result = await read(*args, **kwargs)
+                except Exception as e:
+                    if not await self._retarget_after_failure(fp, path, e, tries):
+                        raise
+                    tries += 1
+                else:
+                    if tries > 1:
+                        self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    self._transfers.add_read(len(result))
+                    return result
 
         return io_wrapper
 

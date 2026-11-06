@@ -16,8 +16,8 @@ limitations under the License.
 
 import threading
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -151,6 +151,12 @@ class _TransferRecorder:
                 self._active -= 1
                 if not self._active:
                     self._busy_seconds += time.perf_counter() - self._busy_since
+
+    @asynccontextmanager
+    async def async_operation(self) -> AsyncIterator[None]:
+        """`operation` for use as a decorator on a coroutine, where a sync one exits too early."""
+        with self.operation():
+            yield
 
     def snapshot(self) -> TransferStats:
         with self._lock:
