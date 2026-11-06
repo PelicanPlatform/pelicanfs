@@ -94,28 +94,29 @@ class _ByteCounter(NoOpCallback):
         self.inner.relative_update(inc)
 
 
+@dataclass
 class _BusyTimer:
     """Add up the time that one or more activities overlap, so each second counts once."""
 
-    def __init__(self) -> None:
-        self._seconds = 0.0
-        self._active = 0
-        self._since = 0.0
+    total: float = 0.0
+    active: int = 0
+    since: float = 0.0
 
     def start(self) -> None:
-        if not self._active:
-            self._since = time.perf_counter()
-        self._active += 1
+        if not self.active:
+            self.since = time.perf_counter()
+        self.active += 1
 
     def stop(self) -> None:
-        self._active -= 1
-        if not self._active:
-            self._seconds += time.perf_counter() - self._since
+        self.active -= 1
+        if not self.active:
+            self.total += time.perf_counter() - self.since
 
     def seconds(self) -> float:
-        return self._seconds + (time.perf_counter() - self._since if self._active else 0.0)
+        return self.total + (time.perf_counter() - self.since if self.active else 0.0)
 
 
+@dataclass(eq=False)
 class _TransferRecorder:
     """
     Collect the counters behind `TransferStats`.
@@ -127,28 +128,28 @@ class _TransferRecorder:
     do not make the average rate look too low.
     """
 
-    def __init__(self) -> None:
-        # Sync reads record from the caller's thread, and the rest from the event loop.
-        self._lock = threading.Lock()
-        self._requests = 0
-        self._failed_requests = 0
-        self._operations = 0
-        self._failed_operations = 0
-        self._bytes_read = 0
-        self._bytes_written = 0
-        self._busy = _BusyTimer()
-        self._failed_caches: Counter[str] = Counter()
-        self._cache_busy: defaultdict[str, _BusyTimer] = defaultdict(_BusyTimer)
-        self._cache_bytes_read: Counter[str] = Counter()
+    requests: int = 0
+    failed_requests: int = 0
+    operations: int = 0
+    failed_operations: int = 0
+    bytes_read: int = 0
+    bytes_written: int = 0
+    busy: _BusyTimer = field(default_factory=_BusyTimer)
+    failed_caches: Counter[str] = field(default_factory=Counter)
+    cache_busy: defaultdict[str, _BusyTimer] = field(default_factory=lambda: defaultdict(_BusyTimer))
+    cache_bytes_read: Counter[str] = field(default_factory=Counter)
+    trace_config: aiohttp.TraceConfig = field(default_factory=aiohttp.TraceConfig, init=False, repr=False)
+    # Sync reads record from the caller's thread, and the rest from the event loop.
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-        self.trace_config = aiohttp.TraceConfig()
+    def __post_init__(self) -> None:
         self.trace_config.on_request_start.append(self._on_request_start)
         self.trace_config.on_request_end.append(self._on_request_end)
         self.trace_config.on_request_exception.append(self._on_request_exception)
 
     async def _on_request_start(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
         with self._lock:
-            self._requests += 1
+            self.requests += 1
 
     async def _on_request_end(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
         if params.response.status >= 400 and params.response.status != 404:
@@ -161,38 +162,38 @@ class _TransferRecorder:
 
     def _add_failed_request(self) -> None:
         with self._lock:
-            self._failed_requests += 1
+            self.failed_requests += 1
 
     def add_failed_cache(self, cache: str) -> None:
         with self._lock:
-            self._failed_caches[cache] += 1
+            self.failed_caches[cache] += 1
 
     def add_read(self, size: int, cache: str) -> None:
         with self._lock:
-            self._bytes_read += size
-            self._cache_bytes_read[cache] += size
+            self.bytes_read += size
+            self.cache_bytes_read[cache] += size
 
     def add_written(self, size: int) -> None:
         with self._lock:
-            self._bytes_written += size
+            self.bytes_written += size
 
     @contextmanager
     def operation(self) -> Iterator[None]:
         """Count an operation, and add its time to the busy time."""
         with self._lock:
-            self._operations += 1
-            self._busy.start()
+            self.operations += 1
+            self.busy.start()
         try:
             yield
         except FileNotFoundError:
             raise
         except Exception:
             with self._lock:
-                self._failed_operations += 1
+                self.failed_operations += 1
             raise
         finally:
             with self._lock:
-                self._busy.stop()
+                self.busy.stop()
 
     @asynccontextmanager
     async def async_operation(self) -> AsyncIterator[None]:
@@ -204,7 +205,7 @@ class _TransferRecorder:
     def cache_active(self, cache: str) -> Iterator[None]:
         """Add the time of one attempt on `cache` to its busy time."""
         with self._lock:
-            timer = self._cache_busy[cache]
+            timer = self.cache_busy[cache]
             timer.start()
         try:
             yield
@@ -215,14 +216,14 @@ class _TransferRecorder:
     def snapshot(self) -> TransferStats:
         with self._lock:
             return TransferStats(
-                requests=self._requests,
-                failed_requests=self._failed_requests,
-                operations=self._operations,
-                failed_operations=self._failed_operations,
-                bytes_read=self._bytes_read,
-                bytes_written=self._bytes_written,
-                busy_seconds=self._busy.seconds(),
-                failed_caches=Counter(self._failed_caches),
-                cache_busy_seconds={cache: timer.seconds() for cache, timer in self._cache_busy.items()},
-                cache_bytes_read=Counter(self._cache_bytes_read),
+                requests=self.requests,
+                failed_requests=self.failed_requests,
+                operations=self.operations,
+                failed_operations=self.failed_operations,
+                bytes_read=self.bytes_read,
+                bytes_written=self.bytes_written,
+                busy_seconds=self.busy.seconds(),
+                failed_caches=Counter(self.failed_caches),
+                cache_busy_seconds={cache: timer.seconds() for cache, timer in self.cache_busy.items()},
+                cache_bytes_read=Counter(self.cache_bytes_read),
             )
