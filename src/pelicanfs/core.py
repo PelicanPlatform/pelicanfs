@@ -353,6 +353,11 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
 _RETRYABLE_ERRORS = (aiohttp.ClientError, ConnectionError, TimeoutError, NoConnectionError)
 
 
+def _error_text(error: BaseException) -> str:
+    """Return the message of error, or its type name if the message is blank, as for TimeoutError()."""
+    return str(error).strip() or type(error).__name__
+
+
 def _is_retryable_status(status: int) -> bool:
     return status == 429 or status >= 500
 
@@ -705,7 +710,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 logger.warning("token_generator.get_token returned falsy value: %r", token)
             return token
         except Exception as e:
-            logger.warning("Failed to generate token for %s: %s", url, e)
+            logger.warning("Failed to generate token for %s: %s", url, _error_text(e))
             trace(logger, "token generation failed", exc_info=True)
             return None
 
@@ -979,7 +984,7 @@ class PelicanFileSystem(AsyncFileSystem):
     def _record_failed_access(self, url: str, e: BaseException) -> None:
         """Add a failed access to the stats. A missing object is not a failed access."""
         if not isinstance(e, FileNotFoundError):
-            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, str(e)))
+            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, _error_text(e)))
 
     def _bad_cache(self, url: str, e: BaseException) -> None:
         """
@@ -1291,7 +1296,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if retry is None:
             logger.debug("No further cache to retry %s on", path)
             return None
-        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, failure or error, retry[0])
+        logger.warning("Cache %s failed for %s (%s); retrying on %s", failed_url, path, _error_text(failure or error), retry[0])
         return retry
 
     async def _with_cache_retry(self, path: str, operation: TokenOperation, attempt: Callable[[str], Awaitable[T]]) -> T:
@@ -1706,7 +1711,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # Still best effort, but worth saying out loud: if warming fails
             # systematically, every object goes back to the director on its own --
             # exactly the stampede this function exists to prevent.
-            logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, e)
+            logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, _error_text(e))
 
     async def _expand_path(self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None, **kwargs: Any) -> list[str]:
         """

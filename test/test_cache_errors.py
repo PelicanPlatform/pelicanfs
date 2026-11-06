@@ -688,3 +688,27 @@ def test_retry_stops_when_cache_is_not_evicted(httpserver: HTTPServer, httpserve
         pelfs.cat("/foo/bar")
     # One GET is the director redirect
     assert len([req for req, _ in httpserver.log if req.method == "GET" and req.path == "/foo/bar"]) == MAX_CACHE_ATTEMPTS + 1
+
+
+def test_retry_names_error_without_message(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, monkeypatch, caplog):
+    """An error with an empty str, like a bare TimeoutError, is reported by its type."""
+    _setup_director(httpserver, httpserver2)
+    httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
+
+    pelfs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True)
+    results = iter([TimeoutError(), b"hello"])
+
+    async def flaky_cat_file(*args, **kwargs):
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(pelfs.http_file_system, "_cat_file", flaky_cat_file)
+
+    with caplog.at_level("WARNING", logger="fsspec.pelican"):
+        assert pelfs.cat("/foo/bar") == b"hello"
+
+    assert "(TimeoutError); retrying on" in caplog.text
+    responses, _ = pelfs.get_access_data().get_responses("/foo/bar")
+    assert responses[0].error == "TimeoutError"
