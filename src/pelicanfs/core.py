@@ -49,6 +49,7 @@ from aiowebdav2.exceptions import (
 from aiowebdav2.parser import WebDavXmlUtils
 from aiowebdav2.urn import Urn
 from fsspec.asyn import AsyncFileSystem, sync
+from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.mapping import FSMap
 from fsspec.utils import glob_translate
 
@@ -67,6 +68,7 @@ from .exceptions import (
 )
 from .log_utils import TRACE, TokenForLog, log_operation, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
+from .transfer_stats import TransferStats, _ByteCounter, _host_of, _TransferRecorder
 
 logger = logging.getLogger("fsspec.pelican")
 
@@ -210,11 +212,6 @@ class _CacheManager:
                 self._cache_list.remove(bad_cache_url)
 
 
-def _host_of(url: str) -> str:
-    """Strip a URL down to scheme://host, the identity of a cache."""
-    return urllib.parse.urlparse(url)._replace(path="", query="", fragment="").geturl()
-
-
 def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
     """
     Return a trace config that keeps a session from holding on to its responses.
@@ -308,7 +305,8 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     Yield a WebDAV client for the host in "options", releasing the responses it produces.
 
     Recognised options are "hostname", the base URL to talk to, "token", the bearer token
-    to authenticate with, and "verify_ssl", which defaults to verifying.
+    to authenticate with, "verify_ssl", which defaults to verifying, and "trace_configs",
+    further aiohttp trace configs for the session.
 
     "verify_ssl" is handed to aiohttp as the request's "ssl" argument, so it takes a
     boolean or anything else aiohttp accepts there, including an ssl.SSLContext - which is
@@ -320,7 +318,7 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     token = options["token"]
 
     responses: list[aiohttp.ClientResponse] = []
-    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses), _log_requests()])
+    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses), _log_requests(), *options.get("trace_configs", ())])
     clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
     client = Client(url=base_url, username="", password="", options=clientopts)
     client._close_session = True
@@ -371,6 +369,17 @@ def _traced(func: Callable[..., Awaitable[T]]) -> Callable[..., Coroutine[Any, A
         target, rest = split_path_arg(args, kwargs)
         with log_operation(func.__name__, target):
             return await func(self, target, *rest, **kwargs)
+
+    return wrapper
+
+
+def _counted_operation(func: Callable[..., Awaitable[T]]) -> Callable[..., Coroutine[Any, Any, T]]:
+    """Count a filesystem coroutine as one operation in the transfer stats, retries included."""
+
+    @functools.wraps(func)
+    async def wrapper(self: "PelicanFileSystem", *args: Any, **kwargs: Any) -> T:
+        with self._transfers.operation():
+            return await func(self, *args, **kwargs)
 
     return wrapper
 
@@ -486,6 +495,7 @@ class PelicanFileSystem(AsyncFileSystem):
         self._namespace_cache: cachetools.TTLCache[str, _CacheManager] = cachetools.TTLCache(maxsize=50, ttl=15 * 60)
         self._namespace_lock = threading.Lock()
         self._access_stats = _AccessStats()
+        self._transfers = _TransferRecorder()
 
         headers = kwargs.get("headers") or {}
         self.token = next((value for name, value in headers.items() if name.lower() == "authorization"), None)
@@ -608,6 +618,7 @@ class PelicanFileSystem(AsyncFileSystem):
         return {
             "hostname": f"{parts.scheme}://{parts.netloc}",
             "token": self._get_token(),
+            "trace_configs": [self._transfers.trace_config],
         }
 
     def _get_token_operation(self, func_name: str) -> TokenOperation:
@@ -668,7 +679,7 @@ class PelicanFileSystem(AsyncFileSystem):
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(on_request_start)
         client_kwargs = self.http_file_system.client_kwargs
-        self.http_file_system.client_kwargs = {**client_kwargs, "trace_configs": [*client_kwargs.get("trace_configs", ()), trace_config, _log_requests()]}
+        self.http_file_system.client_kwargs = {**client_kwargs, "trace_configs": [*client_kwargs.get("trace_configs", ()), trace_config, _log_requests(), self._transfers.trace_config]}
 
     def _add_token_header(self, params: aiohttp.TraceRequestStartParams) -> None:
         """Add the current token to a request for a token origin, unless the request has its own."""
@@ -766,6 +777,12 @@ class PelicanFileSystem(AsyncFileSystem):
         using the PelicanFS object
         """
         return self._access_stats
+
+    def get_transfer_stats(self) -> TransferStats:
+        """
+        Return the request counts, success rates, and data rate of this object so far.
+        """
+        return self._transfers.snapshot()
 
     async def _discover_federation_metadata(self, disc_url: str) -> dict[str, Any]:
         """
@@ -1353,6 +1370,8 @@ class PelicanFileSystem(AsyncFileSystem):
         on another cache is safe.
         """
         redact_exception(error)
+        if isinstance(_underlying_error(error), aiohttp.ClientPayloadError):
+            self._transfers.add_body_failure(failed_url)
         if self.direct_reads:
             return None
         failure = _cache_failure(error)
@@ -1441,13 +1460,15 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
+        @self._transfers.operation()
         def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
             tries = 1
             while True:
                 try:
-                    if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
-                        fp.r = sync(self.loop, self._open_stream_response, fp)
-                    result = read(*args, **kwargs)
+                    with self._transfers.cache_active(_host_of(fp.url)):
+                        if isinstance(fp, fshttp.HTTPStreamFile) and fp.r is None:
+                            fp.r = sync(self.loop, self._open_stream_response, fp)
+                        result = read(*args, **kwargs)
                 except Exception as e:
                     if not sync(self.loop, self._retarget_after_failure, fp, path, e, tries):
                         raise
@@ -1455,6 +1476,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     if tries > 1:
                         self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    self._transfers.add_read(len(result), _host_of(fp.url))
                     return result
 
         return io_wrapper
@@ -1465,13 +1487,15 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         read = fp.read
 
+        @self._transfers.async_operation()
         async def io_wrapper(*args: Any, **kwargs: Any) -> bytes:
             tries = 1
             while True:
                 try:
-                    if fp.r is None:
-                        fp.r = await self._open_stream_response(fp)
-                    result = await read(*args, **kwargs)
+                    with self._transfers.cache_active(_host_of(fp.url)):
+                        if fp.r is None:
+                            fp.r = await self._open_stream_response(fp)
+                        result = await read(*args, **kwargs)
                 except Exception as e:
                     if not await self._retarget_after_failure(fp, path, e, tries):
                         raise
@@ -1479,6 +1503,7 @@ class PelicanFileSystem(AsyncFileSystem):
                 else:
                     if tries > 1:
                         self._access_stats.add_response(path, _AccessResp(fp.url, True))
+                    self._transfers.add_read(len(result), _host_of(fp.url))
                     return result
 
         return io_wrapper
@@ -1556,7 +1581,8 @@ class PelicanFileSystem(AsyncFileSystem):
         return [self._check_fspath(p) for p in path]
 
     @_traced
-    async def _put_file(self, lpath: str, rpath: str, **kwargs: Any) -> None:
+    @_counted_operation
+    async def _put_file(self, lpath: str, rpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
 
@@ -1566,7 +1592,7 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Running put_file from %s to %s...", lpath, data_url)
 
         async def upload_file() -> None:
-            await self.http_file_system._put_file(lpath, data_url, method="put", **kwargs)
+            await self.http_file_system._put_file(lpath, data_url, method="put", callback=_ByteCounter(callback, self._transfers.add_written), **kwargs)
 
         try:
             await asyncio.create_task(upload_file())
@@ -1667,6 +1693,7 @@ class PelicanFileSystem(AsyncFileSystem):
         functools.update_wrapper(wrapper, func)
         return _traced(wrapper)
 
+    @_counted_operation
     @_cache_dec
     async def _cat_file(self, path: str, start: int | None = None, end: int | None = None, **kwargs: Any) -> bytes:
         """
@@ -1684,7 +1711,10 @@ class PelicanFileSystem(AsyncFileSystem):
                 end = max(size + end, 0) if end < 0 else end
             if start >= end:
                 return b""
-        return await self.http_file_system._cat_file(path, start, end, **kwargs)
+        with self._transfers.cache_active(_host_of(path)):
+            result = await self.http_file_system._cat_file(path, start, end, **kwargs)
+        self._transfers.add_read(len(result), _host_of(path))
+        return result
 
     async def _exists(self, path: str, **kwargs: Any) -> bool:
         try:
@@ -1713,9 +1743,12 @@ class PelicanFileSystem(AsyncFileSystem):
             return None
         return await self._get_file_from_cache(rpath, lpath, **kwargs)
 
+    @_counted_operation
     @_cache_dec
-    async def _get_file_from_cache(self, rpath: str, lpath: str, **kwargs: Any) -> None:
-        return await self.http_file_system._get_file(rpath, lpath, **kwargs)
+    async def _get_file_from_cache(self, rpath: str, lpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
+        cache = _host_of(rpath)
+        with self._transfers.cache_active(cache):
+            return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
 
     @_cache_dec
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:

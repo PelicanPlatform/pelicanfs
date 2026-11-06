@@ -15,5 +15,6 @@ limitations under the License.
 """
 
 from .core import OSDFFileSystem, PelicanFileSystem, PelicanMap
+from .transfer_stats import ResponseFailure, TransferStats
 
-__all__ = ["OSDFFileSystem", "PelicanFileSystem", "PelicanMap"]
+__all__ = ["OSDFFileSystem", "PelicanFileSystem", "PelicanMap", "ResponseFailure", "TransferStats"]

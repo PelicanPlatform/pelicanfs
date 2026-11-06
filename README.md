@@ -38,6 +38,7 @@
 - [Getting an FSMap](#getting-an-fsmap)
 - [Monitoring and Debugging](#monitoring-and-debugging)
   - [Access Statistics](#access-statistics)
+  - [Transfer Statistics](#transfer-statistics)
   - [Enabling Debug Logging](#enabling-debug-logging)
 - [API Reference](#api-reference)
   - [PelicanFileSystem](#pelicanfilesystem)
@@ -666,6 +667,35 @@ stats.print()
 {NamespacePath: https://cache2.example.com/pelicanplatform/test/hello-world.txt, Success: False, Error: <class 'aiohttp.client_exceptions.ClientConnectorError'>}
 /pelicanplatform/test/hello-world.txt: {NamespacePath: https://cache1.example.com/pelicanplatform/test/hello-world.txt, Success: True} {NamespacePath: https://cache1.example.com/pelicanplatform/test/hello-world.txt, Success: True} {NamespacePath: https://cache2.example.com/pelicanplatform/test/hello-world.txt, Success: False, Error: <class 'aiohttp.client_exceptions.ClientConnectorError'>}
 ```
+
+### Transfer Statistics
+
+`get_transfer_stats()` returns totals for the filesystem object, from its creation to the time of the call:
+
+```python
+stats = pelfs.get_transfer_stats()
+
+stats.requests  # HTTP requests, with each cache attempt counted
+stats.average_rate  # bytes per second while an operation was active
+stats.request_success_rate  # fraction of HTTP requests that succeeded
+stats.operation_success_rate  # fraction of operations that succeeded after retries
+stats.responses  # Counter of responses by (server, method, status)
+stats.cache_busy_seconds  # dict of read time by cache
+stats.cache_bytes_read  # Counter of bytes read by cache
+stats.cache_read_rates  # dict of bytes per second by cache
+```
+
+An operation is one `cat_file`, `get_file`, `put_file`, or `read` call on an open file. The object also has `failed_requests`, `operations`, `failed_operations`, `bytes_read`, `bytes_written`, and `busy_seconds`. A rate is `None` until there is data for it.
+
+- A missing object (404) is not a failure.
+- A failed cache attempt that a retry recovers from lowers the request rate, but not the operation rate.
+- A failure while reading a response body lowers only the operation rate.
+- `responses` has keys such as `("https://cache.example.com:8443", "GET", 200)`, for every server, including the director. Each redirect hop counts. `ResponseFailure.NO_RESPONSE` replaces the status if a request got no response. A body that breaks off adds a `ResponseFailure.BODY` entry for `GET`, beside the status that came with its headers.
+- `busy_seconds` is the time that one or more operations were active, so concurrent transfers do not lower the average rate.
+- `cache_busy_seconds` has keys in the same server form, and counts overlapping reads on a cache once. It includes failed attempts, and excludes uploads, which have no cache. A direct read appears under its origin.
+- `cache_read_rates` divides `cache_bytes_read` by `cache_busy_seconds`. A cache that only failed has a rate of `0.0`.
+- For open files, `bytes_read` counts the bytes given to the caller, not the bytes fsspec fetched for its read-ahead cache.
+- Totals are per process. Each Dask worker keeps its own.
 
 ### Enabling Debug Logging
 
