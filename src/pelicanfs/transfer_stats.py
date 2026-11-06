@@ -170,7 +170,14 @@ class _TransferRecorder:
             self.requests += 1
 
     async def _on_request_redirect(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestRedirectParams) -> None:
+        # With no target, aiohttp stops here and on_request_end reports this response.
+        headers = params.response.headers
+        if aiohttp.hdrs.LOCATION not in headers and aiohttp.hdrs.URI not in headers:
+            return
         self._add_response(params.response.url, params.method, params.response.status)
+        # aiohttp sends no on_request_start for the next hop.
+        with self._lock:
+            self.requests += 1
 
     async def _on_request_end(self, _session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
         self._add_response(params.response.url, params.method, params.response.status)
