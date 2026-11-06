@@ -14,12 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-import asyncio
 import logging
 import re
 
 import pytest
-from fsspec.asyn import sync
+from fsspec.asyn import get_loop, sync
 from pytest_httpserver import HTTPServer
 
 from pelicanfs.core import PelicanFileSystem
@@ -76,9 +75,8 @@ def test_request_failure_is_logged(httpserver: HTTPServer, pelfs, caplog):
         headers={"Link": f'<{url}>; rel="duplicate"; pri=1; depth=1', "Location": url, "X-Pelican-Namespace": "namespace=/foo"},
     )
 
-    with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"):
-        with pytest.raises(Exception, match="No working cache"):
-            sync(pelfs.loop, pelfs.get_working_cache, "/foo/bar")
+    with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"), pytest.raises(Exception, match="No working cache"):
+        sync(pelfs.loop, pelfs.get_working_cache, "/foo/bar")
 
     assert any(re.search(rf"HTTP HEAD {re.escape(url)} failed after \d+\.\d{{3}}s: ", message) for message in pelican_messages(caplog))
 
@@ -108,7 +106,8 @@ def test_webdav_requests_are_logged(httpserver: HTTPServer, get_webdav_client, c
     httpserver.expect_request("/foo", method="PROPFIND").respond_with_data("", status=207)
 
     with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"):
-        asyncio.run(_session_and_listing_requests_are_logged(get_webdav_client, httpserver.url_for("/")))
+        # This loop stays open, so the TLS connection can finish closing.
+        sync(get_loop(), _session_and_listing_requests_are_logged, get_webdav_client, httpserver.url_for("/"))
 
     assert any("HTTP PROPFIND" in message and "-> 207 in " in message for message in pelican_messages(caplog))
 
