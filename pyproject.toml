@@ -28,11 +28,11 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "aiohttp >=3.9.4,!=3.14.4,<4",
-    "aiowebdav2 <1",
     "cachetools >=5.3,<6",
     "fsspec >=2024.3.1",
     "igwn-auth-utils",
     "multidict",
+    "pelican-webdav-client >=0.1.1,<1",
     "scitokens >=1.8",
 ]
 
@@ -61,6 +61,8 @@ dev = [{ include-group = "testing" }]
 
 [tool.uv]
 exclude-newer = "3 days"
+# Released by the Pelican Project alongside pelicanfs, so the cooldown is not needed
+exclude-newer-package = { pelican-webdav-client = false }
 
 [tool.pytest]
 minversion = "9.0"

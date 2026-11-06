@@ -22,15 +22,8 @@ import threading
 import aiohttp
 import fsspec.implementations.http as fshttp
 import pytest
-from aiowebdav2.exceptions import (
-    AccessDeniedError,
-    ConnectionExceptionError,
-    NoConnectionError,
-    RemoteResourceNotFoundError,
-    ResponseErrorCodeError,
-    UnauthorizedError,
-)
 from fsspec.asyn import sync
+from pelican_webdav_client import ForbiddenError, NotFoundError, ResponseError, UnauthorizedError
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
@@ -387,7 +380,7 @@ def test_info_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPSer
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
 
 
-@pytest.mark.parametrize(("status", "error"), [(401, UnauthorizedError), (403, AccessDeniedError)])
+@pytest.mark.parametrize(("status", "error"), [(401, UnauthorizedError), (403, ForbiddenError)])
 def test_info_auth_failure_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status, error):
     _setup_director(httpserver, httpserver2)
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
@@ -631,8 +624,7 @@ def _response_error(status):
         (_wrapped(connection), connection),
         (refused := ConnectionRefusedError(), refused),
         (too_many := _response_error(429), too_many),
-        (no_connection := NoConnectionError("host"), no_connection),
-        (webdav_server_error := ResponseErrorCodeError("url", 503, "busy"), webdav_server_error),
+        (webdav_server_error := ResponseError("PROPFIND", "url", 503, "busy"), webdav_server_error),
         (server_error := _response_error(500), server_error),
         (_wrapped(server_error), server_error),
         (_wrapped(timeout := TimeoutError()), timeout),
@@ -640,11 +632,10 @@ def _response_error(status):
         (_response_error(400), None),
         (_response_error(401), None),
         (_wrapped(_response_error(403)), None),
-        (ResponseErrorCodeError("url", 400, "bad"), None),
-        (UnauthorizedError("host"), None),
-        (AccessDeniedError("host"), None),
-        (RemoteResourceNotFoundError("/foo/bar"), None),
-        (ConnectionExceptionError(_response_error(403)), None),
+        (ResponseError("PROPFIND", "url", 400, "bad"), None),
+        (UnauthorizedError("PROPFIND", "url", 401), None),
+        (ForbiddenError("PROPFIND", "url", 403), None),
+        (NotFoundError("PROPFIND", "url", 404), None),
         (OSError(errno.ENOSPC, "No space left on device"), None),
         (PermissionError(), None),
         (_wrapped(_response_error(404)), None),

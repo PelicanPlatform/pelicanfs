@@ -166,7 +166,7 @@ def connections_held_by(client):
     that matters here: a response that has not been released keeps its connection checked
     out, so this stays at zero only if each call really does release as it ends.
     """
-    return len(client._session.connector._acquired)
+    return len(client.session.connector._acquired)
 
 
 # aiohttp finishes a small body along with the headers and releases the connection by
@@ -206,13 +206,13 @@ def webdav_options(httpserver, httpclient_ssl_context):
 
 async def check_through_webdav_client(httpserver, httpclient_ssl_context):
     async with pelicanfs.core.get_webdav_client(webdav_options(httpserver, httpclient_ssl_context)) as client:
-        return await client.check("/foo/bar")
+        return await client.exists("/foo/bar")
 
 
 def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
-    aiowebdav2's Client.check(), which backs exists(), only looks at response.status and
-    leaves the response unreleased, so get_webdav_client has to release it.
+    The client's exists(), which backs exists(), only looks at the status, and must still
+    release the response it never reads.
     """
     expect_propfind(httpserver, status=207)
 
@@ -225,9 +225,8 @@ def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_
 
 def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
-    aiowebdav2's execute_request abandons the response when it raises for an error status,
-    so the object-does-not-exist path leaks unless get_webdav_client releases it too. This
-    is the common case for exists(), which returns False by way of that exception.
+    A response that raises for its error status must be released too. This is the common
+    case for exists(), which returns False by way of the 404's exception.
     """
     expect_propfind(httpserver, status=404)
 
@@ -240,13 +239,13 @@ def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTP
 
 def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserver: HTTPServer, httpclient_ssl_context, run_async):
     """
-    A reused client must not accumulate connections, only ever holding the latest response.
+    A reused client must not accumulate connections: each call gives its connection back
+    before it returns.
 
     Nothing bounds how many calls a client serves or how long it is kept, so releasing
     only when it closes would keep every connection checked out and every body resident
-    until then. That is the leak this is meant to prevent rather than defer to later, and
-    it would not show up in the tests above, which close the client before looking at
-    anything.
+    until then. That would not show up in the tests above, which close the client before
+    looking at anything.
 
     This one needs the threaded server: held-open connections are exactly what it is
     looking for, and the single-threaded one stops serving while any are held.
@@ -258,12 +257,12 @@ def test_webdav_client_does_not_hoard_connections_across_calls(threaded_httpserv
         held = []
         async with pelicanfs.core.get_webdav_client(webdav_options(threaded_httpserver, httpclient_ssl_context)) as client:
             for _ in range(3):
-                assert await client.check("/foo/bar") is True
+                assert await client.exists("/foo/bar") is True
                 held.append(connections_held_by(client))
         return held
 
     held = run_async(held_after_each_of_several_calls())
-    assert held == [1, 1, 1], f"connections accumulated across calls instead of being recycled: {held}"
+    assert held == [0, 0, 0], f"a call returned still holding its connection: {held}"
 
 
 @pytest.mark.parametrize(

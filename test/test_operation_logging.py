@@ -118,7 +118,7 @@ def test_redirect_is_logged(httpserver: HTTPServer, pelfs, caplog):
 
 async def _session_and_listing_requests_are_logged(get_webdav_client, url: str) -> None:
     async with get_webdav_client({"hostname": url, "token": "tok"}) as client:
-        await client.check("/foo")
+        await client.exists("/foo")
 
 
 def test_webdav_requests_are_logged(httpserver: HTTPServer, get_webdav_client, caplog):

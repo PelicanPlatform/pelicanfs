@@ -17,7 +17,7 @@ limitations under the License.
 from pathlib import Path
 
 import pytest
-from aiowebdav2.exceptions import ResponseErrorCodeError
+from pelican_webdav_client import ResponseError
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -394,9 +394,10 @@ def test_get_probe_server_error_propagates(two_host_federation, tmp_path):
     dest = tmp_path / "dest"
     dest.mkdir()
 
-    with pytest.raises(ResponseErrorCodeError):
+    with pytest.raises(ResponseError) as exc_info:
         two_host_federation.get("/foo/broken", str(dest), recursive=True)
 
+    assert exc_info.value.status == 503
     assert local_tree(dest) == set()
 
 
