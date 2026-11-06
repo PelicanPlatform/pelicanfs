@@ -857,7 +857,7 @@ class PelicanFileSystem(AsyncFileSystem):
                         break
                     failure = f"HTTP {resp.status}"
             except _RETRYABLE_ERRORS as e:
-                failure = redact_query(str(e)) or type(e).__name__
+                failure = redact_query(_error_text(e))
             failures.append(f"{redact_query(updated_url)}: {failure}")
             logger.warning("Cache probe failed for %s", failures[-1])
             cache_list = cache_list[1:]
