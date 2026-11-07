@@ -14,6 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {
+    "collections.abc",
+    "contextlib",
+    "urllib.parse",
+    f"{__spec__.parent}.exceptions",
+}
+
 import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
