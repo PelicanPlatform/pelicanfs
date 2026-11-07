@@ -14,6 +14,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {
+    "collections.abc",
+    "getpass",
+    "html",
+    "igwn_auth_utils.scitokens",
+    "io",
+    "json",
+    "pelicanfs.log_utils",
+    "pty",
+    "select",
+    "shutil",
+    "subprocess",
+    "termios",
+    "typing",
+}
+
 import getpass
 import html
 import io
