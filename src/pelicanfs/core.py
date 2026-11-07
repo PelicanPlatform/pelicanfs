@@ -1247,20 +1247,28 @@ class PelicanFileSystem(AsyncFileSystem):
             # so nothing in it is usefully a collection
             return False
 
+        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
+            return await self._probe_collection(client, _webdav_path(list_url))
+
+    async def _probe_collection(self, client: Client, remote_path: str) -> bool:
+        """
+        Whether `remote_path`, the decoded path of an already-resolved collections url,
+        is a collection. One depth-0 PROPFIND through `client`, which must be rooted at
+        that url's host; the caller has already handled token generation.
+        """
         # Probe the trailing-slash form: origins answer a collection's slash form
         # directly and reject an object's with a 500 -- the same convention _ls_real
         # keys on to tell the two apart
-        probe_path = f"{_webdav_path(list_url).removesuffix('/')}/"
-        async with self.get_webdav_client(self._webdav_options(list_url)) as client:
-            try:
-                return await client.is_collection(probe_path)
-            except (ResponseError, InvalidResponseError) as e:
-                # A 405 is something PROPFIND cannot describe, which is no collection
-                # either. Any other failure must not quietly classify the path as "not
-                # a collection".
-                if _not_a_collection(e) or isinstance(e, MethodNotAllowedError):
-                    return False
-                raise
+        probe_path = f"{remote_path.removesuffix('/')}/"
+        try:
+            return await client.is_collection(probe_path)
+        except (ResponseError, InvalidResponseError) as e:
+            # A 405 is something PROPFIND cannot describe, which is no collection
+            # either. Any other failure must not quietly classify the path as "not
+            # a collection".
+            if _not_a_collection(e) or isinstance(e, MethodNotAllowedError):
+                return False
+            raise
 
     @_traced
     async def _find(self, path: str, maxdepth: int | None = None, withdirs: bool = False, **kwargs: Any) -> Any:
@@ -1343,16 +1351,22 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_dirlist_dec
     async def _isfile(self, path: str) -> bool:
-        try:
-            items = await self._ls_real(path, detail=False)
-        except (FileNotFoundError, ValueError):
-            return False
-        if items:
-            # A non-empty listing is a collection
-            return False
-        # An empty listing is an object or an *empty* collection -- a webdav listing
-        # excludes the collection itself -- so ask the resource's own type
-        return not await self._is_collection(urllib.parse.urlparse(path).path)
+        """
+        True when `path` exists and is not a collection.
+
+        Two depth-0 probes rather than a listing: a listing transfers a whole
+        collection's worth of entries to learn one bit, and cannot see an empty
+        collection anyway. The decorator has already resolved `path` to its
+        collections url and handled the token, so one client serves both probes.
+        """
+        remote_path = _webdav_path(path)
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
+            # Existence first: the collection probe answers False for a missing path
+            # too, so on its own it would report one as a file. Ask for the no-slash
+            # form, which origins answer for objects and collections alike
+            if not await client.exists(remote_path.rstrip("/") or "/"):
+                return False
+            return not await self._probe_collection(client, remote_path)
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path: str, maxdepth: int | None = None, on_error: str = "omit", **kwargs: Any) -> AsyncIterator[tuple[str, Any, Any]]:
