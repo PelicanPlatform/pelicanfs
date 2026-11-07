@@ -239,11 +239,16 @@ def test_open_with_per_call_headers(federation, httpserver2):
 
 @pytest.mark.skipif(HTTPFileSystem._pipe_file is AsyncFileSystem._pipe_file, reason="HTTP pipe_file needs fsspec>=2025.3.0")
 @pytest.mark.usefixtures("generated_token")
-def test_pipe_file_after_read_sends_token(federation, httpserver2):
+def test_pipe_file_after_read_sends_token(federation, httpserver, httpserver2):
+    httpserver.expect_request("/api/v1.0/director/origin/foo/bar").respond_with_data(
+        "",
+        status=200,
+        headers={"Location": httpserver2.url_for("/foo/bar"), "X-Pelican-Namespace": "namespace=/foo, require-token=true"},
+    )
     pelfs = federation()
     pelfs.cat_file("/foo/bar")
 
-    pelfs.pipe_file(httpserver2.url_for("/foo/bar"), b"x")
+    pelfs.pipe_file("/foo/bar", b"x")
 
     assert requests_to(httpserver2, "PUT")[-1].headers.get("Authorization") == GENERATED
 

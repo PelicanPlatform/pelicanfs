@@ -558,7 +558,6 @@ class PelicanFileSystem(AsyncFileSystem):
         # overrides below, because fsspec's defaults for those are silent no-ops rather than errors.)
         self._rm_file = self.http_file_system._rm_file
         self._cp_file = self.http_file_system._cp_file
-        self._pipe_file = self.http_file_system._pipe_file
 
         # Overwrite the httpsfs _ls_real call with ours with ours
         self.http_file_system._ls_real = self._ls_real
@@ -680,7 +679,7 @@ class PelicanFileSystem(AsyncFileSystem):
         }
 
         # Write operations (if any are implemented)
-        write_operations = {"_put_file"}
+        write_operations = {"_put_file", "_pipe_file"}
 
         if func_name in read_operations:
             return TokenOperation.TokenRead
@@ -1664,6 +1663,49 @@ class PelicanFileSystem(AsyncFileSystem):
             return
         msg = "makedirs is not supported: Pelican collections are created implicitly by uploading objects with put() or pipe()."
         raise NotImplementedError(msg)
+
+    @_traced
+    @_counted_operation
+    async def _pipe_file(self, path: str, value: bytes, mode: str = "overwrite", **kwargs: Any) -> None:
+        """
+        Write bytes as a whole object. Writes always go to the Origin (caches are
+        read-only), resolved through the Director's /origin/ endpoint, and a write
+        token is generated if the namespace requires one, exactly as for put().
+
+        Pelican objects are immutable: the Origin refuses to replace an object that
+        already exists, whatever ``mode`` says. fsspec's ``mode="create"`` (exclusive
+        create) therefore describes what every write does and is accepted. fsspec's
+        default ``mode="overwrite"`` is accepted for compatibility but does not
+        overwrite. There is no append: ``value`` is the entire object, and any other
+        mode is rejected before a request is made.
+        """
+        if mode not in ("overwrite", "create"):
+            msg = f"Unsupported pipe mode {mode!r}; expected 'overwrite' or 'create'"
+            raise ValueError(msg)
+
+        path = self._check_fspath(path)
+        data_url, director_response = await self.get_origin_url(path)
+        _audit("pelicanfs.write", _audit_url(path), _audit_url(data_url))
+
+        operation = self._get_token_operation("_pipe_file")
+        await self._handle_token_generation(data_url, director_response, operation)
+
+        logger.debug("Running pipe_file to %s...", data_url)
+        # fsspec's http _pipe_file, unlike its _put_file, ignores the filesystem-level
+        # request options, so merge them here or a token given at construction is
+        # dropped. The headers are copied because the http layer adds Content-Length
+        # to the dict it is handed.
+        request_options = self.http_file_system.kwargs.copy()
+        request_options["headers"] = {**request_options.get("headers", {}), **kwargs.pop("headers", {})}
+        request_options.update(kwargs)
+        # The http filesystem only knows "overwrite"; the exclusive-create
+        # semantics come from the Origin, not from the request.
+        try:
+            await self.http_file_system._pipe_file(data_url, value, mode="overwrite", **request_options)
+        except Exception as e:
+            redact_exception(e)
+            raise
+        self._transfers.add_written(len(value))
 
     def get_mapper(self, root: str = "", *args: Any, **kwargs: Any) -> FSMap:
         # FSMap makes keys by slicing its root off listed paths, which are namespace paths
