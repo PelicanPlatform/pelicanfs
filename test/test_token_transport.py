@@ -170,6 +170,33 @@ def test_valid_token_refused_is_not_retried(federation, httpserver2):
     assert fs._get_prefix_info("/foo/bar").cache_manager._cache_list == [httpserver2.url_for("").rstrip("/")]
 
 
+@pytest.mark.usefixtures("numbered_tokens")
+def test_expired_token_retries_info_on_the_origin(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client):
+    """info() asks the collections endpoint again with a new token after a 403 for an expired one, as reads do."""
+    origin_url = httpserver2.url_for("/foo/bar")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_request("/foo/bar").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{origin_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, require-token=true, collections-url={httpserver2.url_for('/')}",
+        },
+    )
+    fs = PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, get_webdav_client=get_webdav_client, skip_instance_cache=True)
+    multistatus = (
+        '<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>/foo/bar</D:href>'
+        "<D:propstat><D:prop><D:getcontentlength>13</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"
+        "</D:response></D:multistatus>"
+    )
+    httpserver2.expect_oneshot_request("/foo/bar", method="PROPFIND").respond_with_handler(lambda request: _refused(request, fs, expired=True))
+    httpserver2.expect_request("/foo/bar", method="PROPFIND").respond_with_data(multistatus, status=207, content_type="application/xml")
+
+    assert fs.info("/foo/bar")["size"] == 13
+
+    assert [request.headers["Authorization"] for request in requests_to(httpserver2, "PROPFIND")] == ["Bearer token-1", "Bearer token-2"]
+
+
 @pytest.mark.usefixtures("generated_token")
 def test_open_async_read_sends_token(federation, httpserver2):
     async def read():

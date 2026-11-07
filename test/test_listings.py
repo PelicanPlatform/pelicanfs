@@ -14,9 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+from datetime import UTC, datetime
+from email.utils import format_datetime
+
 import pytest
-from aiowebdav2.exceptions import UnauthorizedError
 from fsspec.asyn import sync
+from pelican_webdav_client import UnauthorizedError
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -45,9 +48,9 @@ def test_no_collections_url(httpserver: HTTPServer, get_client):
         pelfs.ls("/foo/bar")
 
 
-def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+def _listing_filesystem(httpserver: HTTPServer, get_client, get_webdav_client, listing):
+    """A filesystem whose namespace /foo has its collections endpoint on httpserver, listing /foo/bar as listing."""
     foo_bar_url = httpserver.url_for("foo/bar")
-
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
     httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
         "",
@@ -57,15 +60,12 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
             "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
         },
     )
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing, status=207)
+    return pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
 
-    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
 
-    pelfs = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-        get_webdav_client=get_webdav_client,
-    )
+def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
 
     assert pelfs.ls("/foo/bar", detail=False) == [
         "/foo/bar/file1.txt",
@@ -76,7 +76,113 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
     ]
 
 
-def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client):
+def _listing_of(href):
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/bar/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>{href}</D:href>
+    <D:propstat><D:prop><D:getcontentlength>13</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+
+@pytest.mark.parametrize(
+    ("name", "listed"),
+    [
+        ("a%20b", "a%2520b"),
+        ("a b", "a%20b"),
+        ("a?b", "a%3Fb"),
+        ("a#b", "a%23b"),
+        ("a;b", "a%3Bb"),
+        ("a+b:c=d", "a+b:c=d"),
+    ],
+)
+def test_ls_name_reaches_the_listed_resource(httpserver: HTTPServer, get_client, get_webdav_client, name, listed):
+    """A listed name is URL-encoded, so passing it back asks for the same resource."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of(f"/foo/bar/{listed}"))
+    path = f"/foo/bar/{listed}"
+
+    assert pelfs.ls("/foo/bar", detail=False) == [path]
+    assert [entry["name"] for entry in pelfs.ls("/foo/bar", detail=True)] == [path]
+
+    # The namespace is known from the listing, so this goes straight to the collections endpoint
+    multistatus = f"""<?xml version="1.0"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>{path}</D:href>
+<D:propstat><D:prop><D:getcontentlength>13</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+</D:response></D:multistatus>"""
+    httpserver.expect_request(f"/foo/bar/{name}", method="PROPFIND").respond_with_data(multistatus, status=207, content_type="application/xml")
+
+    assert pelfs.info(path)["size"] == 13
+
+
+def test_ls_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
+
+    entries = {entry["name"]: entry for entry in pelfs.ls("/foo/bar", detail=True)}
+    for entry in entries.values():
+        # The same shape info() gives, with the modification time under both names
+        assert set(entry) == {"name", "type", "size", "mimetype", "modified", "mtime"}
+        assert isinstance(entry["size"], int)
+        assert isinstance(entry["modified"], datetime)
+        assert entry["modified"].tzinfo is None
+        assert entry["mtime"] == format_datetime(entry["modified"].replace(tzinfo=UTC), usegmt=True)
+    assert entries["/foo/bar/folder1/"]["type"] == "directory"
+    assert entries["/foo/bar/folder1/"]["size"] == 0
+    assert entries["/foo/bar/file1.txt"]["type"] == "file"
+
+
+def test_ls_detail_collection_with_empty_size(httpserver: HTTPServer, get_client, get_webdav_client):
+    """
+    A detailed listing describes a sub-collection whose getcontentlength is empty, as an
+    origin sends it, as a directory of size 0, and leaves out the listed collection.
+    """
+    propfind_response = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/bar/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getcontentlength></D:getcontentlength>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/foo/bar/sub/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getcontentlength></D:getcontentlength>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/foo/bar/file1.txt</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getcontentlength>13</D:getcontentlength>
+        <D:resourcetype/>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, propfind_response)
+
+    listing = {entry["name"]: (entry["type"], entry["size"]) for entry in pelfs.ls("/foo/bar", detail=True)}
+    assert listing == {
+        "/foo/bar/sub/": ("directory", 0),
+        "/foo/bar/file1.txt": ("file", 13),
+    }
+
+
+def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client, not_a_collection_reply):
+    body, status = not_a_collection_reply
     foo_bar_url = httpserver.url_for("foo/bar")
 
     httpserver.expect_request("/").respond_with_data("", status=200)
@@ -90,7 +196,7 @@ def test_ls_file(httpserver: HTTPServer, get_client, get_webdav_client):
         },
     )
 
-    httpserver.expect_oneshot_request("/foo/bar/", method="PROPFIND").respond_with_data("not a directory", status=500)
+    httpserver.expect_oneshot_request("/foo/bar/", method="PROPFIND").respond_with_data(body, status=status)
     httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("I'm a file!", status=200)
 
     pelfs = pelicanfs.core.PelicanFileSystem(

@@ -253,13 +253,13 @@ def fixture_get_webdav_client(httpclient_ssl_context):
 
     The equivalent of `get_client` for the other half of the library: listings are
     PROPFIND requests against the collections endpoint rather than plain GETs, so they go
-    through aiowebdav2 instead of aiohttp. Passed to PelicanFileSystem as
+    through pelican-webdav-client instead of aiohttp. Passed to PelicanFileSystem as
     `get_webdav_client=...` and used wherever it needs to know whether a path is an
     object or a collection, or what a collection contains.
 
     This deliberately delegates to the production get_webdav_client, pointed at the test
-    authority, so that the tests exercise the real client setup - including the release
-    of the responses it produces - instead of a copy of it that can drift.
+    authority, so that the tests exercise the real client setup - including the trace
+    configs its session carries - instead of a copy of it that can drift.
     """
 
     @asynccontextmanager
@@ -268,6 +268,20 @@ def fixture_get_webdav_client(httpclient_ssl_context):
             yield client
 
     return client_factory
+
+
+@pytest.fixture(
+    params=[
+        pytest.param(("not a directory", 500), id="500"),
+        pytest.param(("<html>not a multistatus</html>", 200), id="not-a-multistatus"),
+    ],
+)
+def not_a_collection_reply(request):
+    """
+    (body, status) of each answer an origin gives a PROPFIND of an object's
+    trailing-slash form: a 500, or a success that is not a multistatus.
+    """
+    return request.param
 
 
 #

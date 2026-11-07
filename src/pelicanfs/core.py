@@ -30,6 +30,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager, context
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NoReturn, TypeVar, cast, overload
@@ -37,22 +38,11 @@ from typing import Any, NoReturn, TypeVar, cast, overload
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from aiowebdav2.client import Client, ClientOptions
-from aiowebdav2.exceptions import (
-    AccessDeniedError,
-    ConnectionExceptionError,
-    MethodNotSupportedError,
-    NoConnectionError,
-    RemoteResourceNotFoundError,
-    ResponseErrorCodeError,
-    UnauthorizedError,
-)
-from aiowebdav2.parser import WebDavXmlUtils
-from aiowebdav2.urn import Urn
 from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.mapping import FSMap
 from fsspec.utils import glob_translate
+from pelican_webdav_client import Client, InvalidResponseError, MethodNotAllowedError, NotFoundError, Resource, ResponseError, trace_config
 
 from .dir_header_parser import (
     DirectorResponse,
@@ -261,49 +251,6 @@ class _CacheManager:
                 self._cache_list.remove(bad_cache_url)
 
 
-def _recycle_responses(responses: list[aiohttp.ClientResponse]) -> aiohttp.TraceConfig:
-    """
-    Return a trace config that keeps a session from holding on to its responses.
-
-    aiowebdav2 hands back raw aiohttp responses and does not reliably release them.
-    Client.check, which backs exists(), only looks at response.status, and
-    execute_request abandons the response altogether when it raises for an error status
-    (401, 403, 404, 405, 423 and 507). A response that is never released keeps its
-    connection checked out until it is garbage collected, at which point aiohttp reports
-    an "Unclosed connection".
-
-    So each response is recorded as it arrives, and released once the next request begins.
-    Every aiowebdav2 method issues one request and has finished with its response by the
-    time it returns, so a new request starting is proof the last one is done with. At most
-    one response is held at a time as a result, for as many calls as a client is asked to
-    serve and for as long as it is kept. Releasing only when the client closed would
-    instead keep every connection checked out and every body resident until then, which is
-    the leak this is meant to prevent rather than defer.
-
-    This assumes one request at a time per client, which is how pelicanfs uses them: each
-    call to exists() and info() gets a client of its own, and a listing makes its two
-    requests one after the other. Issuing concurrent requests through a single client
-    would break the assumption, since the second to start would release the first's
-    response while it was still being read.
-
-    The one method this reasoning does not cover is download_iter, which returns a
-    generator over its response, so the response outlives the call. pelicanfs does not use
-    it; a caller who does must not start another request on the same client until they
-    have finished consuming the generator.
-    """
-    trace_config = aiohttp.TraceConfig()
-
-    async def on_request_start(_session: aiohttp.ClientSession, _context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
-        _release_responses(responses)
-
-    async def on_request_end(_session: aiohttp.ClientSession, _context: SimpleNamespace, params: aiohttp.TraceRequestEndParams) -> None:
-        responses.append(params.response)
-
-    trace_config.on_request_start.append(on_request_start)
-    trace_config.on_request_end.append(on_request_end)
-    return trace_config
-
-
 async def _log_request_start(_session: aiohttp.ClientSession, context: SimpleNamespace, _params: aiohttp.TraceRequestStartParams) -> None:
     context.start = time.perf_counter()
 
@@ -334,24 +281,10 @@ def _log_requests() -> aiohttp.TraceConfig:
     return trace_config
 
 
-def _release_responses(responses: list[aiohttp.ClientResponse]) -> None:
-    """
-    Release the recorded responses, freeing the connections they hold, and forget them.
-
-    This releases rather than reads the bodies, since a body may be arbitrarily large and
-    is of no interest by this point. The cost is that aiohttp closes a connection whose
-    body was left unread instead of returning it to the pool, so repeated check() calls on
-    one client each pay a fresh handshake. The bodies pelicanfs actually wants are read by
-    aiowebdav2 itself, and releasing those is a no-op that leaves them pooled as normal.
-    """
-    while responses:
-        responses.pop().release()
-
-
 @asynccontextmanager
 async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]:
     """
-    Yield a WebDAV client for the host in "options", releasing the responses it produces.
+    Yield a WebDAV client for the host in "options", closing it on the way out.
 
     Recognised options are "hostname", the base URL to talk to, "token", the bearer token
     to authenticate with, "verify_ssl", which defaults to verifying, and "trace_configs",
@@ -359,30 +292,71 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
 
     "verify_ssl" is handed to aiohttp as the request's "ssl" argument, so it takes a
     boolean or anything else aiohttp accepts there, including an ssl.SSLContext - which is
-    how the test suite points a client at its own CA. Note that aiowebdav2 annotates the
-    option as a bool even though it only forwards it, so a type checker will object to a
-    context here.
+    how the test suite points a client at its own CA.
+
+    The client reads or releases every response before its methods return, so nothing is
+    left holding a connection between calls. The session carries the client's trace config,
+    so a call also waits for the connections of the redirect hops aiohttp follows.
     """
-    base_url = options["hostname"]
-    token = options["token"]
-
-    responses: list[aiohttp.ClientResponse] = []
-    session = aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}, trace_configs=[_recycle_responses(responses), _log_requests(), *options.get("trace_configs", ())])
-    clientopts = ClientOptions(session=session, verify_ssl=options.get("verify_ssl", True))
-    client = Client(url=base_url, username="", password="", options=clientopts)
-    client._close_session = True
-
+    # The client leaves a session it is given to its owner, so the session, which carries
+    # the trace configs, is closed here
     try:
-        yield client
+        async with (
+            aiohttp.ClientSession(trace_configs=[_log_requests(), trace_config(), *options.get("trace_configs", ())]) as session,
+            Client(options["hostname"], token=options["token"], ssl=options.get("verify_ssl", True), session=session) as client,
+        ):
+            yield client
     finally:
-        # The last response has no following request to release it, so it is released
-        # here. Guarded so that a failure to release still closes the client, rather than
-        # leaking the whole session on the way out.
-        try:
-            _release_responses(responses)
-        finally:
-            await client.close()
-            logger.debug("WebDAV client closed")
+        logger.debug("WebDAV client closed")
+
+
+def _webdav_path(url: str) -> str:
+    """
+    The decoded path of `url`. The WebDAV client encodes paths itself and takes "%" literally.
+    urlsplit keeps a ";" in the last segment, which urlparse would split off.
+    """
+    return urllib.parse.unquote(urllib.parse.urlsplit(url).path)
+
+
+def _listed_path(resource: Resource) -> str:
+    """
+    The URL-encoded path of `resource`, the form every path here takes. Characters that
+    are legal in a URL path stay readable. ";" is encoded because urlparse splits on it.
+    """
+    return urllib.parse.quote(resource.path, safe="/:@!$&'()*+,=")
+
+
+def _not_a_collection(error: Exception) -> bool:
+    """
+    Whether `error`, from a PROPFIND of a path's trailing-slash form, says the path is
+    not a collection: it is missing, or it is an object, which origins answer with a 500
+    or with a success that is not a multistatus.
+    """
+    match error:
+        case NotFoundError() | InvalidResponseError() | ResponseError(status=500):
+            return True
+    return False
+
+
+def _resource_entry(name: str, resource: Resource) -> dict[str, Any]:
+    """
+    Describe `resource` in fsspec's info form, under `name`, for both ls() and info().
+    The modification time is given in the forms each has always used: "modified" a naive
+    UTC datetime, "mtime" an RFC 1123 GMT string. "mtime" is rendered from the parsed
+    getlastmodified, so a server sending another format still gets RFC 1123 back.
+    """
+    modified, mtime = None, ""
+    if resource.modified:
+        utc = resource.modified.astimezone(UTC)
+        modified, mtime = utc.replace(tzinfo=None), format_datetime(utc, usegmt=True)
+    return {
+        "name": name,
+        "type": "directory" if resource.is_collection else "file",
+        "size": resource.size or 0,
+        "mimetype": resource.content_type or "",
+        "modified": modified,
+        "mtime": mtime,
+    }
 
 
 def _path_arg_splitter(func: Callable[..., Any]) -> Callable[[tuple[Any, ...], dict[str, Any]], tuple[Any, tuple[Any, ...]]]:
@@ -454,7 +428,8 @@ def sync_generator(async_gen_func: Callable[..., AsyncIterator[T]], obj: AsyncFi
     return wrapper
 
 
-_RETRYABLE_ERRORS = (aiohttp.ClientError, ConnectionError, TimeoutError, NoConnectionError)
+# The WebDAV client lets aiohttp's transport errors through unwrapped
+_RETRYABLE_ERRORS = (aiohttp.ClientError, ConnectionError, TimeoutError)
 
 
 def _error_text(error: BaseException) -> str:
@@ -467,24 +442,15 @@ def _is_retryable_status(status: int) -> bool:
 
 
 def _underlying_error(error: BaseException) -> BaseException | None:
-    """Return the error that a wrapper from fsspec's _info or aiowebdav2 reports."""
-    match error:
-        case FileNotFoundError():
-            return error.__cause__
-        case ConnectionExceptionError():
-            return error.exception
-    return error
+    """Return the error that a FileNotFoundError from fsspec's _info or pelicanfs wraps."""
+    return error.__cause__ if isinstance(error, FileNotFoundError) else error
 
 
 def _http_status(error: BaseException | None) -> int | None:
     """Return the HTTP status that error reports, if any."""
     match error:
-        case aiohttp.ClientResponseError(status=status) | ResponseErrorCodeError(code=status):
+        case aiohttp.ClientResponseError(status=status) | ResponseError(status=status):
             return status
-        case UnauthorizedError():
-            return 401
-        case AccessDeniedError():
-            return 403
     return None
 
 
@@ -702,6 +668,7 @@ class PelicanFileSystem(AsyncFileSystem):
             "_cat_file",
             "_exists_via_cache",
             "_info",
+            "_info_from_cache",
             "_get_file_from_cache",
             "_is_collection",
             "get_working_cache",
@@ -1040,8 +1007,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         logger.debug("Finding the collections endpoint for %s...", fileloc)
 
-        # Check for cached namespace info (similar to get_working_cache)
-        fparsed = urllib.parse.urlparse(fileloc)
+        # Check for cached namespace info (similar to get_working_cache). urlsplit keeps a
+        # ";" in the last segment, which urlparse would split off.
+        fparsed = urllib.parse.urlsplit(fileloc)
         namespace_info = self._get_prefix_info(fparsed.path)
 
         if namespace_info and namespace_info.cache_manager.director_response:
@@ -1076,13 +1044,25 @@ class PelicanFileSystem(AsyncFileSystem):
 
         if not collections_url:
             msg = f"No collections endpoint found for {fparsed.path}"
-            logger.error("%s", msg)
+            # Not an error in itself: info() and isdir() go on without one
+            logger.debug("%s", msg)
             raise NoCollectionsUrl(msg)
 
         dirlist_url = urllib.parse.urljoin(collections_url, fparsed.path)
         director_response.location = dirlist_url
 
         return dirlist_url, director_response
+
+    async def _collections_url(self, path: str, operation: str) -> str:
+        """
+        The collections-endpoint url for the namespace path `path`, with any token the
+        request needs already in place. `operation` names the caller, for the token's
+        scope. Raises NoCollectionsUrl if the namespace has no collections endpoint.
+        """
+        url, director_response = await self.get_dirlist_url(path)
+        _audit("pelicanfs.list", _audit_url(path), _audit_url(url))
+        await self._handle_token_generation(url, director_response, self._get_token_operation(operation))
+        return url
 
     def _get_prefix_info(self, path: str) -> NamespaceInfo | None:
         """
@@ -1169,14 +1149,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         async def wrapper(self: "PelicanFileSystem", *args: Any, **kwargs: Any) -> T:
             raw_path, rest = split_path_arg(args, kwargs)
-            path = self._check_fspath(raw_path)
-            data_url, director_response = await self.get_dirlist_url(path)
-            _audit("pelicanfs.list", _audit_url(path), _audit_url(data_url))
-
-            # Handle token generation if required
-            operation = self._get_token_operation(func.__name__)
-            await self._handle_token_generation(data_url, director_response, operation)
-
+            data_url = await self._collections_url(self._check_fspath(raw_path), func.__name__)
             logger.debug("Running %s with url: %s", func, data_url)
             return await func(self, data_url, *rest, **kwargs)
 
@@ -1208,13 +1181,7 @@ class PelicanFileSystem(AsyncFileSystem):
         path = parsed.path
         trace(logger, "_ls_from_http path=%s", path)
 
-        # Get the collections URL for this path
-        collections_url, director_response = await self.get_dirlist_url(path)
-        _audit("pelicanfs.list", _audit_url(path), _audit_url(collections_url))
-
-        # Handle token generation if required
-        operation = self._get_token_operation("_ls")
-        await self._handle_token_generation(collections_url, director_response, operation)
+        collections_url = await self._collections_url(path, "_ls")
 
         # Call _ls_real with the collections URL
         if self.use_listings_cache and collections_url in self.dircache:
@@ -1241,38 +1208,21 @@ class PelicanFileSystem(AsyncFileSystem):
                 return await self._ls_real(url, detail=detail, client=client_ctx)
 
         # Now that we have a client, we can proceed with the listing
-        remote_dir = parts.path
-        list_files = client.list_with_infos if detail else client.list_files
+        remote_dir = _webdav_path(url)
         try:
-            items: list[Any] = await list_files(remote_dir)
-        except (RemoteResourceNotFoundError, ResponseErrorCodeError) as e:
-            if isinstance(e, ResponseErrorCodeError) and e.code != 500:
+            resources = await client.list(remote_dir)
+        except (ResponseError, InvalidResponseError) as e:
+            if not _not_a_collection(e):
                 raise
-
-            remote_dir = remote_dir.removesuffix("/")
-            exists = await client.check(remote_dir)
-            if exists:
+            # Either an object or nothing at all
+            if await client.exists(remote_dir.removesuffix("/")):
                 return set()
             raise FileNotFoundError from e
 
         if detail:
-
-            def get_item_detail(item: dict[str, Any]) -> dict[str, Any]:
-                full_path = f"{base_url}{item['path']}"
-                isdir = item.get("isdir") == "True"
-                if isdir and not full_path.endswith("/"):
-                    full_path += "/"
-                modtimestr = item["modified"]
-                modtime = None if modtimestr == "None" else datetime.strptime(modtimestr, "%a, %d %b %Y %H:%M:%S %Z")
-                return {
-                    "name": full_path,
-                    "size": int(item["size"]),
-                    "type": "directory" if isdir else "file",
-                    "modified": modtime,
-                }
-
-            return [get_item_detail(item) for item in items]
-        return sorted(set(items))
+            # A resource's path carries a trailing slash exactly when it is a collection
+            return [_resource_entry(f"{base_url}{_listed_path(resource)}", resource) for resource in resources]
+        return sorted({_listed_path(resource) for resource in resources})
 
     async def _isdir(self, path: str) -> bool:
         """
@@ -1291,34 +1241,26 @@ class PelicanFileSystem(AsyncFileSystem):
         request instead of a whole listing.
         """
         try:
-            list_url, director_response = await self.get_dirlist_url(path)
+            list_url = await self._collections_url(path, "_is_collection")
         except NoCollectionsUrl:
             # No collections endpoint means nothing in this namespace can be listed,
             # so nothing in it is usefully a collection
             return False
 
-        _audit("pelicanfs.list", _audit_url(path), _audit_url(list_url))
-        operation = self._get_token_operation("_is_collection")
-        await self._handle_token_generation(list_url, director_response, operation)
-
-        parts = urllib.parse.urlparse(list_url)
         # Probe the trailing-slash form: origins answer a collection's slash form
         # directly and reject an object's with a 500 -- the same convention _ls_real
         # keys on to tell the two apart
-        probe_path = parts.path if parts.path.endswith("/") else f"{parts.path}/"
+        probe_path = f"{_webdav_path(list_url).removesuffix('/')}/"
         async with self.get_webdav_client(self._webdav_options(list_url)) as client:
             try:
-                return await client.is_dir(probe_path)
-            except (RemoteResourceNotFoundError, MethodNotSupportedError):
-                # Missing, or the response carries no resourcetype to judge by --
-                # nothing we can treat as a collection
-                return False
-            except ResponseErrorCodeError as e:
-                # Anything but the object-signalling 500 is a real failure and must
-                # not quietly classify the path as "not a collection"
-                if e.code != 500:
-                    raise
-                return False
+                return await client.is_collection(probe_path)
+            except (ResponseError, InvalidResponseError) as e:
+                # A 405 is something PROPFIND cannot describe, which is no collection
+                # either. Any other failure must not quietly classify the path as "not
+                # a collection".
+                if _not_a_collection(e) or isinstance(e, MethodNotAllowedError):
+                    return False
+                raise
 
     @_traced
     async def _find(self, path: str, maxdepth: int | None = None, withdirs: bool = False, **kwargs: Any) -> Any:
@@ -1826,9 +1768,15 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_cache_dec
     async def _exists_via_cache(self, path: str, **kwargs: Any) -> bool:
-        parts = urllib.parse.urlparse(path)
         async with self.get_webdav_client(self._webdav_options(path)) as client:
-            return await client.check(parts.path)
+            try:
+                return await client.exists(_webdav_path(path))
+            except ResponseError as e:
+                # A cache refuses to describe a collection: 409, "is a directory". That
+                # is a refusal to say more about the path, not a denial that it exists.
+                if e.status == 409:
+                    return True
+                raise
 
     async def _get_file(self, rpath: str, lpath: str, _collection_roots: set[str] | None = None, **kwargs: Any) -> None:
         """
@@ -1851,35 +1799,66 @@ class PelicanFileSystem(AsyncFileSystem):
         with self._transfers.cache_active(cache):
             return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
 
-    @_cache_dec
+    @_traced
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
-        parts = urllib.parse.urlparse(path)
-        options = self._webdav_options(path)
-        async with self.get_webdav_client(options) as client:
-            # Client.info drops resourcetype, so do its PROPFIND here and parse both
-            remote_path = Urn(parts.path).path()
+        """
+        Describe the object or collection at `path`.
+
+        Asked of the collections endpoint first: caches refuse a PROPFIND on a collection
+        (409, "is a directory"), and report their fetch time as an object's mtime. The
+        caches answer when the namespace has no collections endpoint, or when the origin
+        fails in a way a cache could recover from. Any other answer from the origin is
+        final, and so is its failure if the caches cannot answer either. Only the origin's
+        own failure leads to the caches, not the director's.
+        """
+        path = self._check_fspath(path)
+        try:
+            list_url = await self._collections_url(path, "_info")
+        except NoCollectionsUrl:
+            return await self._info_from_cache(path)
+        try:
+            return await self._info_from_origin(path, list_url)
+        except Exception as origin_error:
+            if _cache_failure(origin_error) is None:
+                raise
+            logger.debug("Collections endpoint failed for %s, asking the caches: %r", path, origin_error)
             try:
-                response = await client.execute_request(action="info", path=remote_path)
-                resource = WebDavXmlUtils.extract_response_for_path(
-                    content=await response.read(),
-                    path=remote_path,
-                    hostname=options["hostname"],
-                )
-            except RemoteResourceNotFoundError:
+                return await self._info_from_cache(path)
+            except Exception as cache_error:
+                raise origin_error from cache_error
+
+    @_cache_dec
+    async def _info_from_cache(self, path: str) -> dict[str, Any]:
+        return await self._stat(path)
+
+    async def _info_from_origin(self, path: str, list_url: str) -> dict[str, Any]:
+        """
+        Describe `path` from its collections-endpoint url `list_url`. An expiring token is
+        not the origin's fault, so a 401 or 403 then asks once more, with a new token.
+        """
+        try:
+            return await self._stat(list_url)
+        except ResponseError as e:
+            if e.status not in {401, 403} or not self._token_is_expiring():
+                raise
+        logger.debug("Token expiring for %s, asking the collections endpoint again", path)
+        return await self._stat(await self._collections_url(path, "_info"))
+
+    async def _stat(self, path: str) -> dict[str, Any]:
+        """
+        PROPFIND the resource at the full url `path` and describe it in fsspec's info form.
+        """
+        async with self.get_webdav_client(self._webdav_options(path)) as client:
+            try:
+                resource = await client.stat(_webdav_path(path))
+            except NotFoundError:
+                # Not described: a 404, or a multistatus that names other resources. A
+                # reply that is not a multistatus at all is not a miss, and is raised as is.
                 raise FileNotFoundError(path) from None
-            result = WebDavXmlUtils.get_info_from_response(resource)
-            isdir = resource.find(".//{DAV:}resourcetype/{DAV:}collection") is not None
             # Match the names _ls_real gives collections
-            if isdir and not path.endswith("/"):
+            if resource.is_collection and not path.endswith("/"):
                 path += "/"
-            info = {
-                "name": path,
-                "type": "directory" if isdir else "file",
-                "size": int(result.get("size", 0)),
-                "mimetype": result.get("content_type", ""),
-                "mtime": result.get("modified", ""),
-            }
-            return self._remove_host_from_paths(info)
+            return self._remove_host_from_paths(_resource_entry(path, resource))
 
     @_traced
     async def _get(self, rpath: str | list[str], lpath: str | list[str], **kwargs: Any) -> Any:

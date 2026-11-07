@@ -22,15 +22,8 @@ import threading
 import aiohttp
 import fsspec.implementations.http as fshttp
 import pytest
-from aiowebdav2.exceptions import (
-    AccessDeniedError,
-    ConnectionExceptionError,
-    NoConnectionError,
-    RemoteResourceNotFoundError,
-    ResponseErrorCodeError,
-    UnauthorizedError,
-)
 from fsspec.asyn import sync
+from pelican_webdav_client import ForbiddenError, NotFoundError, ResponseError, UnauthorizedError
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
@@ -38,20 +31,23 @@ from pelicanfs.core import MAX_CACHE_ATTEMPTS, PelicanFileSystem, _cache_failure
 from pelicanfs.exceptions import NoAvailableSource
 
 
-def _setup_director(httpserver, second=None, path="/foo/bar"):
+def _setup_director(httpserver, second=None, path="/foo/bar", methods=("GET",)):
     """
-    Register the pelican-configuration and a single director 307 redirect for path.
-    httpserver is the first cache; second, if given, is listed as the next cache.
+    Register the pelican-configuration and a single director 307 redirect for path,
+    for each of methods. httpserver is the first cache; second, if given, is listed as
+    the next cache. The namespace has no collections endpoint, so info(), which asks
+    the director for one by PROPFIND, falls back to the caches.
     """
     caches = [httpserver] if second is None else [httpserver, second]
     urls = [server.url_for(path) for server in caches]
     link = ", ".join(f'<{url}>; rel="duplicate"; pri={i}; depth=1' for i, url in enumerate(urls, 1))
     httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
-    httpserver.expect_oneshot_request(path, method="GET").respond_with_data(
-        "",
-        status=307,
-        headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo"},
-    )
+    for method in methods:
+        httpserver.expect_oneshot_request(path, method=method).respond_with_data(
+            "",
+            status=307,
+            headers={"Link": link, "Location": urls[0], "X-Pelican-Namespace": "namespace=/foo"},
+        )
     return urls[0] if second is None else urls
 
 
@@ -376,7 +372,7 @@ def test_exists_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPS
 
 @pytest.mark.parametrize("status", [500, 503])
 def test_info_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status):
-    _setup_director(httpserver, httpserver2)
+    _setup_director(httpserver, httpserver2, methods=("PROPFIND", "GET"))
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
     httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("", status=status)
     httpserver2.expect_request("/foo/bar", method="PROPFIND").respond_with_data(PROPFIND_RESPONSE, status=207, content_type="application/xml")
@@ -387,9 +383,9 @@ def test_info_retries_on_next_cache(httpserver: HTTPServer, httpserver2: HTTPSer
     _assert_first_cache_evicted(pelfs, httpserver, httpserver2)
 
 
-@pytest.mark.parametrize(("status", "error"), [(401, UnauthorizedError), (403, AccessDeniedError)])
+@pytest.mark.parametrize(("status", "error"), [(401, UnauthorizedError), (403, ForbiddenError)])
 def test_info_auth_failure_keeps_caches(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client, status, error):
-    _setup_director(httpserver, httpserver2)
+    _setup_director(httpserver, httpserver2, methods=("PROPFIND", "GET"))
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("hello")
     httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data("", status=status)
 
@@ -631,8 +627,7 @@ def _response_error(status):
         (_wrapped(connection), connection),
         (refused := ConnectionRefusedError(), refused),
         (too_many := _response_error(429), too_many),
-        (no_connection := NoConnectionError("host"), no_connection),
-        (webdav_server_error := ResponseErrorCodeError("url", 503, "busy"), webdav_server_error),
+        (webdav_server_error := ResponseError("PROPFIND", "url", 503, "busy"), webdav_server_error),
         (server_error := _response_error(500), server_error),
         (_wrapped(server_error), server_error),
         (_wrapped(timeout := TimeoutError()), timeout),
@@ -640,11 +635,10 @@ def _response_error(status):
         (_response_error(400), None),
         (_response_error(401), None),
         (_wrapped(_response_error(403)), None),
-        (ResponseErrorCodeError("url", 400, "bad"), None),
-        (UnauthorizedError("host"), None),
-        (AccessDeniedError("host"), None),
-        (RemoteResourceNotFoundError("/foo/bar"), None),
-        (ConnectionExceptionError(_response_error(403)), None),
+        (ResponseError("PROPFIND", "url", 400, "bad"), None),
+        (UnauthorizedError("PROPFIND", "url", 401), None),
+        (ForbiddenError("PROPFIND", "url", 403), None),
+        (NotFoundError("PROPFIND", "url", 404), None),
         (OSError(errno.ENOSPC, "No space left on device"), None),
         (PermissionError(), None),
         (_wrapped(_response_error(404)), None),
