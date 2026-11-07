@@ -35,7 +35,7 @@ repos:
           - cachetools>=7.2.8,<8
           - fsspec
           - igwn-auth-utils
-          - pelican-webdav-client>=0.1.1,<1
+          - pelican-webdav-client>=0.1.2,<1
           - scitokens
           - types-cachetools
 -   repo: https://github.com/zizmorcore/zizmor-pre-commit

@@ -42,7 +42,7 @@ from fsspec.asyn import AsyncFileSystem, sync
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.mapping import FSMap
 from fsspec.utils import glob_translate
-from pelican_webdav_client import Client, InvalidResponseError, MethodNotAllowedError, NotFoundError, Resource, ResponseError
+from pelican_webdav_client import Client, InvalidResponseError, MethodNotAllowedError, NotFoundError, Resource, ResponseError, trace_config
 
 from .dir_header_parser import (
     DirectorResponse,
@@ -295,12 +295,13 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     how the test suite points a client at its own CA.
 
     The client reads or releases every response before its methods return, so nothing is
-    left holding a connection between calls.
+    left holding a connection between calls. The session carries the client's trace config,
+    so a call also waits for the connections of the redirect hops aiohttp follows.
     """
     # The client leaves a session it is given to its owner, so the session, which carries
     # the trace configs, is closed here
     async with (
-        aiohttp.ClientSession(trace_configs=[_log_requests(), *options.get("trace_configs", ())]) as session,
+        aiohttp.ClientSession(trace_configs=[_log_requests(), trace_config(), *options.get("trace_configs", ())]) as session,
         Client(options["hostname"], token=options["token"], ssl=options.get("verify_ssl", True), session=session) as client,
     ):
         yield client

@@ -258,8 +258,8 @@ def fixture_get_webdav_client(httpclient_ssl_context):
     object or a collection, or what a collection contains.
 
     This deliberately delegates to the production get_webdav_client, pointed at the test
-    authority, so that the tests exercise the real client setup - including the release
-    of the responses it produces - instead of a copy of it that can drift.
+    authority, so that the tests exercise the real client setup - including the trace
+    configs its session carries - instead of a copy of it that can drift.
     """
 
     @asynccontextmanager

@@ -209,7 +209,7 @@ def webdav_options(httpserver, httpclient_ssl_context):
     }
 
 
-async def check_through_webdav_client(httpserver, httpclient_ssl_context):
+async def exists_through_webdav_client(httpserver, httpclient_ssl_context):
     async with pelicanfs.core.get_webdav_client(webdav_options(httpserver, httpclient_ssl_context)) as client:
         return await client.exists("/foo/bar")
 
@@ -222,7 +222,7 @@ def test_webdav_client_releases_the_response(httpserver: HTTPServer, httpclient_
     expect_propfind(httpserver, status=207)
 
     with connections_finalised_for(httpserver) as (finalised, leaked):
-        assert run_async(check_through_webdav_client(httpserver, httpclient_ssl_context)) is True
+        assert run_async(exists_through_webdav_client(httpserver, httpclient_ssl_context)) is True
 
     assert finalised, "no connection to the test server was finalised, so this observed nothing"
     assert leaked == [], "the response was not released, so its connection leaked"
@@ -236,7 +236,7 @@ def test_webdav_client_releases_the_response_on_an_error_status(httpserver: HTTP
     expect_propfind(httpserver, status=404)
 
     with connections_finalised_for(httpserver) as (finalised, leaked):
-        assert run_async(check_through_webdav_client(httpserver, httpclient_ssl_context)) is False
+        assert run_async(exists_through_webdav_client(httpserver, httpclient_ssl_context)) is False
 
     assert finalised, "no connection to the test server was finalised, so this observed nothing"
     assert leaked == [], "the response was not released, so its connection leaked"

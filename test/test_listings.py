@@ -48,37 +48,6 @@ def test_no_collections_url(httpserver: HTTPServer, get_client):
         pelfs.ls("/foo/bar")
 
 
-def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
-    foo_bar_url = httpserver.url_for("foo/bar")
-
-    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
-    httpserver.expect_oneshot_request("/foo/bar").respond_with_data(
-        "",
-        status=307,
-        headers={
-            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
-            "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
-        },
-    )
-
-    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(top_listing_response, status=207)
-
-    pelfs = pelicanfs.core.PelicanFileSystem(
-        httpserver.url_for("/"),
-        get_client=get_client,
-        skip_instance_cache=True,
-        get_webdav_client=get_webdav_client,
-    )
-
-    assert pelfs.ls("/foo/bar", detail=False) == [
-        "/foo/bar/file1.txt",
-        "/foo/bar/file2.md",
-        "/foo/bar/file3.txt",
-        "/foo/bar/folder1/",
-        "/foo/bar/folder2/",
-    ]
-
-
 def _listing_filesystem(httpserver: HTTPServer, get_client, get_webdav_client, listing):
     """A filesystem whose namespace /foo has its collections endpoint on httpserver, listing /foo/bar as listing."""
     foo_bar_url = httpserver.url_for("foo/bar")
@@ -93,6 +62,18 @@ def _listing_filesystem(httpserver: HTTPServer, get_client, get_webdav_client, l
     )
     httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing, status=207)
     return pelicanfs.core.PelicanFileSystem(httpserver.url_for("/"), get_client=get_client, skip_instance_cache=True, get_webdav_client=get_webdav_client)
+
+
+def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
+
+    assert pelfs.ls("/foo/bar", detail=False) == [
+        "/foo/bar/file1.txt",
+        "/foo/bar/file2.md",
+        "/foo/bar/file3.txt",
+        "/foo/bar/folder1/",
+        "/foo/bar/folder2/",
+    ]
 
 
 def _listing_of(href):
