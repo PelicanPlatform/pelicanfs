@@ -29,12 +29,13 @@ from pelicanfs.token_generator import TokenGenerator, TokenInfo
 # A hook cannot be removed, so this one stays installed and does nothing between tests.
 _events: list[tuple[str, tuple]] | None = None
 _veto: str | None = None
+_veto_path: str | None = None
 
 
 def _hook(event, args):
     if _events is not None and event.startswith("pelicanfs."):
         _events.append((event, args))
-        if event == _veto:
+        if event == _veto and (_veto_path is None or args[0] == _veto_path):
             raise PermissionError(event)
 
 
@@ -43,11 +44,12 @@ sys.addaudithook(_hook)
 
 @pytest.fixture(name="events")
 def fixture_events():
-    global _events, _veto  # noqa: PLW0603
+    global _events, _veto, _veto_path  # noqa: PLW0603
     _events = []
     yield _events
     _events = None
     _veto = None
+    _veto_path = None
 
 
 @pytest.fixture(name="generated_token")
@@ -110,7 +112,7 @@ def test_read_events(federation, httpserver: HTTPServer, httpserver2: HTTPServer
 
     assert events[:3] == [
         ("pelicanfs.discover", (httpserver.url_for("/.well-known/pelican-configuration"),)),
-        ("pelicanfs.token.use", (cache_url, "TokenRead")),
+        ("pelicanfs.token.prepare", (cache_url, "TokenRead")),
         ("pelicanfs.token.acquire", (cache_url, "TokenRead")),
     ]
     assert ("pelicanfs.read", ("/foo/bar", cache_url)) in events
@@ -221,3 +223,117 @@ def test_veto_stops_token_acquire(federation, monkeypatch, events):
         federation.cat("/foo/bar")
 
     assert events[-1][0] == "pelicanfs.token.acquire"
+
+
+@pytest.mark.usefixtures("generated_token")
+@pytest.mark.parametrize("event", ["pelicanfs.discover", "pelicanfs.token.prepare", "pelicanfs.token.acquire"])
+def test_veto_stops_cache_warming(federation, events, event):
+    global _veto  # noqa: PLW0603
+    _veto = event
+
+    with pytest.raises(PermissionError, match=event):
+        sync(federation.loop, federation._warm_namespace_cache, "/foo/bar")
+
+
+@pytest.mark.usefixtures("generated_token")
+@pytest.mark.parametrize("on_error", ["omit", "return"])
+def test_cat_cannot_suppress_veto(federation, events, on_error):
+    global _veto  # noqa: PLW0603
+    _veto = "pelicanfs.read"
+
+    with pytest.raises(PermissionError, match=r"pelicanfs\.read"):
+        federation.cat(["/foo/bar"], on_error=on_error)
+
+
+@pytest.fixture(name="tree")
+def fixture_tree(make_fs, monkeypatch):
+    fs = make_fs()
+    listed = []
+
+    async def resolve(path):
+        return f"https://collections.example{path}", None
+
+    async def listing(url, detail=True, client=None):
+        listed.append(url)
+        if url.endswith("/root"):
+            return [{"name": f"{url}/{name}/", "type": "directory", "size": 0} for name in ["blocked", "allowed"]]
+        return []
+
+    monkeypatch.setattr(fs, "get_dirlist_url", resolve)
+    monkeypatch.setattr(fs, "_ls_real", listing)
+    return fs, listed
+
+
+@pytest.mark.parametrize("method", ["walk", "fastwalk", "find", "du"])
+def test_list_veto_stops_recursion(tree, events, method):
+    global _veto, _veto_path  # noqa: PLW0603
+    _veto = "pelicanfs.list"
+    _veto_path = "/root/blocked"
+    fs, listed = tree
+
+    def run():
+        result = getattr(fs, method)("/root")
+        if method in {"walk", "fastwalk"}:
+            list(result)
+
+    with pytest.raises(PermissionError, match=r"pelicanfs\.list"):
+        run()
+
+    assert listed == ["https://collections.example/root"]
+
+
+@pytest.mark.parametrize("method", ["walk", "fastwalk", "find"])
+def test_one_list_event_per_directory(tree, events, method):
+    fs, _listed = tree
+    result = getattr(fs, method)("/root")
+    if method in {"walk", "fastwalk"}:
+        list(result)
+
+    assert [args[0] for event, args in events if event == "pelicanfs.list"] == ["/root", "/root/blocked", "/root/allowed"]
+
+
+@pytest.mark.parametrize("method", ["walk", "fastwalk", "find"])
+def test_walk_can_still_omit_filesystem_errors(tree, monkeypatch, method):
+    fs, listed = tree
+    listing = fs._ls_real
+
+    async def missing_child(url, **kwargs):
+        if url.endswith("/blocked"):
+            msg = "server denied access"
+            raise PermissionError(msg)
+        return await listing(url, **kwargs)
+
+    monkeypatch.setattr(fs, "_ls_real", missing_child)
+    result = getattr(fs, method)("/root")
+    if method in {"walk", "fastwalk"}:
+        list(result)
+
+    assert listed == ["https://collections.example/root", "https://collections.example/root/allowed"]
+
+
+def test_audited_walk_preserves_bottom_up_order(tree, events):
+    fs, _listed = tree
+
+    assert [path for path, _dirs, _files in fs.walk("/root", topdown=False)] == ["/root/blocked", "/root/allowed", "/root"]
+
+
+@pytest.mark.usefixtures("generated_token")
+def test_veto_does_not_affect_next_operation(federation, events):
+    async def run():
+        global _veto  # noqa: PLW0603
+        _veto = "pelicanfs.read"
+        with pytest.raises(PermissionError):
+            await federation._cat("/foo/bar")
+        _veto = None
+        assert await federation._cat("/foo/bar") == b"hello, world!"
+
+    sync(federation.loop, run)
+
+
+@pytest.mark.usefixtures("generated_token")
+def test_read_event_covers_open_file(federation, events):
+    with federation.open("/foo/bar", "rb") as fp:
+        assert fp.read(5) == b"hello"
+        assert fp.read() == b", world!"
+
+    assert len([event for event, _ in events if event == "pelicanfs.read"]) == 1
