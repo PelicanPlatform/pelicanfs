@@ -56,6 +56,7 @@ from .exceptions import (
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
+    NoCredentialsException,
 )
 from .log_utils import TRACE, TokenForLog, log_operation, redact_exception, redact_query, trace
 from .token_generator import TokenGenerator, TokenOperation, _is_path_prefix
@@ -732,6 +733,10 @@ class PelicanFileSystem(AsyncFileSystem):
 
         Returns:
             str: The generated token or None if no token is required
+
+        Raises:
+            NoCredentialsException (or another PelicanException) if a token is required
+            but cannot be obtained.
         """
         if not director_response or not director_response.x_pel_ns_hdr:
             return None
@@ -758,52 +763,46 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Using existing token from headers for %s", url)
             return existing_token
 
-        # Outside the try, which would swallow a hook's veto
         _audit("pelicanfs.token.acquire", _audit_url(url), operation.name)
-        try:
-            # Ensure director URL is set (for token generation validation)
-            await self._set_director_url()
+        # Ensure director URL is set (for token generation validation)
+        await self._set_director_url()
 
-            # Construct pelican:// URL for OIDC device flow
-            pelican_url = None
-            if self.discovery_url and url:
-                # Extract federation host from discovery URL
-                parsed_discovery = urllib.parse.urlparse(self.discovery_url)
-                federation_host = parsed_discovery.netloc
+        # Construct pelican:// URL for OIDC device flow
+        pelican_url = None
+        if self.discovery_url and url:
+            # Extract federation host from discovery URL
+            parsed_discovery = urllib.parse.urlparse(self.discovery_url)
+            federation_host = parsed_discovery.netloc
 
-                # Extract path from the data URL
-                parsed_url = urllib.parse.urlparse(url)
-                path = parsed_url.path
+            # Extract path from the data URL
+            parsed_url = urllib.parse.urlparse(url)
+            path = parsed_url.path
 
-                # Construct pelican://<federation-host>/<path>
-                pelican_url = f"pelican://{federation_host}{path}"
-                logger.debug("Constructed pelican URL for token generation: %s", pelican_url)
+            # Construct pelican://<federation-host>/<path>
+            pelican_url = f"pelican://{federation_host}{path}"
+            logger.debug("Constructed pelican URL for token generation: %s", pelican_url)
 
-            # Create token generator with OIDC configuration
-            token_generator = TokenGenerator(
-                destination_url=url,
-                dir_resp=director_response,
-                operation=operation,
-                pelican_url=pelican_url,
-                oidc_timeout_seconds=self.oidc_timeout_seconds,
-                pty_buffer_size=self.pty_buffer_size,
-                select_timeout=self.select_timeout,
-            )
+        # Create token generator with OIDC configuration
+        token_generator = TokenGenerator(
+            destination_url=url,
+            dir_resp=director_response,
+            operation=operation,
+            pelican_url=pelican_url,
+            oidc_timeout_seconds=self.oidc_timeout_seconds,
+            pty_buffer_size=self.pty_buffer_size,
+            select_timeout=self.select_timeout,
+        )
 
-            # Get token (TokenContentIterator will automatically discover token location)
-            token = token_generator.get_token()
-            trace(logger, "generated token=%s", TokenForLog(token))
-            if token:
-                self.token = f"Bearer {token}"
-                # Remember when it expires so the check above can retire it in time
-                self._token_expiry = token_generator.token.Expiry if token_generator.token else None
-            else:
-                logger.warning("token_generator.get_token returned falsy value: %r", token)
-            return token
-        except Exception as e:
-            logger.warning("Failed to generate token for %s: %s", url, _error_text(e))
-            trace(logger, "token generation failed", exc_info=True)
-            return None
+        # Get token (TokenContentIterator will automatically discover token location)
+        token = token_generator.get_token()
+        trace(logger, "generated token=%s", TokenForLog(token))
+        if token:
+            self.token = f"Bearer {token}"
+            # Remember when it expires so the check above can retire it in time
+            self._token_expiry = token_generator.token.Expiry if token_generator.token else None
+        else:
+            logger.warning("token_generator.get_token returned falsy value: %r", token)
+        return token
 
     def get_access_data(self) -> _AccessStats:
         """
@@ -1924,6 +1923,8 @@ class PelicanFileSystem(AsyncFileSystem):
         with _audit_errors():
             try:
                 await self.get_working_cache(first)
+            except NoCredentialsException:
+                raise
             except Exception as e:
                 # Still best effort, but worth saying out loud: if warming fails
                 # systematically, every object goes back to the director on its own --

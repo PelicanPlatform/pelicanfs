@@ -270,10 +270,12 @@ def test_failed_regeneration_sends_no_stale_token(federation, httpserver2, monke
 
     monkeypatch.setattr(TokenGenerator, "get_token", fail)
     pelfs._token_expiry = datetime.now(UTC) - timedelta(hours=1)
+    sent = len(requests_to(httpserver2, "GET"))
 
-    pelfs.cat_file("/foo/bar")
+    with pytest.raises(RuntimeError, match="no token"):
+        pelfs.cat_file("/foo/bar")
 
-    assert requests_to(httpserver2, "GET")[-1].headers.get("Authorization") is None
+    assert len(requests_to(httpserver2, "GET")) == sent
 
 
 @pytest.mark.usefixtures("generated_token")
