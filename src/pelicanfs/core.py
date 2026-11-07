@@ -300,19 +300,22 @@ async def get_webdav_client(options: Mapping[str, Any]) -> AsyncIterator[Client]
     """
     # The client leaves a session it is given to its owner, so the session, which carries
     # the trace configs, is closed here
-    async with (
-        aiohttp.ClientSession(trace_configs=[_log_requests(), trace_config(), *options.get("trace_configs", ())]) as session,
-        Client(options["hostname"], token=options["token"], ssl=options.get("verify_ssl", True), session=session) as client,
-    ):
-        yield client
-    logger.debug("WebDAV client closed")
+    try:
+        async with (
+            aiohttp.ClientSession(trace_configs=[_log_requests(), trace_config(), *options.get("trace_configs", ())]) as session,
+            Client(options["hostname"], token=options["token"], ssl=options.get("verify_ssl", True), session=session) as client,
+        ):
+            yield client
+    finally:
+        logger.debug("WebDAV client closed")
 
 
 def _webdav_path(url: str) -> str:
     """
     The decoded path of `url`. The WebDAV client encodes paths itself and takes "%" literally.
+    urlsplit keeps a ";" in the last segment, which urlparse would split off.
     """
-    return urllib.parse.unquote(urllib.parse.urlparse(url).path)
+    return urllib.parse.unquote(urllib.parse.urlsplit(url).path)
 
 
 def _listed_path(resource: Resource) -> str:
@@ -339,7 +342,8 @@ def _resource_entry(name: str, resource: Resource) -> dict[str, Any]:
     """
     Describe `resource` in fsspec's info form, under `name`, for both ls() and info().
     The modification time is given in the forms each has always used: "modified" a naive
-    UTC datetime, "mtime" the getlastmodified string.
+    UTC datetime, "mtime" an RFC 1123 GMT string. "mtime" is rendered from the parsed
+    getlastmodified, so a server sending another format still gets RFC 1123 back.
     """
     modified, mtime = None, ""
     if resource.modified:
@@ -1003,8 +1007,9 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         logger.debug("Finding the collections endpoint for %s...", fileloc)
 
-        # Check for cached namespace info (similar to get_working_cache)
-        fparsed = urllib.parse.urlparse(fileloc)
+        # Check for cached namespace info (similar to get_working_cache). urlsplit keeps a
+        # ";" in the last segment, which urlparse would split off.
+        fparsed = urllib.parse.urlsplit(fileloc)
         namespace_info = self._get_prefix_info(fparsed.path)
 
         if namespace_info and namespace_info.cache_manager.director_response:
@@ -1794,6 +1799,7 @@ class PelicanFileSystem(AsyncFileSystem):
         with self._transfers.cache_active(cache):
             return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
 
+    @_traced
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
         """
         Describe the object or collection at `path`.
@@ -1811,7 +1817,7 @@ class PelicanFileSystem(AsyncFileSystem):
         except NoCollectionsUrl:
             return await self._info_from_cache(path)
         try:
-            return await self._stat(list_url)
+            return await self._info_from_origin(path, list_url)
         except Exception as origin_error:
             if _cache_failure(origin_error) is None:
                 raise
@@ -1825,6 +1831,19 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _info_from_cache(self, path: str) -> dict[str, Any]:
         return await self._stat(path)
 
+    async def _info_from_origin(self, path: str, list_url: str) -> dict[str, Any]:
+        """
+        Describe `path` from its collections-endpoint url `list_url`. An expiring token is
+        not the origin's fault, so a 401 or 403 then asks once more, with a new token.
+        """
+        try:
+            return await self._stat(list_url)
+        except ResponseError as e:
+            if e.status not in {401, 403} or not self._token_is_expiring():
+                raise
+        logger.debug("Token expiring for %s, asking the collections endpoint again", path)
+        return await self._stat(await self._collections_url(path, "_info"))
+
     async def _stat(self, path: str) -> dict[str, Any]:
         """
         PROPFIND the resource at the full url `path` and describe it in fsspec's info form.
@@ -1832,9 +1851,9 @@ class PelicanFileSystem(AsyncFileSystem):
         async with self.get_webdav_client(self._webdav_options(path)) as client:
             try:
                 resource = await client.stat(_webdav_path(path))
-            except (NotFoundError, InvalidResponseError):
-                # Not described: a 404, a multistatus that names other resources, or a
-                # reply that is not a multistatus at all
+            except NotFoundError:
+                # Not described: a 404, or a multistatus that names other resources. A
+                # reply that is not a multistatus at all is not a miss, and is raised as is.
                 raise FileNotFoundError(path) from None
             # Match the names _ls_real gives collections
             if resource.is_collection and not path.endswith("/"):

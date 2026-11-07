@@ -20,7 +20,7 @@ from datetime import datetime
 
 import aiohttp
 import pytest
-from pelican_webdav_client import ResponseError
+from pelican_webdav_client import InvalidResponseError, ResponseError
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
@@ -161,6 +161,34 @@ def test_info_unreachable_director_is_reported_once(httpserver: HTTPServer, get_
     with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"), pytest.raises(aiohttp.ClientConnectorError):
         _filesystem(httpserver, get_client, get_webdav_client).info("/foo/bar")
     assert "asking the caches" not in caplog.text
+
+
+def test_info_reply_that_is_not_a_multistatus_is_not_a_miss(httpserver: HTTPServer, httpserver2: HTTPServer, get_client, get_webdav_client):
+    """A success that is not a multistatus says nothing about the path, so info() does not report it missing."""
+    _setup_director(httpserver, collections_url=httpserver2.url_for("/"))
+    httpserver2.expect_request("/foo/bar", method="PROPFIND").respond_with_data("<html>not a multistatus</html>", status=200)
+
+    with pytest.raises(InvalidResponseError):
+        _filesystem(httpserver, get_client, get_webdav_client).info("/foo/bar")
+
+
+def test_info_semicolon_in_name(httpserver: HTTPServer, get_client, get_webdav_client):
+    """A ";" in the last segment is part of the name, not the start of URL parameters."""
+    _setup_director(httpserver, "/foo/a;b", collections_url=httpserver.url_for("/"))
+    httpserver.expect_request("/foo/a;b", method="PROPFIND").respond_with_data(_multistatus("/foo/a%3Bb"), status=207, content_type="application/xml")
+
+    assert _filesystem(httpserver, get_client, get_webdav_client).info("/foo/a;b")["size"] == 13
+
+
+def test_info_is_logged_as_an_operation(httpserver: HTTPServer, get_client, get_webdav_client, caplog):
+    """info() logs its start and finish under its own name, as other operations do."""
+    _setup_director(httpserver, collections_url=httpserver.url_for("/foo/bar"))
+    httpserver.expect_request("/foo/bar", method="PROPFIND").respond_with_data(_multistatus("/foo/bar"), status=207, content_type="application/xml")
+
+    with caplog.at_level(logging.DEBUG, logger="fsspec.pelican"):
+        _filesystem(httpserver, get_client, get_webdav_client).info("/foo/bar")
+    assert "Start _info /foo/bar" in caplog.text
+    assert "_info finished in" in caplog.text
 
 
 def test_du(
