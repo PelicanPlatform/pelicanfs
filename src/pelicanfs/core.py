@@ -1620,7 +1620,21 @@ class PelicanFileSystem(AsyncFileSystem):
 
     @_traced
     @_counted_operation
-    async def _put_file(self, lpath: str, rpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
+    async def _put_file(self, lpath: str, rpath: str, callback: Callback = DEFAULT_CALLBACK, mode: str = "overwrite", **kwargs: Any) -> None:
+        """
+        Upload a local file as an object.
+
+        Pelican objects are immutable: the Origin refuses to replace an object that
+        already exists, whatever ``mode`` says. fsspec's ``mode="create"`` (exclusive
+        create) therefore describes what every upload does and is accepted. fsspec's
+        default ``mode="overwrite"`` is accepted for compatibility but does not
+        overwrite. In both modes an upload to an existing name raises FileExistsError,
+        matching fsspec's contract for ``create``.
+        """
+        if mode not in ("overwrite", "create"):
+            msg = f"Unsupported put mode {mode!r}; expected 'overwrite' or 'create'"
+            raise ValueError(msg)
+
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
         _audit("pelicanfs.write", _audit_url(path), _audit_url(data_url))
@@ -1631,13 +1645,33 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Running put_file from %s to %s...", lpath, data_url)
 
         async def upload_file() -> None:
-            await self.http_file_system._put_file(lpath, data_url, method="put", callback=_ByteCounter(callback, self._transfers.add_written), **kwargs)
+            # The http filesystem only knows "overwrite"; the exclusive-create
+            # semantics come from the Origin, not from the request.
+            await self.http_file_system._put_file(lpath, data_url, method="put", mode="overwrite", callback=_ByteCounter(callback, self._transfers.add_written), **kwargs)
 
         try:
             await asyncio.create_task(upload_file())
         except Exception as e:
             redact_exception(e)
+            # The Origin answers 403 both for an object that already exists and for a
+            # token without permission. Only an object that is really there turns the
+            # refusal into FileExistsError; any other outcome keeps the original error.
+            if isinstance(e, aiohttp.ClientResponseError) and e.status == 403 and await self._object_exists_after_refusal(path):
+                raise FileExistsError(redact_query(path)) from e
             raise
+
+    async def _object_exists_after_refusal(self, path: str) -> bool:
+        """
+        Best-effort existence check used only to explain a refused upload.
+
+        A failure here must not hide the refusal itself, so every error is treated as
+        "unknown" and reported as False.
+        """
+        try:
+            return bool(await self._exists(path))
+        except Exception as probe_error:
+            logger.debug("Could not check whether %s exists after a refused upload: %s", path, probe_error)
+            return False
 
     @_traced
     async def _put(self, lpath: str | list[str], rpath: str | list[str], *args: Any, **kwargs: Any) -> Any:
