@@ -31,7 +31,9 @@ limitations under the License.
 # here is what makes `httpserver` an https server the test clients can talk to.
 #
 import asyncio
+import asyncio.proactor_events
 import ssl
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -44,6 +46,29 @@ from pytest_httpserver import HTTPServer
 import pelicanfs.core
 
 RESOURCES = Path(__file__).parent / "resources"
+
+# Fixed upstream in 3.14.11 and 3.15.3, and not backported to older versions.
+if sys.version_info < (3, 14, 11) or (3, 15) <= sys.version_info < (3, 15, 3):
+    proactor_connection_lost = asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost
+
+    def close_after_failed_shutdown(self, exc):
+        """
+        Close the socket if the proactor could not shut it down.
+
+        `_call_connection_lost` calls `shutdown()` and then `close()`. `shutdown()` raises on
+        a connection that the peer reset, so the socket stays open and raises ResourceWarning
+        at garbage collection on Windows. https://github.com/python/cpython/issues/160429
+
+        Remove this when Windows CI only tests Python versions with that fix.
+        """
+        try:
+            proactor_connection_lost(self, exc)
+        except ConnectionError:
+            self._sock.close()
+            self._sock = None
+            self._called_connection_lost = True
+
+    asyncio.proactor_events._ProactorBasePipeTransport._call_connection_lost = close_after_failed_shutdown
 
 
 @pytest.fixture(scope="session", name="ca")
