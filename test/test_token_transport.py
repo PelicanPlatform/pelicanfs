@@ -22,7 +22,8 @@ from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
-from fsspec.asyn import get_loop, sync
+from fsspec.asyn import AsyncFileSystem, get_loop, sync
+from fsspec.implementations.http import HTTPFileSystem
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers import Response
 
@@ -209,6 +210,7 @@ def test_open_with_per_call_headers(federation, httpserver2):
     assert request.headers.get("X-Foo") == "1"
 
 
+@pytest.mark.skipif(HTTPFileSystem._pipe_file is AsyncFileSystem._pipe_file, reason="HTTP pipe_file needs fsspec>=2025.3.0")
 @pytest.mark.usefixtures("generated_token")
 def test_pipe_file_after_read_sends_token(federation, httpserver2):
     pelfs = federation()
