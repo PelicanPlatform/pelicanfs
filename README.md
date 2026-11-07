@@ -39,6 +39,7 @@
 - [Monitoring and Debugging](#monitoring-and-debugging)
   - [Access Statistics](#access-statistics)
   - [Transfer Statistics](#transfer-statistics)
+  - [Audit Events](#audit-events)
   - [Enabling Debug Logging](#enabling-debug-logging)
 - [API Reference](#api-reference)
   - [PelicanFileSystem](#pelicanfilesystem)
@@ -696,6 +697,39 @@ An operation is one `cat_file`, `get_file`, `put_file`, or `read` call on an ope
 - `cache_read_rates` divides `cache_bytes_read` by `cache_busy_seconds`. A cache that only failed has a rate of `0.0`.
 - For open files, `bytes_read` counts the bytes given to the caller, not the bytes fsspec fetched for its read-ahead cache.
 - Totals are per process. Each Dask worker keeps its own.
+
+### Audit Events
+
+PelicanFS raises [`sys.audit`](https://docs.python.org/3/library/sys.html#sys.audit) events, which a hook from `sys.addaudithook` can record. Each event occurs before its operation, and a hook can stop the operation with an exception. Hook exceptions propagate even when a walk or bulk read is configured to omit errors.
+
+| Event | Arguments | Occurs before |
+| --- | --- | --- |
+| `pelicanfs.discover` | `url` | A request for federation metadata |
+| `pelicanfs.read` | `path`, `url` | An access attempt at a selected Cache or Origin: read, open, info, or exists |
+| `pelicanfs.write` | `path`, `url` | An upload to an Origin |
+| `pelicanfs.list` | `path`, `url` | A listing or collection check at a collections endpoint |
+| `pelicanfs.token.prepare` | `url`, `operation` | Authentication preparation for a namespace that requires a token |
+| `pelicanfs.token.acquire` | `url`, `operation` | A search for a token, which can start the OIDC device flow |
+
+Arguments do not contain tokens: PelicanFS removes the query string and credentials from paths and URLs. `url` is the resolved URL and `operation` is a `TokenOperation` name such as `TokenRead`. Python's own events cover local token files (`open`) and the `pelican` binary (`subprocess.Popen`).
+
+`pelicanfs.read` occurs once per selected-endpoint attempt, including retries at another Cache. Opening a file raises this event; subsequent reads from that open file do not, unless they switch Caches. It is not an event for each HTTP request.
+
+`pelicanfs.token.prepare` can occur before a token is available. It does not report each request that carries credentials, including WebDAV requests and caller-supplied headers.
+
+To find a Cache, PelicanFS sends a `HEAD` request before `pelicanfs.read` occurs, and this request can carry a token. To control the hosts that receive a request, use the `socket.connect` event. Audit hooks are not a sandbox.
+
+```python
+import sys
+
+
+def audit(event, args):
+    if event.startswith("pelicanfs."):
+        print(event, args)
+
+
+sys.addaudithook(audit)
+```
 
 ### Enabling Debug Logging
 

@@ -20,12 +20,13 @@ import functools
 import inspect
 import logging
 import re
+import sys
 import threading
 import time
 import urllib.parse
 import weakref
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Generator, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, contextmanager
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -86,6 +87,54 @@ TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
 # call and skip it rather than raising. A ContextVar rather than an instance attribute so that
 # concurrent puts on a shared filesystem cannot see each other's state.
 _put_in_progress: contextvars.ContextVar[bool] = contextvars.ContextVar("pelicanfs_put_in_progress", default=False)
+_audit_veto: contextvars.ContextVar[list[Exception] | None] = contextvars.ContextVar("pelicanfs_audit_veto", default=None)
+
+
+@contextmanager
+def _audit_errors() -> Iterator[None]:
+    """Preserve audit exceptions across error handling in fsspec and bulk operations."""
+    errors = _audit_veto.get()
+    if errors is None:
+        errors = []
+    token = _audit_veto.set(errors)
+    try:
+        if errors:
+            raise errors[0]
+        yield
+    finally:
+        _audit_veto.reset(token)
+        if errors:
+            raise errors[0]
+
+
+def _audit(event: str, *args: object) -> None:
+    errors = _audit_veto.get()
+    if errors:
+        raise errors[0]
+    try:
+        sys.audit(event, *args)
+    except Exception as error:
+        if errors is not None:
+            errors.append(error)
+        raise
+
+
+def _audit_generator(func: Callable[..., AsyncGenerator[T, None]]) -> Callable[..., AsyncGenerator[T, None]]:
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> AsyncGenerator[T, None]:
+        iterator = func(*args, **kwargs)
+        try:
+            while True:
+                try:
+                    with _audit_errors():
+                        item = await anext(iterator)
+                except StopAsyncIteration:
+                    return
+                yield item
+        finally:
+            await iterator.aclose()
+
+    return wrapper
 
 
 @dataclass
@@ -367,7 +416,7 @@ def _traced(func: Callable[..., Awaitable[T]]) -> Callable[..., Coroutine[Any, A
     @functools.wraps(func)
     async def wrapper(self: "PelicanFileSystem", *args: Any, **kwargs: Any) -> T:
         target, rest = split_path_arg(args, kwargs)
-        with log_operation(func.__name__, target):
+        with _audit_errors(), log_operation(func.__name__, target):
             return await func(self, target, *rest, **kwargs)
 
     return wrapper
@@ -459,6 +508,12 @@ def _url_origin(url: object) -> tuple[str, str | None, int | None]:
     return parts.scheme, parts.hostname, parts.port or {"http": 80, "https": 443}.get(parts.scheme)
 
 
+def _audit_url(url: str) -> str:
+    """Remove the query and credentials from a path or URL. A query can carry an authz token."""
+    parts = urllib.parse.urlsplit(url)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
+
+
 class PelicanFileSystem(AsyncFileSystem):
     """
     Access a pelican namespace as if it were a file system.
@@ -542,6 +597,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Overwrite the httpsfs _ls_real call with ours with ours
         self.http_file_system._ls_real = self._ls_real
         self.http_file_system._ls = self._ls_from_http
+        self.http_file_system._walk = _audit_generator(self.http_file_system._walk)
 
     # Note this is a class method because it's overwriting a class method for the AbstractFileSystem
     @overload
@@ -716,6 +772,7 @@ class PelicanFileSystem(AsyncFileSystem):
         if not director_response.x_pel_ns_hdr.require_token:
             return None
 
+        _audit("pelicanfs.token.prepare", _audit_url(url), operation.name)
         self._token_origins.add(_url_origin(url))
 
         # A token we generated earlier is only good until it expires; once it has, or is
@@ -734,6 +791,8 @@ class PelicanFileSystem(AsyncFileSystem):
             logger.debug("Using existing token from headers for %s", url)
             return existing_token
 
+        # Outside the try, which would swallow a hook's veto
+        _audit("pelicanfs.token.acquire", _audit_url(url), operation.name)
         try:
             # Ensure director URL is set (for token generation validation)
             await self._set_director_url()
@@ -800,6 +859,7 @@ class PelicanFileSystem(AsyncFileSystem):
         logger.debug("Running federation discovery...")
         discovery_url = urllib.parse.urlparse(disc_url)
         discovery_url = discovery_url._replace(scheme="https", path="/.well-known/pelican-configuration")
+        _audit("pelicanfs.discover", _audit_url(discovery_url.geturl()))
         session = await self.http_file_system.set_session()
         async with session.get(discovery_url.geturl()) as resp:
             if resp.status != 200:
@@ -1111,6 +1171,7 @@ class PelicanFileSystem(AsyncFileSystem):
             raw_path, rest = split_path_arg(args, kwargs)
             path = self._check_fspath(raw_path)
             data_url, director_response = await self.get_dirlist_url(path)
+            _audit("pelicanfs.list", _audit_url(path), _audit_url(data_url))
 
             # Handle token generation if required
             operation = self._get_token_operation(func.__name__)
@@ -1149,6 +1210,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         # Get the collections URL for this path
         collections_url, director_response = await self.get_dirlist_url(path)
+        _audit("pelicanfs.list", _audit_url(path), _audit_url(collections_url))
 
         # Handle token generation if required
         operation = self._get_token_operation("_ls")
@@ -1235,6 +1297,7 @@ class PelicanFileSystem(AsyncFileSystem):
             # so nothing in it is usefully a collection
             return False
 
+        _audit("pelicanfs.list", _audit_url(path), _audit_url(list_url))
         operation = self._get_token_operation("_is_collection")
         await self._handle_token_generation(list_url, director_response, operation)
 
@@ -1257,9 +1320,15 @@ class PelicanFileSystem(AsyncFileSystem):
                     raise
                 return False
 
-    @_dirlist_dec
+    @_traced
     async def _find(self, path: str, maxdepth: int | None = None, withdirs: bool = False, **kwargs: Any) -> Any:
-        results = await self.http_file_system._find(path, maxdepth, withdirs, **kwargs)
+        path = self._check_fspath(path)
+        data_url, director_response = await self.get_dirlist_url(path)
+        if withdirs:
+            # fsspec checks the root's type before it starts the walk.
+            _audit("pelicanfs.list", _audit_url(path), _audit_url(data_url))
+        await self._handle_token_generation(data_url, director_response, self._get_token_operation("_find"))
+        results = await self.http_file_system._find(data_url, maxdepth, withdirs, **kwargs)
         return self._remove_host_from_paths(results)
 
     @_traced
@@ -1361,6 +1430,20 @@ class PelicanFileSystem(AsyncFileSystem):
                     self._remove_host_from_paths(files, inplace=True),
                 )
 
+    def walk(self, path: str, maxdepth: int | None = None, topdown: bool = True, on_error: str | Callable[[OSError], None] = "omit", **kwargs: Any) -> Generator[Any, None, None]:
+        """Preserve hook exceptions in fsspec's synchronous walker."""
+        iterator = super().walk(path, maxdepth=maxdepth, topdown=topdown, on_error=cast("Any", on_error), **kwargs)
+        try:
+            while True:
+                try:
+                    with _audit_errors():
+                        item = next(iterator)
+                except StopIteration:
+                    return
+                yield item
+        finally:
+            iterator.close()
+
     fastwalk = sync_generator(_walk)
 
     def _next_cache_after_failure(self, path: str, failed_url: str, error: Exception, attempt: int) -> tuple[str, DirectorResponse] | None:
@@ -1407,6 +1490,8 @@ class PelicanFileSystem(AsyncFileSystem):
         data_url, director_response = await (self.get_origin_url(path) if self.direct_reads else self.get_working_cache(path))
         tries = 1
         while True:
+            # Outside the try below: a hook's veto says nothing about the cache
+            _audit("pelicanfs.read", _audit_url(path), _audit_url(data_url))
             await self._handle_token_generation(data_url, director_response, operation)
             try:
                 result = await attempt(data_url)
@@ -1442,6 +1527,7 @@ class PelicanFileSystem(AsyncFileSystem):
                     fp.r = None
             case _:
                 return False
+        _audit("pelicanfs.read", _audit_url(path), _audit_url(url))
         await self._handle_token_generation(url, director_response, self._get_token_operation("open"))
         fp.url = url
         return True
@@ -1595,6 +1681,7 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _put_file(self, lpath: str, rpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
         path = self._check_fspath(rpath)
         data_url, director_response = await self.get_origin_url(path)
+        _audit("pelicanfs.write", _audit_url(path), _audit_url(data_url))
 
         operation = self._get_token_operation("_put_file")
         await self._handle_token_generation(data_url, director_response, operation)
@@ -1855,13 +1942,14 @@ class PelicanFileSystem(AsyncFileSystem):
         first = path if isinstance(path, str) else next(iter(path), None)
         if self.direct_reads or not isinstance(first, str) or fshttp.has_magic(first):
             return
-        try:
-            await self.get_working_cache(first)
-        except Exception as e:
-            # Still best effort, but worth saying out loud: if warming fails
-            # systematically, every object goes back to the director on its own --
-            # exactly the stampede this function exists to prevent.
-            logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, _error_text(e))
+        with _audit_errors():
+            try:
+                await self.get_working_cache(first)
+            except Exception as e:
+                # Still best effort, but worth saying out loud: if warming fails
+                # systematically, every object goes back to the director on its own --
+                # exactly the stampede this function exists to prevent.
+                logger.warning("Could not pre-resolve a cache for %s; each object will consult the director individually: %s", first, _error_text(e))
 
     async def _expand_path(self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None, **kwargs: Any) -> list[str]:
         """
