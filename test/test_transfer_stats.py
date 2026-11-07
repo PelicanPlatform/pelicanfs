@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
+import socket
 import ssl
 from collections import Counter
 
@@ -164,15 +166,16 @@ def test_each_redirect_hop_is_a_response(httpserver: HTTPServer, httpserver2: HT
     assert stats.responses[httpserver2.url_for("/").rstrip("/"), "GET", 200] == 1
 
 
-def get_with_recorder(url: str, context: ssl.SSLContext, run_async) -> TransferStats:
-    """Follow the redirects of one GET with aiohttp alone."""
+def get_with_recorder(url: str, context: ssl.SSLContext, run_async, **kwargs: int) -> TransferStats:
+    """Follow the redirects of one GET with aiohttp alone. A client error leaves its counts."""
     recorder = _TransferRecorder()
 
     async def get() -> None:
-        async with aiohttp.ClientSession(trace_configs=[recorder.trace_config]) as session, session.get(url, ssl=context):
+        async with aiohttp.ClientSession(trace_configs=[recorder.trace_config]) as session, session.get(url, ssl=context, **kwargs):
             pass
 
-    run_async(get())
+    with contextlib.suppress(aiohttp.ClientError):
+        run_async(get())
     return recorder.snapshot()
 
 
@@ -194,6 +197,37 @@ def test_redirect_without_location_is_one_request(httpserver: HTTPServer, httpcl
 
     assert stats.requests == len(httpserver.log) == 1
     assert stats.responses == Counter({(httpserver.url_for("/").rstrip("/"), "GET", 302): 1})
+
+
+@pytest.mark.parametrize(
+    ("location", "kwargs"),
+    [
+        ("/from", {"max_redirects": 1}),
+        ("ftp://example.com/to", {}),
+    ],
+    ids=["too-many-redirects", "non-http-target"],
+)
+def test_redirect_stopped_before_the_next_hop_is_one_request(httpserver: HTTPServer, httpclient_ssl_context, run_async, location, kwargs):
+    httpserver.expect_request("/from").respond_with_data("", status=302, headers={"Location": location})
+
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context, run_async, **kwargs)
+
+    assert stats.requests == len(httpserver.log) == 1
+    assert stats.failed_requests == 1
+    assert stats.responses == Counter({(httpserver.url_for("/").rstrip("/"), "GET", 302): 1})
+
+
+def test_redirect_to_an_unreachable_server_is_a_request(httpserver: HTTPServer, httpclient_ssl_context, run_async):
+    with socket.socket() as unused:
+        unused.bind(("127.0.0.1", 0))
+        target = f"http://127.0.0.1:{unused.getsockname()[1]}"
+    httpserver.expect_request("/from").respond_with_data("", status=302, headers={"Location": f"{target}/to"})
+
+    stats = get_with_recorder(httpserver.url_for("/from"), httpclient_ssl_context, run_async)
+
+    assert stats.requests == 2
+    assert stats.failed_requests == 1
+    assert stats.responses[target, "GET", ResponseFailure.NO_RESPONSE] == 1
 
 
 def broken_body(_request):
