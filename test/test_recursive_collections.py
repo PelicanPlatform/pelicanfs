@@ -126,7 +126,7 @@ def test_get_recursive(collection_tree_fs, tmp_path):
     """
     collection_tree_fs.get("/foo/bar", str(tmp_path), recursive=True)
 
-    downloaded = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file()}
+    downloaded = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
     assert downloaded == {file.removeprefix("/foo/") for file in FILES}
     for file in FILES:
         assert (tmp_path / file.removeprefix("/foo/")).read_text() == f"content of {file}"
