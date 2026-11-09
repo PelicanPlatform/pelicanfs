@@ -67,3 +67,22 @@ class NoCredentialsException(PelicanException):
     """
     Credential is required but was not discovered
     """
+
+
+class ChecksumMismatch(PelicanException):
+    """
+    The checksum of the transferred data differs from the checksum the server reports
+    """
+
+    def __init__(self, url: str, algorithm: str, local: str, remote: str) -> None:
+        super().__init__(f"{algorithm} checksum mismatch for {url}: local {local}, server {remote}")
+        self.url = url
+        self.algorithm = algorithm
+        self.local = local
+        self.remote = remote
+
+
+class ChecksumMissing(PelicanException):
+    """
+    Checksum verification is required, but the server reported no usable checksum
+    """
