@@ -21,6 +21,7 @@
   - [Specifying Endpoints](#specifying-endpoints)
   - [Enabling Direct Reads](#enabling-direct-reads)
   - [Specifying Preferred Caches](#specifying-preferred-caches)
+  - [Checksums](#checksums)
 - [Authorization](#authorization)
   - [1. Providing a Token via Headers](#1-providing-a-token-via-headers)
   - [2. Environment Variables](#2-environment-variables)
@@ -338,6 +339,18 @@ pelfs = PelicanFileSystem(
 **Important:** If you specify `preferred_caches` without the `"+"` value, PelicanFS will **only** attempt to use your specified Caches and will not fall back to the Director's Cache list. This means if all your preferred Caches fail, the operation will fail rather than trying other available Caches. The Director has knowledge about Cache health, load, and availability—ignoring its recommendations means you lose these benefits.
 
 The special Cache value `"+"` indicates that your preferred Caches should be tried first, followed by the Director's recommended Caches as a fallback.
+
+### Checksums
+
+As the Pelican Go client does, `get()` and `put()` verify each object they transfer. After the transfer, PelicanFS asks the server for the object's checksums ([RFC 3230](https://www.rfc-editor.org/rfc/rfc3230) `Want-Digest`) and compares them with the local file. It knows `md5`, `crc32c`, `crc32` and `sha` (SHA-1). If a checksum is different, it raises `pelicanfs.exceptions.ChecksumMismatch`, and a download removes the local file. A server that reports no checksum is accepted, unless you set `require_checksums=True`.
+
+```python
+fs = PelicanFileSystem("pelican://osg-htc.org", require_checksums=True)
+fs.get("/namespace/object.txt", "object.txt")
+fs.checksums("/namespace/object.txt")  # {'crc32c': '...'}
+```
+
+Set `verify_checksums=False` to skip the extra request per object.
 
 ## Authorization
 
@@ -769,6 +782,8 @@ Main class for interacting with Pelican federations.
 - `headers` (dict, optional): HTTP headers to include in requests. Use for authorization: `{"Authorization": "Bearer TOKEN"}`
 - `oidc_timeout_seconds` (int, optional): Timeout in seconds for the OIDC device flow. Default: `300`
 - `use_listings_cache` (bool, optional): Enable caching of directory listings. Default: `False`
+- `verify_checksums` (bool, optional): Compare the checksums of downloaded and uploaded objects with the checksums the server reports. Default: `True`
+- `require_checksums` (bool, optional): Raise `ChecksumMissing` if the server reports no checksum to compare. Implies `verify_checksums`. Default: `False`
 - `asynchronous` (bool, optional): Use async mode. Default: `False`
 - `**kwargs`: Additional arguments passed to the underlying HTTP filesystem
 
@@ -788,6 +803,7 @@ Main class for interacting with Pelican federations.
 
 - `get_access_data()` - Get Cache access statistics
 - `info(path, **kwargs)` - Get detailed information about an object
+- `checksums(path)` - Get the checksums the server reports for an object, as a dict of hex strings, such as `{"crc32c": "ce8f3c63"}`
 - `exists(path, **kwargs)` - Check if a path exists
 - `isfile(path, **kwargs)` - Check if a path is an object
 - `isdir(path, **kwargs)` - Check if a path is a collection
