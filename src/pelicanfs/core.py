@@ -43,6 +43,7 @@ import contextvars
 import functools
 import inspect
 import logging
+import os
 import re
 import sys
 import threading
@@ -62,12 +63,13 @@ from typing import Any, NoReturn, TypeVar, cast, overload
 import aiohttp
 import cachetools
 import fsspec.implementations.http as fshttp
-from fsspec.asyn import AsyncFileSystem, sync
+from fsspec.asyn import AsyncFileSystem, sync, sync_wrapper
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.mapping import FSMap
 from fsspec.utils import glob_translate
 from pelican_webdav_client import Client, InvalidResponseError, MethodNotAllowedError, NotFoundError, Resource, ResponseError, trace_config
 
+from . import checksum
 from .dir_header_parser import (
     DirectorResponse,
     get_collections_url,
@@ -75,6 +77,8 @@ from .dir_header_parser import (
 )
 from .exceptions import (
     BadDirectorResponse,
+    ChecksumMismatch,
+    ChecksumMissing,
     DirectorError,
     InvalidDestinationURL,
     InvalidMetadata,
@@ -535,6 +539,8 @@ class PelicanFileSystem(AsyncFileSystem):
         oidc_timeout_seconds: int = 300,
         pty_buffer_size: int = 1024,
         select_timeout: float = 0.1,
+        verify_checksums: bool = True,
+        require_checksums: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(self, asynchronous=asynchronous, loop=loop, **kwargs)
@@ -576,6 +582,10 @@ class PelicanFileSystem(AsyncFileSystem):
         self.oidc_timeout_seconds = oidc_timeout_seconds
         self.pty_buffer_size = pty_buffer_size
         self.select_timeout = select_timeout
+
+        # As in the Go client: get and put compare checksums with the server when it sends them
+        self.verify_checksums = verify_checksums or require_checksums
+        self.require_checksums = require_checksums
 
         # These are all not implemented in the http fsspec and as such are not implemented in the pelican fsspec
         # They will raise NotImplementedErrors when called. (mkdir/makedirs are handled by our own
@@ -690,6 +700,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # strings at their call sites. Unknown names default to read below.
         read_operations = {
             "_cat_file",
+            "_checksums",
             "_exists_via_cache",
             "_info",
             "_info_from_cache",
@@ -1659,6 +1670,7 @@ class PelicanFileSystem(AsyncFileSystem):
 
         try:
             await asyncio.create_task(upload_file())
+            await self._verify_transfer(lpath, data_url)
         except Exception as e:
             redact_exception(e)
             raise
@@ -1821,7 +1833,56 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _get_file_from_cache(self, rpath: str, lpath: str, callback: Callback = DEFAULT_CALLBACK, **kwargs: Any) -> None:
         cache = _host_of(rpath)
         with self._transfers.cache_active(cache):
-            return await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
+            await self.http_file_system._get_file(rpath, lpath, callback=_ByteCounter(callback, functools.partial(self._transfers.add_read, cache=cache)), **kwargs)
+        try:
+            await self._verify_transfer(lpath, rpath)
+        except ChecksumMismatch:
+            Path(lpath).unlink(missing_ok=True)
+            raise
+
+    async def _fetch_digests(self, url: str) -> dict[str, bytes]:
+        """Ask the server at the full url `url` for the digests of the object, with a HEAD and Want-Digest."""
+        session = await self.http_file_system.set_session()
+        kw = self.http_file_system.kwargs.copy()
+        headers = {**(kw.pop("headers", None) or {}), "Want-Digest": checksum.WANT_DIGEST}
+        async with session.head(url, headers=headers, allow_redirects=True, **kw) as r:
+            r.raise_for_status()
+            return checksum.parse_digest(r.headers.getall("Digest", ()))
+
+    async def _verify_transfer(self, lpath: object, url: str) -> None:
+        """
+        Compare the local file `lpath` with the digests the server at `url` sends. A server
+        that cannot answer is not an error unless `require_checksums` is set.
+        """
+        if not self.verify_checksums or not isinstance(lpath, str | os.PathLike):
+            return
+        try:
+            remote = await self._fetch_digests(url)
+        except _RETRYABLE_ERRORS as e:
+            if self.require_checksums:
+                msg = f"Checksum verification is required, but the checksum request for {url} failed: {_error_text(e)}"
+                raise ChecksumMissing(msg) from e
+            logger.debug("Cannot fetch checksums for %s: %s", url, _error_text(e))
+            return
+        algorithms = [name for name in checksum.ALGORITHMS if name in remote]
+        local = await asyncio.to_thread(checksum.file_digests, lpath, algorithms) if algorithms else {}
+        checksum.verify(url, local, remote, require=self.require_checksums)
+
+    @_cache_dec
+    async def _checksums(self, path: str) -> dict[str, str]:
+        """
+        Return the checksums the server reports for the object at `path`, as hex strings
+        keyed by RFC 3230 algorithm name (md5, crc32c, crc32, sha). The server can send
+        any or none of them.
+        """
+        try:
+            return checksum.to_hex(await self._fetch_digests(path))
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                raise FileNotFoundError(path) from e
+            raise
+
+    checksums = sync_wrapper(_checksums)
 
     @_traced
     async def _info(self, path: str, **kwargs: Any) -> dict[str, Any]:
