@@ -194,6 +194,10 @@ pelfs = PelicanFileSystem("pelican://osg-htc.org")
 objects = pelfs.ls("/pelicanplatform/test/")
 ```
 
+A listing fails with `InvalidListing` if the server's reply names anything through `..`, such as `/pelicanplatform/test/../other`. A recursive `get` builds its local paths from the listed names, and a `..` in one could place a file outside the destination. Every operation that lists a collection is affected: `ls`, `find`, `glob`, `walk`, `du`, and a recursive `get` or `cat`. The whole operation fails, and `on_error` does not skip the collection. `isfile` does not raise; it answers `False`.
+
+A literal `..` in a path you pass yourself is resolved before the request is sent, and is still accepted. A percent-encoded one, `%2e%2e`, is sent to the server as it is, and fails the same way if the server repeats it in the names it lists.
+
 ### Pattern Matching with Glob
 
 > [!WARNING]

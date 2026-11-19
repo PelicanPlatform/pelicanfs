@@ -51,6 +51,12 @@ class NoCollectionsUrl(PelicanException):
     """
 
 
+class InvalidListing(PelicanException):
+    """
+    A collection's listing named something through "..", which no listing needs to do
+    """
+
+
 class InvalidDestinationURL(PelicanException):
     """
     The destination URL is invalid or has an empty path
