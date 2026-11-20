@@ -16,6 +16,7 @@ limitations under the License.
 
 __lazy_modules__ = {
     "collections.abc",
+    "contextlib",
     "getpass",
     "html",
     "igwn_auth_utils.scitokens",
@@ -23,10 +24,12 @@ __lazy_modules__ = {
     "json",
     "pelicanfs.log_utils",
     "pty",
+    "queue",
     "select",
     "shutil",
     "subprocess",
     "termios",
+    "threading",
     "typing",
 }
 
