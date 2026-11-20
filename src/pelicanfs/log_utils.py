@@ -14,6 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {
+    "aiohttp",
+    "collections.abc",
+    "itertools",
+    "multidict",
+    "secrets",
+    "typing",
+}
+
 import contextvars
 import itertools
 import logging

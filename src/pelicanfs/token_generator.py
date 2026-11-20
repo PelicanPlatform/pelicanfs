@@ -14,6 +14,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {
+    "datetime",
+    "pelicanfs.dir_header_parser",
+    "pelicanfs.exceptions",
+    "pelicanfs.log_utils",
+    "pelicanfs.token_content_iterator",
+    "scitokens",
+    "threading",
+    "urllib.parse",
+}
+
 import logging
 import posixpath
 import threading

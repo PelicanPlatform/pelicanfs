@@ -25,6 +25,12 @@ repos:
     -   id: ruff-check
         args: ["--fix"]
     -   id: ruff-format
+-   repo: https://github.com/henryiii/flake8-lazy
+    rev: 7f268b3b3aaf7feca756ca610e37971382976365  # frozen: v0.11.0
+    hooks:
+    -   id: flake8-lazy
+        args: [--apply=set]
+        exclude: ^test/
 -   repo: https://github.com/RobertCraigie/pyright-python
     rev: 1aa6dfeb849ae43fb6f16fc17228bcbd358a19c3  # frozen: v1.1.414
     hooks:

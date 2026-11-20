@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {"collections.abc", "types", "urllib.parse"}
+
 import enum
 import threading
 import time

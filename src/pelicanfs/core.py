@@ -14,6 +14,30 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+__lazy_modules__ = {
+    "asyncio",
+    "cachetools",
+    "collections.abc",
+    "copy",
+    "email.utils",
+    "fsspec.mapping",
+    "fsspec.utils",
+    "functools",
+    "inspect",
+    "pathlib",
+    "pelican_webdav_client",
+    "re",
+    "threading",
+    "types",
+    "urllib.parse",
+    "weakref",
+    f"{__spec__.parent}.dir_header_parser",
+    f"{__spec__.parent}.exceptions",
+    f"{__spec__.parent}.log_utils",
+    f"{__spec__.parent}.token_generator",
+    f"{__spec__.parent}.transfer_stats",
+}
+
 import asyncio
 import contextvars
 import functools
