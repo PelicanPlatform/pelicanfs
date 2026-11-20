@@ -593,3 +593,38 @@ def test_ls_from_http_awaits_token_generation(httpserver: HTTPServer, get_client
     names = [entry["name"] for entry in listing]
     assert f"{collections_url}/folder2/file1.md" in names, "the token-gated PROPFIND did not match, so the listing went out unauthenticated"
     assert f"{collections_url}/folder2/file2.md" in names
+
+
+def test_ls_from_http_semicolon_in_name(httpserver: HTTPServer, get_client, get_webdav_client):
+    """_ls_from_http lists the whole name, not the part before a ";"."""
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_oneshot_request("/foo/a;b", method="PROPFIND").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{httpserver.url_for("/foo/a;b")}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={httpserver.url_for('/')}",
+        },
+    )
+    listing = """<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/foo/a%3Bb/</D:href>
+    <D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/foo/a%3Bb/c.txt</D:href>
+    <D:propstat><D:prop><D:getcontentlength>5</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>
+  </D:response>
+</D:multistatus>"""
+    httpserver.expect_request("/foo/a;b/", method="PROPFIND").respond_with_data(listing, status=207, content_type="application/xml")
+
+    pelfs = pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        get_webdav_client=get_webdav_client,
+        skip_instance_cache=True,
+    )
+
+    names = sync(pelfs.loop, pelfs._ls_from_http, httpserver.url_for("/foo/a;b"), detail=False)
+    assert [name.rsplit("/", 1)[-1] for name in names] == ["c.txt"]

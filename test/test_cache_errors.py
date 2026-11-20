@@ -523,6 +523,15 @@ def test_non_retryable_failure_is_recorded(httpserver: HTTPServer, httpserver2: 
     _assert_all_caches_kept(pelfs, httpserver, httpserver2)
 
 
+def test_failure_is_recorded_under_whole_name():
+    """The access data keys a failure by the whole name, not by the part before a ";"."""
+    pelfs = PelicanFileSystem(skip_instance_cache=True)
+    pelfs._record_failed_access("https://cache.example/foo/a;b", OSError("boom"))
+
+    responses, _ = pelfs.get_access_data().get_responses("/foo/a;b")
+    assert [(r.access_path, r.success) for r in responses] == [("https://cache.example/foo/a;b", False)]
+
+
 def test_missing_object_is_not_recorded_as_failure(httpserver: HTTPServer, get_client):
     _setup_director(httpserver)
     httpserver.expect_request("/foo/bar", method="HEAD").respond_with_data("", status=200)
