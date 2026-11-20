@@ -1376,7 +1376,7 @@ class PelicanFileSystem(AsyncFileSystem):
             return False
         # An empty listing is an object or an *empty* collection -- a webdav listing
         # excludes the collection itself -- so ask the resource's own type
-        return not await self._is_collection(urllib.parse.urlparse(path).path)
+        return not await self._is_collection(urllib.parse.urlsplit(path).path)
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path: str, maxdepth: int | None = None, on_error: str = "omit", **kwargs: Any) -> AsyncIterator[tuple[str, Any, Any]]:

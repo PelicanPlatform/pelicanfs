@@ -496,3 +496,13 @@ def test_isfile_noexist(httpserver: HTTPServer, get_client, get_webdav_client):
     )
 
     assert pelfs.isfile("/foo/bar/file2") is False
+
+
+def test_isfile_semicolon_in_name(httpserver: HTTPServer, get_client, get_webdav_client):
+    """isfile() asks for the type of the whole name, not of the part before a ";"."""
+    _setup_director(httpserver, "/foo/a;b", collections_url=httpserver.url_for("/"))
+    httpserver.expect_request("/foo/a;b/", method="PROPFIND").respond_with_data("not a directory", status=500)
+    httpserver.expect_request("/foo/a;b", method="PROPFIND").respond_with_data(_multistatus("/foo/a%3Bb"), status=207, content_type="application/xml")
+    httpserver.expect_request("/foo/a/", method="PROPFIND").respond_with_data(_multistatus("/foo/a/", "<D:resourcetype><D:collection/></D:resourcetype>"), status=207, content_type="application/xml")
+
+    assert _filesystem(httpserver, get_client, get_webdav_client).isfile("/foo/a;b") is True
