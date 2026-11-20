@@ -23,7 +23,7 @@ from pelican_webdav_client import UnauthorizedError
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
-from pelicanfs.exceptions import NoCollectionsUrl
+from pelicanfs.exceptions import InvalidListing, NoCollectionsUrl
 from pelicanfs.token_generator import TokenGenerator
 
 
@@ -116,6 +116,49 @@ def test_ls_name_reaches_the_listed_resource(httpserver: HTTPServer, get_client,
     httpserver.expect_request(f"/foo/bar/{name}", method="PROPFIND").respond_with_data(multistatus, status=207, content_type="application/xml")
 
     assert pelfs.info(path)["size"] == 13
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        # Leading, interior and trailing, then the forms a name could hide one in:
+        # empty segments between the slashes, and percent-encoding the client decodes
+        "/foo/bar/../escaped",
+        "/foo/bar/a/../b",
+        "/foo/bar/..",
+        "/foo/bar//..//..//escaped",
+        "/foo/bar/%2e%2e/escaped",
+    ],
+)
+def test_ls_rejects_a_name_with_dot_dot(httpserver: HTTPServer, get_client, get_webdav_client, href):
+    """A listing cannot name anything through "..", wherever the name would lead."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of(href))
+
+    with pytest.raises(InvalidListing):
+        pelfs.ls("/foo/bar", detail=False)
+
+
+def test_ls_detail_rejects_a_name_with_dot_dot(httpserver: HTTPServer, get_client, get_webdav_client):
+    """The refusal comes before ls() builds its entries, so detail=True is refused alike."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of("/foo/bar/../escaped"))
+
+    with pytest.raises(InvalidListing):
+        pelfs.ls("/foo/bar", detail=True)
+
+
+@pytest.mark.parametrize("href", ["/foo/bar/..b", "/foo/bar/a..", "/foo/bar/...", "/foo/bar/./b", "/foo/bar//b"])
+def test_ls_keeps_a_name_with_dots_that_are_not_dot_dot(httpserver: HTTPServer, get_client, get_webdav_client, href):
+    """Only a whole ".." segment is refused: dots inside a name, and ".", cannot climb."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of(href))
+
+    assert pelfs.ls("/foo/bar", detail=False) == [href]
+
+
+def test_isfile_answers_for_a_refused_listing(httpserver: HTTPServer, get_client, get_webdav_client):
+    """isfile answers rather than raises: a listing with names in it, even refused ones, is a collection's."""
+    pelfs = _listing_filesystem(httpserver, get_client, get_webdav_client, _listing_of("/foo/bar/../escaped"))
+
+    assert pelfs.isfile("/foo/bar") is False
 
 
 def test_ls_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):

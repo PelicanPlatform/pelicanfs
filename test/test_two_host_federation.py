@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,7 @@ from pelican_webdav_client import ResponseError
 from pytest_httpserver import HTTPServer
 
 import pelicanfs.core
+from pelicanfs.exceptions import InvalidListing
 
 # The objects in the collection served by the listing fixtures, relative to /foo/bar
 OBJECTS = (
@@ -36,8 +38,8 @@ OBJECTS = (
 COLLECTIONS = ("folder1", "folder1/subfolder1", "folder2")
 
 
-def collection_multistatus(*hrefs):
-    """A PROPFIND response listing each of `hrefs` as a collection."""
+def multistatus(*hrefs):
+    """A PROPFIND response listing each of `hrefs` as a collection if it ends with "/"."""
     entries = "".join(
         f"""
   <D:response>
@@ -46,9 +48,7 @@ def collection_multistatus(*hrefs):
       <D:prop>
         <D:getcontentlength>4096</D:getcontentlength>
         <D:getlastmodified>Tue, 25 Feb 2025 16:45:43 GMT</D:getlastmodified>
-        <D:resourcetype>
-          <D:collection/>
-        </D:resourcetype>
+        {"<D:resourcetype><D:collection/></D:resourcetype>" if href.endswith("/") else ""}
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
@@ -60,8 +60,8 @@ def collection_multistatus(*hrefs):
 
 # The namespace root, and a collection with nothing in it (a listing excludes the
 # collection itself, so an empty one lists as just its own entry)
-FOO_LISTING = collection_multistatus("/foo/", "/foo/bar/", "/foo/empty/")
-EMPTY_LISTING = collection_multistatus("/foo/empty/")
+FOO_LISTING = multistatus("/foo/", "/foo/bar/", "/foo/empty/")
+EMPTY_LISTING = multistatus("/foo/empty/")
 
 
 @pytest.fixture(name="two_host_fs_factory")
@@ -382,6 +382,66 @@ def test_get_recursive_list_of_roots(two_host_federation, tmp_path):
 
     assert local_tree(dest) == {"file1.txt", "empty/"}
     assert (dest / "file1.txt").read_text() == "contents of /foo/bar/file1.txt"
+
+
+@pytest.mark.parametrize(
+    ("names", "options", "source", "dest_exists"),
+    [
+        # Climbs out of the collection, to a url the cache still serves from inside it
+        (["/foo/hostile//..//..//..//escaped/file"], {}, "/foo/hostile", True),
+        # Stays inside the collection, and climbs out of the destination all the same
+        # once fsspec swaps the prefix the two names share, "/foo/hostile/a/b", for it
+        (["/foo/hostile/a/b/c", "/foo/hostile/a/b/../../x"], {"maxdepth": 5}, "/foo/hostile/", False),
+    ],
+)
+def test_get_recursive_writes_nothing_outside_the_destination(two_host_federation, httpserver: HTTPServer, httpserver2: HTTPServer, tmp_path, names, options, source, dest_exists):
+    """
+    A listing cannot steer a recursive get out of its destination.
+
+    fsspec maps each listed name to a local path by swapping the prefix the sources
+    share for the destination, so a ".." in a name survives into the local path. Which
+    prefix they share depends on the call, so each case pairs a name shape with a call
+    shape: maxdepth leaves the collection itself out of the sources, and a trailing
+    slash copies the contents rather than the collection. The cache serves every object
+    here, so nothing but the listing's refusal stops the write.
+    """
+    listing = multistatus("/foo/hostile/", *names)
+    under_hostile = re.compile(r"/foo/hostile.*")
+    httpserver.expect_request(under_hostile).respond_with_data(
+        "overwritten",
+        headers={
+            "Link": f'<{httpserver.url_for("/foo/hostile")}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={httpserver2.url_for('/')}",
+        },
+    )
+    for path in ("/foo/hostile", "/foo/hostile/"):
+        httpserver2.expect_request(path, method="PROPFIND").respond_with_data(listing, status=207)
+    httpserver2.expect_request(under_hostile, method="PROPFIND").respond_with_data("not a collection", status=500)
+    httpserver2.expect_request(under_hostile).respond_with_data("", status=200)
+
+    dest = tmp_path / "a" / "b" / "dest"
+    dest.parent.mkdir(parents=True)
+    if dest_exists:
+        dest.mkdir()
+    before = local_tree(tmp_path)
+
+    with pytest.raises(InvalidListing):
+        two_host_federation.get(source, str(dest), recursive=True, **options)
+
+    assert local_tree(tmp_path) == before
+
+
+def test_dot_dot_in_a_callers_path_is_not_refused(two_host_federation):
+    """
+    Only a listing's names are checked for "..". A path the caller passes may hold one:
+    it is resolved before the request is sent, so the names that come back have none.
+    """
+    assert two_host_federation.ls("/foo/bar/folder1/..", detail=False) == two_host_federation.ls("/foo/bar", detail=False)
+    assert two_host_federation.find("/foo/bar/folder1/../folder2") == ["/foo/bar/folder2/file1.md", "/foo/bar/folder2/file2.md"]
+    # A pattern matches the names as listed, which have no "..", so this one matches
+    # nothing: that is how a glob has always read such a pattern, and it does not raise
+    assert two_host_federation.glob("/foo/bar/folder1/../*.txt") == []
+    assert two_host_federation.glob("/foo/bar/**/*.md") == ["/foo/bar/file2.md", "/foo/bar/folder2/file1.md", "/foo/bar/folder2/file2.md"]
 
 
 def test_get_probe_server_error_propagates(two_host_federation, tmp_path):

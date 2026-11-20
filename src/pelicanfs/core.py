@@ -77,6 +77,7 @@ from .exceptions import (
     BadDirectorResponse,
     DirectorError,
     InvalidDestinationURL,
+    InvalidListing,
     InvalidMetadata,
     NoAvailableSource,
     NoCollectionsUrl,
@@ -1243,6 +1244,14 @@ class PelicanFileSystem(AsyncFileSystem):
                 return set()
             raise FileNotFoundError from e
 
+        # A recursive get() turns listed names into local paths, so a ".." in one could
+        # write outside the destination. Nothing is named "..", so no listing needs one.
+        # A ".." in a path the caller passes is the caller's choice, and is not checked.
+        for resource in resources:
+            if ".." in resource.path.split("/"):
+                msg = f'The listing of {redact_query(url)} names {resource.path!r}, which has a ".." in it'
+                raise InvalidListing(msg)
+
         if detail:
             # A resource's path carries a trailing slash exactly when it is a collection
             return [_resource_entry(f"{base_url}{_listed_path(resource)}", resource) for resource in resources]
@@ -1369,7 +1378,9 @@ class PelicanFileSystem(AsyncFileSystem):
     async def _isfile(self, path: str) -> bool:
         try:
             items = await self._ls_real(path, detail=False)
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ValueError, InvalidListing):
+            # Nothing to list, or a listing refused for what it names -- and a listing
+            # with names in it is a collection's
             return False
         if items:
             # A non-empty listing is a collection
