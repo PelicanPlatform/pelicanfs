@@ -76,6 +76,60 @@ def test_ls_dir(httpserver: HTTPServer, get_client, get_webdav_client, top_listi
     ]
 
 
+def _cached_listing_filesystem(httpserver: HTTPServer, get_client, get_webdav_client, listing):
+    """Like _listing_filesystem, with the listings cache on and a director that answers more than once."""
+    foo_bar_url = httpserver.url_for("foo/bar")
+    httpserver.expect_request("/.well-known/pelican-configuration").respond_with_json({"director_endpoint": httpserver.url_for("/")})
+    httpserver.expect_request("/foo/bar").respond_with_data(
+        "",
+        status=307,
+        headers={
+            "Link": f'<{foo_bar_url}>; rel="duplicate"; pri=1; depth=1',
+            "X-Pelican-Namespace": f"namespace=/foo, collections-url={foo_bar_url}",
+        },
+    )
+    httpserver.expect_request("/foo/bar/", method="PROPFIND").respond_with_data(listing, status=207)
+    return pelicanfs.core.PelicanFileSystem(
+        httpserver.url_for("/"),
+        get_client=get_client,
+        skip_instance_cache=True,
+        get_webdav_client=get_webdav_client,
+        use_listings_cache=True,
+    )
+
+
+_TOP_NAMES = [
+    "/foo/bar/file1.txt",
+    "/foo/bar/file2.md",
+    "/foo/bar/file3.txt",
+    "/foo/bar/folder1/",
+    "/foo/bar/folder2/",
+]
+
+
+@pytest.mark.parametrize("first_detail", [False, True])
+def test_ls_cache_detail(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response, first_detail):
+    """A cached listing must give the right form for both values of `detail`."""
+    pelfs = _cached_listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
+
+    for detail in (first_detail, not first_detail):
+        listing = pelfs.ls("/foo/bar", detail=detail)
+        if detail:
+            assert sorted(item["name"] for item in listing) == _TOP_NAMES
+        else:
+            assert listing == _TOP_NAMES
+
+
+def test_ls_cache_keeps_hosts_for_http(httpserver: HTTPServer, get_client, get_webdav_client, top_listing_response):
+    """ls() removes the hosts from its result, but not from the cached listing that _ls_from_http also reads."""
+    pelfs = _cached_listing_filesystem(httpserver, get_client, get_webdav_client, top_listing_response)
+
+    pelfs.ls("/foo/bar", detail=True)
+    listing = sync(pelfs.loop, pelfs._ls_from_http, httpserver.url_for("/foo/bar"))
+
+    assert sorted(item["name"] for item in listing) == [httpserver.url_for(name) for name in _TOP_NAMES]
+
+
 def _listing_of(href):
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <D:multistatus xmlns:D="DAV:">

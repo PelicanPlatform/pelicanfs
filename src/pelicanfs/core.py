@@ -1185,12 +1185,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         This _ls call will mimic the httpfs _ls call and call our version of _ls_real
         """
-        if self.use_listings_cache and path in self.dircache:
-            out = self.dircache[path]
-        else:
-            out = await self._ls_real(path, detail=detail)
-            self.dircache[path] = out
-        return self._remove_host_from_paths(out)
+        return self._remove_host_from_paths(await self._ls_cached(path, detail))
 
     async def _ls_from_http(self, url: str, detail: bool = True, **kwargs: Any) -> Any:
         """
@@ -1207,13 +1202,26 @@ class PelicanFileSystem(AsyncFileSystem):
 
         collections_url = await self._collections_url(path, "_ls")
 
-        # Call _ls_real with the collections URL
-        if self.use_listings_cache and collections_url in self.dircache:
-            out = self.dircache[collections_url]
+        return await self._ls_cached(collections_url, detail)
+
+    async def _ls_cached(self, url: str, detail: bool) -> Any:
+        """
+        List the collections URL `url` through the listings cache. As in fsspec, the cache
+        always holds the detailed listing, so one entry serves both values of `detail`.
+        """
+        out: list[dict[str, Any]] | set[str]
+        if self.use_listings_cache and url in self.dircache:
+            out = self.dircache[url]
         else:
-            out = await self._ls_real(collections_url, detail=detail)
-            self.dircache[collections_url] = out
-        return out
+            out = cast("list[dict[str, Any]] | set[str]", await self._ls_real(url, detail=True))
+            self.dircache[url] = out
+        if isinstance(out, set):
+            # An object
+            return out
+        if not detail:
+            return sorted(self._remove_host_from_path(item["name"]) for item in out)
+        # _remove_host_from_paths changes the dicts in place, so give out copies
+        return [dict(item) for item in out]
 
     async def _ls_real(self, url: str, detail: bool = True, client: Client | None = None) -> list[dict[str, Any]] | list[str] | set[str]:
         """
