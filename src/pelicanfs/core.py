@@ -777,7 +777,7 @@ class PelicanFileSystem(AsyncFileSystem):
         # Check if we already have a token, either from kwargs headers or generated earlier
         existing_token = self._get_token()
         if logger.isEnabledFor(TRACE):
-            trace(logger, "_handle_token_generation path=%s token=%s", urllib.parse.urlparse(url).path, TokenForLog(existing_token))
+            trace(logger, "_handle_token_generation path=%s token=%s", urllib.parse.urlsplit(url).path, TokenForLog(existing_token))
         if existing_token:
             logger.debug("Using existing token from headers for %s", url)
             return existing_token
@@ -899,7 +899,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         namespace = None
         logger.debug("Choosing a cache for %s...", fileloc)
-        fparsed = urllib.parse.urlparse(fileloc)
+        fparsed = urllib.parse.urlsplit(fileloc)
         known = self._known_cache(fileloc)
         if known is not None:
             logger.debug("Found previously working cache: %s", known[0])
@@ -1004,7 +1004,7 @@ class PelicanFileSystem(AsyncFileSystem):
         headers = await self.get_director_headers(fileloc, origin=True)
         origin = headers.get("Location")
         if not origin:
-            msg = f"The director listed no origin for {urllib.parse.urlparse(fileloc).path}"
+            msg = f"The director listed no origin for {urllib.parse.urlsplit(fileloc).path}"
             raise NoAvailableSource(msg)
 
         # Parse the headers to get the full director response
@@ -1108,7 +1108,7 @@ class PelicanFileSystem(AsyncFileSystem):
         Return the current cache for fileloc from memory, or None if the namespace
         is unknown or has no caches left.
         """
-        fparsed = urllib.parse.urlparse(fileloc)
+        fparsed = urllib.parse.urlsplit(fileloc)
         try:
             cached_url, director_response = self._match_namespace(fparsed.path)
         except NoAvailableSource:
@@ -1141,7 +1141,7 @@ class PelicanFileSystem(AsyncFileSystem):
     def _record_failed_access(self, url: str, e: BaseException) -> None:
         """Add a failed access to the stats. A missing object is not a failed access."""
         if not isinstance(e, FileNotFoundError):
-            self._access_stats.add_response(urllib.parse.urlparse(url).path, _AccessResp(url, False, redact_query(_error_text(e))))
+            self._access_stats.add_response(urllib.parse.urlsplit(url).path, _AccessResp(url, False, redact_query(_error_text(e))))
 
     def _bad_cache(self, url: str, e: BaseException) -> None:
         """
@@ -1151,7 +1151,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
         redact_exception(e)
         logger.debug("Marking cache at %s as bad: %s", url, e)
-        path = urllib.parse.urlparse(url).path
+        path = urllib.parse.urlsplit(url).path
         bad_cache = _host_of(url)
 
         self._record_failed_access(url, e)
@@ -1201,7 +1201,7 @@ class PelicanFileSystem(AsyncFileSystem):
         """
 
         # Extract the path from the URL
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlsplit(url)
         path = parsed.path
         trace(logger, "_ls_from_http path=%s", path)
 
@@ -1376,7 +1376,7 @@ class PelicanFileSystem(AsyncFileSystem):
             return False
         # An empty listing is an object or an *empty* collection -- a webdav listing
         # excludes the collection itself -- so ask the resource's own type
-        return not await self._is_collection(urllib.parse.urlparse(path).path)
+        return not await self._is_collection(urllib.parse.urlsplit(path).path)
 
     # Not using a decorator because it requires a yield
     async def _walk(self, path: str, maxdepth: int | None = None, on_error: str = "omit", **kwargs: Any) -> AsyncIterator[tuple[str, Any, Any]]:
