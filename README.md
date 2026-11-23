@@ -444,6 +444,25 @@ Enter a password for the token file:
 
 In a Jupyter notebook (Linux and macOS), the same output appears in the cell. The notebook shows the password prompt as a masked input box and shows the authorization URL as a clickable link.
 
+A program that owns the screen, such as a TUI, can show the flow in its own interface (Linux and macOS). Set a handler before the first access:
+
+```python
+import pelicanfs
+
+
+class MyHandler:
+    def show(self, text, url=None):
+        """One line of output. `url` is the authorization URL, if the line has one."""
+
+    def ask_password(self, prompt):
+        """Return the password for the local token file."""
+
+
+pelicanfs.set_auth_handler(MyHandler())
+```
+
+The handler applies to all filesystems in the process and replaces the Jupyter behavior. PelicanFS calls it from the thread that runs the I/O (not the thread of the caller, unless the filesystem is asynchronous), and `ask_password` blocks the flow until it returns. An exception from the handler stops the flow. `set_auth_handler(None)` restores the default.
+
 You can configure the timeout (default 300 seconds) for the device flow:
 
 ```python

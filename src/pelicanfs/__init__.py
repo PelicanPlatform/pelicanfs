@@ -14,9 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-__lazy_modules__ = {f"{__spec__.parent}.core", f"{__spec__.parent}.transfer_stats"}
+__lazy_modules__ = {
+    f"{__spec__.parent}.auth_handler",
+    f"{__spec__.parent}.core",
+    f"{__spec__.parent}.transfer_stats",
+}
 
+from .auth_handler import AuthHandler, set_auth_handler
 from .core import OSDFFileSystem, PelicanFileSystem, PelicanMap
 from .transfer_stats import ResponseFailure, TransferStats
 
-__all__ = ["OSDFFileSystem", "PelicanFileSystem", "PelicanMap", "ResponseFailure", "TransferStats"]
+__all__ = ["AuthHandler", "OSDFFileSystem", "PelicanFileSystem", "PelicanMap", "ResponseFailure", "TransferStats", "set_auth_handler"]

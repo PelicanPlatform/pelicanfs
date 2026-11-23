@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -23,6 +24,8 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
+import pelicanfs.auth_handler
+from pelicanfs import set_auth_handler
 from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho
 
 needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
@@ -528,19 +531,12 @@ def _select_for(chunks):
     return [([100], [], [])] * len(chunks) + [([], [], [])] * 3
 
 
-@pytest.fixture
-def jupyter_pty(monkeypatch):
-    """Mock the pty machinery and pretend to run inside an IPython kernel."""
-    import types
-
-    displayed = []
-    fake_display_module = types.ModuleType("IPython.display")
-    fake_display_module.display = lambda data, raw=False: displayed.append((data, raw))
-    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
-    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
+@contextlib.contextmanager
+def _mock_pty(in_kernel):
+    """Mock the pty machinery; stdin must come from the pty, not from /dev/tty."""
     with (
         patch("shutil.which", return_value="/usr/bin/pelican"),
-        patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=True),
+        patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=in_kernel),
         patch("pty.openpty", return_value=(100, 101)),
         patch("termios.tcgetattr", return_value=[0, 0, 0, 0, 0, 0, []]),
         patch("termios.tcsetattr"),
@@ -552,7 +548,7 @@ def jupyter_pty(monkeypatch):
         patch("select.select") as mock_select,
         patch("getpass.getpass", return_value="hunter2") as mock_getpass,
     ):
-        mock_open_fd.side_effect = AssertionError("/dev/tty must not be opened in the Jupyter path")
+        mock_open_fd.side_effect = AssertionError("/dev/tty must not be opened when a handler answers the prompts")
         process = mock_popen.return_value
         process.returncode = 0
 
@@ -563,7 +559,102 @@ def jupyter_pty(monkeypatch):
             process.poll.return_value = returncode
             process.returncode = returncode
 
-        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select, "displayed": displayed}
+        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select}
+
+
+@pytest.fixture
+def jupyter_pty(monkeypatch):
+    """Mock the pty machinery and pretend to run inside an IPython kernel."""
+    import types
+
+    displayed = []
+    fake_display_module = types.ModuleType("IPython.display")
+    fake_display_module.display = lambda data, raw=False: displayed.append((data, raw))
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
+    with _mock_pty(in_kernel=True) as mocks:
+        yield {**mocks, "displayed": displayed}
+
+
+class RecordingHandler:
+    def __init__(self, password="s3cret"):
+        self.password = password
+        self.shown = []
+        self.prompts = []
+
+    def show(self, text, url=None):
+        self.shown.append((text, url))
+
+    def ask_password(self, prompt):
+        self.prompts.append(prompt)
+        if isinstance(self.password, BaseException):
+            raise self.password
+        return self.password
+
+
+@pytest.fixture
+def handler_pty():
+    """Mock the pty machinery with a registered auth handler, outside a kernel."""
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    try:
+        with _mock_pty(in_kernel=False) as mocks:
+            yield {**mocks, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+@needs_pty
+def test_auth_handler_gets_output_and_answers_prompt(handler_pty, capsys):
+    handler = handler_pty["handler"]
+    handler_pty["feed"]([PELICAN_PREAMBLE + PELICAN_PROMPT, b"\r\n" + PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert handler.prompts == [PELICAN_PROMPT.decode()]
+    handler_pty["write"].assert_called_once_with(100, b"s3cret\n")
+    handler_pty["getpass"].assert_not_called()
+    assert handler_pty["popen"].call_args.kwargs["stdin"] == 101
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert (url, url) in handler.shown
+    assert ("You will be asked for this password whenever a new session is started.", None) in handler.shown
+    assert not any(FAKE_JWT_SIGNATURE in text for text, _ in handler.shown)
+    assert capsys.readouterr().out == ""
+
+
+@needs_pty
+def test_auth_handler_wins_inside_kernel(jupyter_pty, capsys):
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    try:
+        jupyter_pty["feed"]([PELICAN_PROMPT_LN, PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+        assert next(_jupyter_iterator()) == FAKE_JWT
+    finally:
+        set_auth_handler(previous)
+
+    assert len(handler.prompts) == 1
+    jupyter_pty["getpass"].assert_not_called()
+    assert jupyter_pty["displayed"] == []
+    assert capsys.readouterr().out == ""
+
+
+@needs_pty
+def test_auth_handler_error_stops_the_flow(handler_pty):
+    handler_pty["handler"].password = RuntimeError("cancelled")
+    handler_pty["feed"]([PELICAN_PROMPT_LN])
+    handler_pty["process"].poll.return_value = None
+    handler_pty["process"].returncode = None
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    handler_pty["process"].kill.assert_called_once()
+    handler_pty["write"].assert_not_called()
+
+
+def test_set_auth_handler_returns_previous():
+    first, second = RecordingHandler(), RecordingHandler()
+    assert set_auth_handler(first) is None
+    assert set_auth_handler(second) is first
+    assert set_auth_handler(None) is second
+    assert pelicanfs.auth_handler.get_auth_handler() is None
 
 
 @needs_pty
