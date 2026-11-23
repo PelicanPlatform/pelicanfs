@@ -649,6 +649,81 @@ def test_auth_handler_error_stops_the_flow(handler_pty):
     handler_pty["write"].assert_not_called()
 
 
+class FullHandler(RecordingHandler):
+    """A handler with the optional methods."""
+
+    def __init__(self, cancel=False):
+        super().__init__()
+        self.cancel = cancel
+        self.finished = []
+
+    def finish(self, success):
+        self.finished.append(success)
+
+    def cancelled(self):
+        return self.cancel
+
+
+@pytest.fixture
+def full_handler_pty():
+    handler = FullHandler()
+    previous = set_auth_handler(handler)
+    try:
+        with _mock_pty(in_kernel=False) as mocks:
+            yield {**mocks, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+@needs_pty
+def test_auth_handler_finish_after_token(full_handler_pty):
+    full_handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert full_handler_pty["handler"].finished == [True]
+
+
+@needs_pty
+def test_auth_handler_finish_after_failure(full_handler_pty):
+    full_handler_pty["feed"]([b"error: nope\n"], returncode=1)
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    assert full_handler_pty["handler"].finished == [False]
+
+
+@needs_pty
+def test_auth_handler_finish_after_handler_error(full_handler_pty):
+    handler = full_handler_pty["handler"]
+    handler.password = RuntimeError("cancelled")
+    full_handler_pty["feed"]([PELICAN_PROMPT_LN])
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    assert handler.finished == [False]
+
+
+@needs_pty
+def test_auth_handler_finish_error_keeps_token(full_handler_pty):
+    full_handler_pty["handler"].finish = MagicMock(side_effect=RuntimeError("app is gone"))
+    full_handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+
+
+@needs_pty
+def test_auth_handler_cancelled_stops_pelican(full_handler_pty):
+    handler = full_handler_pty["handler"]
+    handler.cancel = True
+    full_handler_pty["feed"]([b"waiting...\n"])
+    process = full_handler_pty["process"]
+    process.poll.return_value = None
+    process.returncode = None
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    process.kill.assert_called_once()
+    assert handler.finished == [False]
+    assert handler.shown == []
+
+
 def test_set_auth_handler_returns_previous():
     first, second = RecordingHandler(), RecordingHandler()
     assert set_auth_handler(first) is None

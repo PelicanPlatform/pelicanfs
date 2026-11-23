@@ -463,6 +463,11 @@ pelicanfs.set_auth_handler(MyHandler())
 
 The handler applies to all filesystems in the process and replaces the Jupyter behavior. PelicanFS calls it from the thread that runs the I/O (not the thread of the caller, unless the filesystem is asynchronous), and `ask_password` blocks the flow until it returns. An exception from the handler stops the flow. `set_auth_handler(None)` restores the default.
 
+A handler can also have two optional methods:
+
+- `finish(success)`: PelicanFS calls it once when the flow ends. `success` is `True` if a token was obtained. Use it to close the interface.
+- `cancelled()`: PelicanFS polls it while it waits for `pelican` (not during `ask_password`). Return `True` to stop the flow, for example when the user closes the dialog.
+
 You can configure the timeout (default 300 seconds) for the device flow:
 
 ```python

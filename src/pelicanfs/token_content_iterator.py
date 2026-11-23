@@ -196,6 +196,16 @@ class _HandlerEcho:
         self.pending = ""
 
 
+def _finish_handler(handler: AuthHandler | None, success: bool) -> None:
+    finish = getattr(handler, "finish", None)
+    if finish is None:
+        return
+    try:
+        finish(success)
+    except Exception as err:
+        logger.debug("Auth handler finish() failed: %s", err, exc_info=True)
+
+
 def _disable_echo(fd: int) -> None:
     """Pelican turns echo off itself; do it here too so a password never lands in the output."""
     try:
@@ -380,7 +390,12 @@ class TokenContentIterator:
             handler = get_auth_handler()
             if handler is None and _running_in_ipykernel():
                 handler = _KernelHandler()
-            return self._run_pelican_pty(cmd, handler)
+            token = None
+            try:
+                token = self._run_pelican_pty(cmd, handler)
+                return token
+            finally:
+                _finish_handler(handler, token is not None)
         except Exception as err:
             logger.debug("Error invoking pelican binary: %s", err, exc_info=True)
             return None
@@ -466,7 +481,7 @@ class TokenContentIterator:
                 echo = _TerminalEcho()
                 stdin_data = None if use_tty else _read_redirected_stdin()
 
-            output = self._pump_pty(master_fd, process, echo, stdin_data)
+            output = self._pump_pty(master_fd, process, echo, stdin_data, getattr(handler, "cancelled", None))
             echo.flush()
             if output is None:
                 return None
@@ -479,8 +494,15 @@ class TokenContentIterator:
             if process is not None:
                 _reap(process)
 
-    def _pump_pty(self, master_fd: int, process: subprocess.Popen, echo: Callable[[str], None], stdin_data: bytes | None) -> str | None:
-        """Relay child output until it exits. Returns the full output, or None on timeout."""
+    def _pump_pty(
+        self,
+        master_fd: int,
+        process: subprocess.Popen,
+        echo: Callable[[str], None],
+        stdin_data: bytes | None,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> str | None:
+        """Relay child output until it exits. Returns the full output, or None on timeout or cancel."""
         output: list[str] = []
         start = time.monotonic()
 
@@ -501,6 +523,9 @@ class TokenContentIterator:
         while True:
             if time.monotonic() - start > self.oidc_timeout_seconds:
                 logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
+                return None
+            if cancelled is not None and cancelled():
+                logger.info("OIDC device flow cancelled by the auth handler")
                 return None
             exited = process.poll() is not None  # checked first so output written just before exit is read
             if data := read():

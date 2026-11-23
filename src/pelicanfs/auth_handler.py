@@ -25,6 +25,13 @@ class AuthHandler(Protocol):
 
     The methods are called from the thread that runs the flow, which is not the
     caller's thread. An exception from a method stops the flow.
+
+    A handler can also have these optional methods:
+
+    - ``finish(success: bool) -> None``: called once when the flow ends;
+      ``success`` tells if a token was obtained.
+    - ``cancelled() -> bool``: polled while pelican runs (not during
+      ``ask_password``); True stops the flow.
     """
 
     def show(self, text: str, url: str | None = None) -> None:
@@ -40,7 +47,7 @@ _handler: AuthHandler | None = None
 
 def set_auth_handler(handler: AuthHandler | None) -> AuthHandler | None:
     """Set the handler for all filesystems in this process (None for the default). Returns the previous one."""
-    global _handler  # noqa: PLW0603
+    global _handler
     previous, _handler = _handler, handler
     return previous
 
