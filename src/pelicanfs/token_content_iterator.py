@@ -84,6 +84,8 @@ READER_JOIN_TIMEOUT = 1.0  # Windows: wait for the output thread to reach EOF
 # ConPTY wraps output at the console width, so the width is the largest that fits a 16-bit signed integer
 CONPTY_COLUMNS = 32000
 CONPTY_ROWS = 24
+CONPTY_CLOSE_TIMEOUT = 3.0  # wait for the pywinpty reader thread after the child exits
+CONPTY_THREAD_EXIT_DELAY = 0.1  # the pywinpty exit-watch thread polls each 50 ms
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # Text at the end of a read that can be the start of a JWT.
@@ -239,6 +241,24 @@ def _spawn_conpty(cmd: list[str]) -> "winpty.PTY":
     pty = winpty.PTY(CONPTY_COLUMNS, CONPTY_ROWS, backend=winpty.Backend.ConPTY)
     pty.spawn(shutil.which(cmd[0]) or cmd[0], cmdline=subprocess.list2cmdline(cmd[1:]) or None)
     return pty
+
+
+def _close_conpty(pty: "winpty.PTY") -> None:
+    """
+    Stop the child if it still runs, and wait for the threads of pywinpty to end.
+
+    pywinpty 3.1.2 closes its handles when the PTY object is freed, but its threads can
+    still wait on them. Windows can give the same handle to a new object (for example
+    a lock of a new Python thread), and that object then loses its wake-up.
+    """
+    with contextlib.suppress(OSError, winpty.WinptyError):
+        if pty.isalive():
+            os.kill(pty.pid, signal.SIGTERM)
+        deadline = time.monotonic() + CONPTY_CLOSE_TIMEOUT
+        while not pty.iseof() and time.monotonic() < deadline:
+            pty.read()  # EOF needs an empty queue
+            time.sleep(0.01)
+    time.sleep(CONPTY_THREAD_EXIT_DELAY)
 
 
 def _finish_handler(handler: AuthHandler | None, success: bool) -> None:
@@ -533,9 +553,7 @@ class TokenContentIterator:
                 return None
             return self._extract_token(output)
         finally:
-            if pty.isalive():
-                with contextlib.suppress(OSError):
-                    os.kill(pty.pid, signal.SIGTERM)
+            _close_conpty(pty)
 
     def _run_pelican_pty(self, cmd: list[str], handler: AuthHandler | None) -> str | None:
         """

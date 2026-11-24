@@ -1071,10 +1071,16 @@ def test_conpty_cancelled_stops_pelican(fake_conpty, monkeypatch):
     import signal
 
     killed = []
-    monkeypatch.setattr("os.kill", lambda pid, sig: killed.append((pid, sig)))
+    pty = FakeConPty([], alive=True)
+
+    def kill(pid, sig):
+        killed.append((pid, sig))
+        pty.alive = False
+
+    monkeypatch.setattr("os.kill", kill)
     fake_conpty["handler"].cancel = True
 
-    assert fake_conpty["run"](FakeConPty([], alive=True)) is None
+    assert fake_conpty["run"](pty) is None
     assert killed == [(4242, signal.SIGTERM)]
     assert fake_conpty["handler"].finished == [False]
 
