@@ -457,16 +457,25 @@ class MyHandler:
     def ask_password(self, prompt):
         """Return the password for the local token file."""
 
+    def cancelled(self):
+        """Return True to stop the flow, for example when the user closes the dialog."""
+        return False
+
+    def finish(self, success):
+        """The flow ended. `success` is True if a token was obtained."""
+
 
 pelicanfs.set_auth_handler(MyHandler())
 ```
 
-The handler applies to all filesystems in the process and replaces the Jupyter behavior. PelicanFS calls it from the thread that runs the I/O (not the thread of the caller, unless the filesystem is asynchronous), and `ask_password` blocks the flow until it returns. An exception from the handler stops the flow. `set_auth_handler(None)` restores the default.
+All four methods are necessary. The handler applies to all filesystems in the process and replaces the Jupyter behavior. `set_auth_handler(None)` restores the default.
 
-A handler can also have two optional methods:
+PelicanFS calls the handler from the thread that runs the I/O (not the thread of the caller, unless the filesystem is asynchronous):
 
-- `finish(success)`: PelicanFS calls it once when the flow ends. `success` is `True` if a token was obtained. Use it to close the interface.
-- `cancelled()`: PelicanFS polls it while it waits for `pelican` (not during `ask_password`). Return `True` to stop the flow, for example when the user closes the dialog.
+- `ask_password` blocks the flow until it returns.
+- `cancelled` is polled while PelicanFS waits for `pelican`, but not during `ask_password`.
+- `finish` is called once when the flow ends. Use it to close the interface.
+- An exception from `show` or `ask_password` stops the flow.
 
 You can configure the timeout (default 300 seconds) for the device flow:
 

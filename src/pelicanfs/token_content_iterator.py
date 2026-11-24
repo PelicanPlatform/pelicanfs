@@ -123,6 +123,12 @@ class _KernelHandler:
         print(prompt, flush=True)  # noqa: T201
         return getpass.getpass("")
 
+    def cancelled(self) -> bool:
+        return False  # the kernel interrupt stops the flow
+
+    def finish(self, success: bool) -> None:
+        pass
+
 
 def _write_terminal(text: str) -> None:
     try:
@@ -197,11 +203,10 @@ class _HandlerEcho:
 
 
 def _finish_handler(handler: AuthHandler | None, success: bool) -> None:
-    finish = getattr(handler, "finish", None)
-    if finish is None:
+    if handler is None:
         return
     try:
-        finish(success)
+        handler.finish(success)
     except Exception as err:
         logger.debug("Auth handler finish() failed: %s", err, exc_info=True)
 
@@ -481,7 +486,7 @@ class TokenContentIterator:
                 echo = _TerminalEcho()
                 stdin_data = None if use_tty else _read_redirected_stdin()
 
-            output = self._pump_pty(master_fd, process, echo, stdin_data, getattr(handler, "cancelled", None))
+            output = self._pump_pty(master_fd, process, echo, stdin_data, handler.cancelled if handler else None)
             echo.flush()
             if output is None:
                 return None

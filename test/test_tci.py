@@ -581,6 +581,8 @@ class RecordingHandler:
         self.password = password
         self.shown = []
         self.prompts = []
+        self.cancel = False
+        self.finished = []
 
     def show(self, text, url=None):
         self.shown.append((text, url))
@@ -590,6 +592,12 @@ class RecordingHandler:
         if isinstance(self.password, BaseException):
             raise self.password
         return self.password
+
+    def finish(self, success):
+        self.finished.append(success)
+
+    def cancelled(self):
+        return self.cancel
 
 
 @pytest.fixture
@@ -649,72 +657,46 @@ def test_auth_handler_error_stops_the_flow(handler_pty):
     handler_pty["write"].assert_not_called()
 
 
-class FullHandler(RecordingHandler):
-    """A handler with the optional methods."""
-
-    def __init__(self, cancel=False):
-        super().__init__()
-        self.cancel = cancel
-        self.finished = []
-
-    def finish(self, success):
-        self.finished.append(success)
-
-    def cancelled(self):
-        return self.cancel
-
-
-@pytest.fixture
-def full_handler_pty():
-    handler = FullHandler()
-    previous = set_auth_handler(handler)
-    try:
-        with _mock_pty(in_kernel=False) as mocks:
-            yield {**mocks, "handler": handler}
-    finally:
-        set_auth_handler(previous)
-
-
 @needs_pty
-def test_auth_handler_finish_after_token(full_handler_pty):
-    full_handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+def test_auth_handler_finish_after_token(handler_pty):
+    handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
 
     assert next(_jupyter_iterator()) == FAKE_JWT
-    assert full_handler_pty["handler"].finished == [True]
+    assert handler_pty["handler"].finished == [True]
 
 
 @needs_pty
-def test_auth_handler_finish_after_failure(full_handler_pty):
-    full_handler_pty["feed"]([b"error: nope\n"], returncode=1)
+def test_auth_handler_finish_after_failure(handler_pty):
+    handler_pty["feed"]([b"error: nope\n"], returncode=1)
 
     assert _jupyter_iterator()._get_token_from_pelican_binary() is None
-    assert full_handler_pty["handler"].finished == [False]
+    assert handler_pty["handler"].finished == [False]
 
 
 @needs_pty
-def test_auth_handler_finish_after_handler_error(full_handler_pty):
-    handler = full_handler_pty["handler"]
+def test_auth_handler_finish_after_handler_error(handler_pty):
+    handler = handler_pty["handler"]
     handler.password = RuntimeError("cancelled")
-    full_handler_pty["feed"]([PELICAN_PROMPT_LN])
+    handler_pty["feed"]([PELICAN_PROMPT_LN])
 
     assert _jupyter_iterator()._get_token_from_pelican_binary() is None
     assert handler.finished == [False]
 
 
 @needs_pty
-def test_auth_handler_finish_error_keeps_token(full_handler_pty):
-    full_handler_pty["handler"].finish = MagicMock(side_effect=RuntimeError("app is gone"))
-    full_handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+def test_auth_handler_finish_error_keeps_token(handler_pty):
+    handler_pty["handler"].finish = MagicMock(side_effect=RuntimeError("app is gone"))
+    handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
 
     assert next(_jupyter_iterator()) == FAKE_JWT
 
 
 @needs_pty
-def test_auth_handler_cancelled_stops_pelican(full_handler_pty):
-    handler = full_handler_pty["handler"]
+def test_auth_handler_cancelled_stops_pelican(handler_pty):
+    handler = handler_pty["handler"]
     handler.cancel = True
-    full_handler_pty["feed"]([b"waiting...\n"])
-    process = full_handler_pty["process"]
+    handler_pty["feed"]([b"waiting...\n"])
+    process = handler_pty["process"]
     process.poll.return_value = None
     process.returncode = None
 
@@ -722,6 +704,16 @@ def test_auth_handler_cancelled_stops_pelican(full_handler_pty):
     process.kill.assert_called_once()
     assert handler.finished == [False]
     assert handler.shown == []
+
+
+@pytest.mark.parametrize("missing", ["show", "ask_password", "finish", "cancelled"])
+def test_set_auth_handler_rejects_incomplete_handler(missing):
+    handler = RecordingHandler()
+    setattr(handler, missing, None)
+
+    with pytest.raises(TypeError, match=missing):
+        set_auth_handler(handler)
+    assert pelicanfs.auth_handler.get_auth_handler() is None
 
 
 def test_set_auth_handler_returns_previous():

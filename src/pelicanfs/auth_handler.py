@@ -24,14 +24,7 @@ class AuthHandler(Protocol):
     The user interface for the OIDC device flow, for a program that owns the screen (such as a TUI).
 
     The methods are called from the thread that runs the flow, which is not the
-    caller's thread. An exception from a method stops the flow.
-
-    A handler can also have these optional methods:
-
-    - ``finish(success: bool) -> None``: called once when the flow ends;
-      ``success`` tells if a token was obtained.
-    - ``cancelled() -> bool``: polled while pelican runs (not during
-      ``ask_password``); True stops the flow.
+    caller's thread. An exception from ``show`` or ``ask_password`` stops the flow.
     """
 
     def show(self, text: str, url: str | None = None) -> None:
@@ -41,13 +34,26 @@ class AuthHandler(Protocol):
         """Return the password for the local credential file. This blocks the flow."""
         ...
 
+    def cancelled(self) -> bool:
+        """Polled while pelican runs (not during ``ask_password``). True stops the flow."""
+        ...
 
+    def finish(self, success: bool) -> None:
+        """Called once when the flow ends. ``success`` tells if a token was obtained."""
+
+
+_METHODS = ("show", "ask_password", "cancelled", "finish")
 _handler: AuthHandler | None = None
 
 
 def set_auth_handler(handler: AuthHandler | None) -> AuthHandler | None:
     """Set the handler for all filesystems in this process (None for the default). Returns the previous one."""
     global _handler
+    if handler is not None:
+        missing = [name for name in _METHODS if not callable(getattr(handler, name, None))]
+        if missing:
+            msg = f"An auth handler must have these methods: {', '.join(missing)}"
+            raise TypeError(msg)
     previous, _handler = _handler, handler
     return previous
 
