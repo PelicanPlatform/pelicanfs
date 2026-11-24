@@ -168,7 +168,7 @@ def test_get_token_returns_first_valid_token(token_generator_factory, monkeypatc
     assert token == token1  # First valid token should be returned
 
 
-def test_get_token_thread_safety(token_generator_factory, monkeypatch):
+def test_get_token_thread_safety(token_generator_factory, monkeypatch, request):
     tg = token_generator_factory()
     tg.TokenLocation = "/some/valid/location"
 
@@ -199,10 +199,16 @@ def test_get_token_thread_safety(token_generator_factory, monkeypatch):
 
     threads = [threading.Thread(target=worker) for _ in range(10)]
 
+    import faulthandler
+
+    from _pytest.faulthandler import fault_handler_stderr_fd_key
+
+    faulthandler.dump_traceback_later(40, exit=True, file=request.config.stash[fault_handler_stderr_fd_key])
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    faulthandler.cancel_dump_traceback_later()
 
     assert all(tok == valid_token for tok in results)
     assert not exceptions
