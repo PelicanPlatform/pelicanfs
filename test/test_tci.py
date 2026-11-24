@@ -26,9 +26,11 @@ import pytest
 
 import pelicanfs.auth_handler
 from pelicanfs import set_auth_handler
-from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho
+from pelicanfs import token_content_iterator as tci
+from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho, _VtFilter
 
 needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
+needs_conpty = pytest.mark.skipif(sys.platform != "win32", reason="Needs a real ConPTY")
 
 
 @pytest.fixture(autouse=True)
@@ -978,3 +980,196 @@ def test_oidc_windows_branch_returns_token(monkeypatch):
     iterator = _windows_branch_iterator(monkeypatch, script, timeout=30)
 
     assert iterator._get_token_from_pelican_binary() == "eyJa.eyJb.sigc"
+
+
+def test_vt_filter_removes_escape_sequences():
+    clean = _VtFilter()
+
+    assert clean("\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\pelican.exe\x07Password:\x1b[K\r\n") == "Password:\r\n"
+    assert clean("a\x1b[3Cb\x1b[Cc\x1b]0;title\x1b\\d\x1b=e") == "a   b cde"
+
+
+@pytest.mark.parametrize("text", ["ab\x1b[38;5;1mcd\x1b]0;title\x07ef\x1b[2Cgh"])
+def test_vt_filter_sequence_split_across_reads(text):
+    for split in range(len(text) + 1):
+        clean = _VtFilter()
+        assert clean(text[:split]) + clean(text[split:]) == "abcdef  gh"
+
+
+class FakeConPty:
+    """The part of winpty.PTY that the ConPTY code path uses."""
+
+    pid = 4242
+
+    def __init__(self, chunks, status=0, alive=False):
+        self.chunks = list(chunks)
+        self.status = status
+        self.alive = alive
+        self.written = []
+
+    def read(self):
+        return self.chunks.pop(0) if self.chunks else ""
+
+    def write(self, text):
+        self.written.append(text)
+
+    def iseof(self):
+        return not self.alive and not self.chunks
+
+    def isalive(self):
+        return self.alive
+
+    def get_exitstatus(self):
+        return None if self.alive else self.status
+
+
+@pytest.fixture
+def fake_conpty(monkeypatch):
+    """Run the ConPTY code path on a fake PTY, with a registered auth handler."""
+    import types
+
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+
+    def run(pty):
+        monkeypatch.setattr(tci, "_IS_WINDOWS", True)
+        monkeypatch.setattr(tci, "winpty", types.SimpleNamespace(WinptyError=RuntimeError), raising=False)
+        monkeypatch.setattr(tci, "_spawn_conpty", lambda _cmd: pty)
+        return _jupyter_iterator(select_timeout=0.01)._get_token_from_pelican_binary()
+
+    try:
+        yield {"run": run, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+def test_conpty_handler_gets_clean_output_and_answers_prompt(fake_conpty):
+    handler = fake_conpty["handler"]
+    pty = FakeConPty(
+        [
+            "\x1b[?25l\x1b[2J\x1b[m\x1b[H" + PELICAN_PROMPT_LN.decode().replace("\n", "\r\n"),
+            "\x1b]0;C:\\pelican.exe\x07\x1b[?25hhttps://issuer.example/device?user_code=ABC-123\r\n" + FAKE_JWT[:50],
+            FAKE_JWT[50:] + "\x1b[",
+            "K\r\n",
+        ]
+    )
+
+    assert fake_conpty["run"](pty) == FAKE_JWT
+    assert pty.written == ["s3cret\r"]
+    assert handler.prompts == [PELICAN_PROMPT_LN.decode().rstrip("\n")]
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert handler.shown == [(url, url)]
+    assert handler.finished == [True]
+
+
+def test_conpty_nonzero_exit(fake_conpty):
+    assert fake_conpty["run"](FakeConPty([FAKE_JWT + "\r\n"], status=1)) is None
+    assert fake_conpty["handler"].finished == [False]
+
+
+def test_conpty_cancelled_stops_pelican(fake_conpty, monkeypatch):
+    import signal
+
+    killed = []
+    monkeypatch.setattr("os.kill", lambda pid, sig: killed.append((pid, sig)))
+    fake_conpty["handler"].cancel = True
+
+    assert fake_conpty["run"](FakeConPty([], alive=True)) is None
+    assert killed == [(4242, signal.SIGTERM)]
+    assert fake_conpty["handler"].finished == [False]
+
+
+# In place of pelican: needs a console for stdin, reads the password with no echo.
+CONPTY_CHILD = """
+import getpass
+import sys
+
+if not sys.stdin.isatty():
+    sys.exit(2)
+sys.stderr.write("Please create a new password to protect your local credentials: \\r\\n")
+sys.stderr.flush()
+if getpass.getpass("") != "s3cret":
+    sys.exit(3)
+print("To approve credentials for this operation, please navigate to the following URL and approve the request:")
+print("https://issuer.example/device?user_code=ABC-123")
+print("{jwt}")
+sys.exit({status})
+"""
+LONG_JWT = f"eyJ{'a' * 2000}.eyJ{'b' * 2000}.{'c' * 2000}"
+
+
+@pytest.fixture
+def conpty(monkeypatch, tmp_path):
+    """Run the ConPTY code path with a Python child in place of the pelican binary."""
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    spawn = tci._spawn_conpty
+
+    def run(script, **kwargs):
+        path = tmp_path / "child.py"
+        path.write_text(script)
+        monkeypatch.setattr(tci, "_spawn_conpty", lambda _cmd: spawn([sys.executable, str(path)]))
+        return _jupyter_iterator(**kwargs)._get_token_from_pelican_binary()
+
+    try:
+        yield {"run": run, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+@needs_conpty
+def test_conpty_real_child_gets_password_and_returns_token(conpty):
+    handler = conpty["handler"]
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=LONG_JWT, status=0)) == LONG_JWT
+    assert handler.prompts == ["Please create a new password to protect your local credentials: "]
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert (url, url) in handler.shown
+    assert ("To approve credentials for this operation, please navigate to the following URL and approve the request:", None) in handler.shown
+    assert not any("\x1b" in text or "s3cret" in text or "c" * 100 in text for text, _ in handler.shown)
+    assert handler.finished == [True]
+
+
+@needs_conpty
+def test_conpty_real_child_token_longer_than_the_console_width(conpty, monkeypatch):
+    monkeypatch.setattr(tci, "CONPTY_COLUMNS", 80)
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=0)) == FAKE_JWT
+
+
+@needs_conpty
+def test_conpty_real_child_wrong_password(conpty):
+    conpty["handler"].password = "wrong"
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=0)) is None
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_nonzero_exit(conpty):
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=1)) is None
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_timeout_with_silent_child(conpty):
+    start = time.monotonic()
+    assert conpty["run"]("import time; time.sleep(30)", oidc_timeout_seconds=1) is None
+    assert time.monotonic() - start < 10
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_cancelled(conpty):
+    handler = conpty["handler"]
+    polls = []
+
+    def cancelled():
+        polls.append(time.monotonic())
+        return len(polls) > 5
+
+    handler.cancelled = cancelled
+    start = time.monotonic()
+    assert conpty["run"]("import time; time.sleep(30)") is None
+    assert time.monotonic() - start < 10
+    assert handler.finished == [False]

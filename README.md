@@ -442,9 +442,9 @@ You may also be prompted for a password to encrypt or decrypt the local token fi
 Enter a password for the token file:
 ```
 
-In a Jupyter notebook (Linux and macOS), the same output appears in the cell. The notebook shows the password prompt as a masked input box and shows the authorization URL as a clickable link.
+In a Jupyter notebook, the same output appears in the cell. The notebook shows the password prompt as a masked input box and shows the authorization URL as a clickable link.
 
-A program that owns the screen, such as a TUI, can show the flow in its own interface (Linux and macOS). Set a handler before the first access:
+A program that owns the screen, such as a TUI, can show the flow in its own interface. Set a handler before the first access:
 
 ```python
 import pelicanfs
@@ -476,6 +476,8 @@ PelicanFS calls the handler from the thread that runs the I/O (not the thread of
 - `cancelled` is polled while PelicanFS waits for `pelican`, but not during `ask_password`.
 - `finish` is called once when the flow ends. Use it to close the interface.
 - An exception from `show` or `ask_password` stops the flow.
+
+On Windows, the notebook and the handler run `pelican` in a pseudoconsole (ConPTY). PelicanFS installs the `pywinpty` package for this.
 
 You can configure the timeout (default 300 seconds) for the device flow:
 
