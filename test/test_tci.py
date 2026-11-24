@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -23,9 +24,13 @@ from unittest.mock import MagicMock, mock_open, patch
 
 import pytest
 
-from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho
+import pelicanfs.auth_handler
+from pelicanfs import set_auth_handler
+from pelicanfs import token_content_iterator as tci
+from pelicanfs.token_content_iterator import TokenContentIterator, TokenDiscoveryMethod, _TerminalEcho, _VtFilter
 
 needs_pty = pytest.mark.skipif(sys.platform == "win32", reason="Tests the Unix pty code path")
+needs_conpty = pytest.mark.skipif(sys.platform != "win32", reason="Needs a real ConPTY")
 
 
 @pytest.fixture(autouse=True)
@@ -528,19 +533,12 @@ def _select_for(chunks):
     return [([100], [], [])] * len(chunks) + [([], [], [])] * 3
 
 
-@pytest.fixture
-def jupyter_pty(monkeypatch):
-    """Mock the pty machinery and pretend to run inside an IPython kernel."""
-    import types
-
-    displayed = []
-    fake_display_module = types.ModuleType("IPython.display")
-    fake_display_module.display = lambda data, raw=False: displayed.append((data, raw))
-    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
-    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
+@contextlib.contextmanager
+def _mock_pty(in_kernel):
+    """Mock the pty machinery; stdin must come from the pty, not from /dev/tty."""
     with (
         patch("shutil.which", return_value="/usr/bin/pelican"),
-        patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=True),
+        patch("pelicanfs.token_content_iterator._running_in_ipykernel", return_value=in_kernel),
         patch("pty.openpty", return_value=(100, 101)),
         patch("termios.tcgetattr", return_value=[0, 0, 0, 0, 0, 0, []]),
         patch("termios.tcsetattr"),
@@ -552,7 +550,7 @@ def jupyter_pty(monkeypatch):
         patch("select.select") as mock_select,
         patch("getpass.getpass", return_value="hunter2") as mock_getpass,
     ):
-        mock_open_fd.side_effect = AssertionError("/dev/tty must not be opened in the Jupyter path")
+        mock_open_fd.side_effect = AssertionError("/dev/tty must not be opened when a handler answers the prompts")
         process = mock_popen.return_value
         process.returncode = 0
 
@@ -563,7 +561,169 @@ def jupyter_pty(monkeypatch):
             process.poll.return_value = returncode
             process.returncode = returncode
 
-        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select, "displayed": displayed}
+        yield {"feed": feed, "popen": mock_popen, "process": process, "write": mock_write, "getpass": mock_getpass, "select": mock_select}
+
+
+@pytest.fixture
+def jupyter_pty(monkeypatch):
+    """Mock the pty machinery and pretend to run inside an IPython kernel."""
+    import types
+
+    displayed = []
+    fake_display_module = types.ModuleType("IPython.display")
+    fake_display_module.display = lambda data, raw=False: displayed.append((data, raw))
+    monkeypatch.setitem(sys.modules, "IPython", types.ModuleType("IPython"))
+    monkeypatch.setitem(sys.modules, "IPython.display", fake_display_module)
+    with _mock_pty(in_kernel=True) as mocks:
+        yield {**mocks, "displayed": displayed}
+
+
+class RecordingHandler:
+    def __init__(self, password="s3cret"):
+        self.password = password
+        self.shown = []
+        self.prompts = []
+        self.cancel = False
+        self.finished = []
+
+    def show(self, text, url=None):
+        self.shown.append((text, url))
+
+    def ask_password(self, prompt):
+        self.prompts.append(prompt)
+        if isinstance(self.password, BaseException):
+            raise self.password
+        return self.password
+
+    def finish(self, success):
+        self.finished.append(success)
+
+    def cancelled(self):
+        return self.cancel
+
+
+@pytest.fixture
+def handler_pty():
+    """Mock the pty machinery with a registered auth handler, outside a kernel."""
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    try:
+        with _mock_pty(in_kernel=False) as mocks:
+            yield {**mocks, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+@needs_pty
+def test_auth_handler_gets_output_and_answers_prompt(handler_pty, capsys):
+    handler = handler_pty["handler"]
+    handler_pty["feed"]([PELICAN_PREAMBLE + PELICAN_PROMPT, b"\r\n" + PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert handler.prompts == [PELICAN_PROMPT.decode()]
+    handler_pty["write"].assert_called_once_with(100, b"s3cret\n")
+    handler_pty["getpass"].assert_not_called()
+    assert handler_pty["popen"].call_args.kwargs["stdin"] == 101
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert (url, url) in handler.shown
+    assert ("You will be asked for this password whenever a new session is started.", None) in handler.shown
+    assert not any(FAKE_JWT_SIGNATURE in text for text, _ in handler.shown)
+    assert capsys.readouterr().out == ""
+
+
+@needs_pty
+def test_auth_handler_wins_inside_kernel(jupyter_pty, capsys):
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    try:
+        jupyter_pty["feed"]([PELICAN_PROMPT_LN, PELICAN_URL_LINE + FAKE_JWT.encode() + b"\n"])
+        assert next(_jupyter_iterator()) == FAKE_JWT
+    finally:
+        set_auth_handler(previous)
+
+    assert len(handler.prompts) == 1
+    jupyter_pty["getpass"].assert_not_called()
+    assert jupyter_pty["displayed"] == []
+    assert capsys.readouterr().out == ""
+
+
+@needs_pty
+def test_auth_handler_error_stops_the_flow(handler_pty):
+    handler_pty["handler"].password = RuntimeError("cancelled")
+    handler_pty["feed"]([PELICAN_PROMPT_LN])
+    handler_pty["process"].poll.return_value = None
+    handler_pty["process"].returncode = None
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    handler_pty["process"].kill.assert_called_once()
+    handler_pty["write"].assert_not_called()
+
+
+@needs_pty
+def test_auth_handler_finish_after_token(handler_pty):
+    handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+    assert handler_pty["handler"].finished == [True]
+
+
+@needs_pty
+def test_auth_handler_finish_after_failure(handler_pty):
+    handler_pty["feed"]([b"error: nope\n"], returncode=1)
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    assert handler_pty["handler"].finished == [False]
+
+
+@needs_pty
+def test_auth_handler_finish_after_handler_error(handler_pty):
+    handler = handler_pty["handler"]
+    handler.password = RuntimeError("cancelled")
+    handler_pty["feed"]([PELICAN_PROMPT_LN])
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    assert handler.finished == [False]
+
+
+@needs_pty
+def test_auth_handler_finish_error_keeps_token(handler_pty):
+    handler_pty["handler"].finish = MagicMock(side_effect=RuntimeError("app is gone"))
+    handler_pty["feed"]([FAKE_JWT.encode() + b"\n"])
+
+    assert next(_jupyter_iterator()) == FAKE_JWT
+
+
+@needs_pty
+def test_auth_handler_cancelled_stops_pelican(handler_pty):
+    handler = handler_pty["handler"]
+    handler.cancel = True
+    handler_pty["feed"]([b"waiting...\n"])
+    process = handler_pty["process"]
+    process.poll.return_value = None
+    process.returncode = None
+
+    assert _jupyter_iterator()._get_token_from_pelican_binary() is None
+    process.kill.assert_called_once()
+    assert handler.finished == [False]
+    assert handler.shown == []
+
+
+@pytest.mark.parametrize("missing", ["show", "ask_password", "finish", "cancelled"])
+def test_set_auth_handler_rejects_incomplete_handler(missing):
+    handler = RecordingHandler()
+    setattr(handler, missing, None)
+
+    with pytest.raises(TypeError, match=missing):
+        set_auth_handler(handler)
+    assert pelicanfs.auth_handler.get_auth_handler() is None
+
+
+def test_set_auth_handler_returns_previous():
+    first, second = RecordingHandler(), RecordingHandler()
+    assert set_auth_handler(first) is None
+    assert set_auth_handler(second) is first
+    assert set_auth_handler(None) is second
+    assert pelicanfs.auth_handler.get_auth_handler() is None
 
 
 @needs_pty
@@ -820,3 +980,202 @@ def test_oidc_windows_branch_returns_token(monkeypatch):
     iterator = _windows_branch_iterator(monkeypatch, script, timeout=30)
 
     assert iterator._get_token_from_pelican_binary() == "eyJa.eyJb.sigc"
+
+
+def test_vt_filter_removes_escape_sequences():
+    clean = _VtFilter()
+
+    assert clean("\x1b[?25l\x1b[2J\x1b[m\x1b[H\x1b]0;C:\\pelican.exe\x07Password:\x1b[K\r\n") == "Password:\r\n"
+    assert clean("a\x1b[3Cb\x1b[Cc\x1b]0;title\x1b\\d\x1b=e") == "a   b cde"
+
+
+@pytest.mark.parametrize("text", ["ab\x1b[38;5;1mcd\x1b]0;title\x07ef\x1b[2Cgh"])
+def test_vt_filter_sequence_split_across_reads(text):
+    for split in range(len(text) + 1):
+        clean = _VtFilter()
+        assert clean(text[:split]) + clean(text[split:]) == "abcdef  gh"
+
+
+class FakeConPty:
+    """The part of winpty.PTY that the ConPTY code path uses."""
+
+    pid = 4242
+
+    def __init__(self, chunks, status=0, alive=False):
+        self.chunks = list(chunks)
+        self.status = status
+        self.alive = alive
+        self.written = []
+
+    def read(self):
+        return self.chunks.pop(0) if self.chunks else ""
+
+    def write(self, text):
+        self.written.append(text)
+
+    def iseof(self):
+        return not self.alive and not self.chunks
+
+    def isalive(self):
+        return self.alive
+
+    def get_exitstatus(self):
+        return None if self.alive else self.status
+
+
+@pytest.fixture
+def fake_conpty(monkeypatch):
+    """Run the ConPTY code path on a fake PTY, with a registered auth handler."""
+    import types
+
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+
+    def run(pty):
+        monkeypatch.setattr(tci, "_IS_WINDOWS", True)
+        monkeypatch.setattr(tci, "winpty", types.SimpleNamespace(WinptyError=RuntimeError), raising=False)
+        monkeypatch.setattr(tci, "_spawn_conpty", lambda _cmd: pty)
+        return _jupyter_iterator(select_timeout=0.01)._get_token_from_pelican_binary()
+
+    try:
+        yield {"run": run, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+def test_conpty_handler_gets_clean_output_and_answers_prompt(fake_conpty):
+    handler = fake_conpty["handler"]
+    pty = FakeConPty(
+        [
+            "\x1b[?25l\x1b[2J\x1b[m\x1b[H" + PELICAN_PROMPT_LN.decode().replace("\n", "\r\n"),
+            "\x1b]0;C:\\pelican.exe\x07\x1b[?25hhttps://issuer.example/device?user_code=ABC-123\r\n" + FAKE_JWT[:50],
+            FAKE_JWT[50:] + "\x1b[",
+            "K\r\n",
+        ]
+    )
+
+    assert fake_conpty["run"](pty) == FAKE_JWT
+    assert pty.written == ["s3cret\r"]
+    assert handler.prompts == [PELICAN_PROMPT_LN.decode().rstrip("\n")]
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert handler.shown == [(url, url)]
+    assert handler.finished == [True]
+
+
+def test_conpty_nonzero_exit(fake_conpty):
+    assert fake_conpty["run"](FakeConPty([FAKE_JWT + "\r\n"], status=1)) is None
+    assert fake_conpty["handler"].finished == [False]
+
+
+def test_conpty_cancelled_stops_pelican(fake_conpty, monkeypatch):
+    import signal
+
+    killed = []
+    pty = FakeConPty([], alive=True)
+
+    def kill(pid, sig):
+        killed.append((pid, sig))
+        pty.alive = False
+
+    monkeypatch.setattr("os.kill", kill)
+    fake_conpty["handler"].cancel = True
+
+    assert fake_conpty["run"](pty) is None
+    assert killed == [(4242, signal.SIGTERM)]
+    assert fake_conpty["handler"].finished == [False]
+
+
+# In place of pelican: needs a console for stdin, reads the password with no echo.
+CONPTY_CHILD = """
+import getpass
+import sys
+
+if not sys.stdin.isatty():
+    sys.exit(2)
+sys.stderr.write("Please create a new password to protect your local credentials: \\n")
+sys.stderr.flush()
+if getpass.getpass("") != "s3cret":
+    sys.exit(3)
+print("To approve credentials for this operation, please navigate to the following URL and approve the request:")
+print("https://issuer.example/device?user_code=ABC-123")
+print("{jwt}")
+sys.exit({status})
+"""
+LONG_JWT = f"eyJ{'a' * 2000}.eyJ{'b' * 2000}.{'c' * 2000}"
+
+
+@pytest.fixture
+def conpty(monkeypatch, tmp_path):
+    """Run the ConPTY code path with a Python child in place of the pelican binary."""
+    handler = RecordingHandler()
+    previous = set_auth_handler(handler)
+    spawn = tci._spawn_conpty
+
+    def run(script, **kwargs):
+        path = tmp_path / "child.py"
+        path.write_text(script)
+        monkeypatch.setattr(tci, "_spawn_conpty", lambda _cmd: spawn([sys.executable, str(path)]))
+        return _jupyter_iterator(**kwargs)._get_token_from_pelican_binary()
+
+    try:
+        yield {"run": run, "handler": handler}
+    finally:
+        set_auth_handler(previous)
+
+
+@needs_conpty
+def test_conpty_real_child_gets_password_and_returns_token(conpty):
+    handler = conpty["handler"]
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=LONG_JWT, status=0)) == LONG_JWT
+    assert handler.prompts == ["Please create a new password to protect your local credentials: "]
+    url = "https://issuer.example/device?user_code=ABC-123"
+    assert (url, url) in handler.shown
+    assert ("To approve credentials for this operation, please navigate to the following URL and approve the request:", None) in handler.shown
+    assert not any("\x1b" in text or "s3cret" in text or "c" * 100 in text for text, _ in handler.shown)
+    assert handler.finished == [True]
+
+
+@needs_conpty
+def test_conpty_real_child_token_longer_than_the_console_width(conpty, monkeypatch):
+    monkeypatch.setattr(tci, "CONPTY_COLUMNS", 80)
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=0)) == FAKE_JWT
+
+
+@needs_conpty
+def test_conpty_real_child_wrong_password(conpty):
+    conpty["handler"].password = "wrong"
+
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=0)) is None
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_nonzero_exit(conpty):
+    assert conpty["run"](CONPTY_CHILD.format(jwt=FAKE_JWT, status=1)) is None
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_timeout_with_silent_child(conpty):
+    start = time.monotonic()
+    assert conpty["run"]("import time; time.sleep(30)", oidc_timeout_seconds=1) is None
+    assert time.monotonic() - start < 10
+    assert conpty["handler"].finished == [False]
+
+
+@needs_conpty
+def test_conpty_real_child_cancelled(conpty):
+    handler = conpty["handler"]
+    polls = []
+
+    def cancelled():
+        polls.append(time.monotonic())
+        return len(polls) > 5
+
+    handler.cancelled = cancelled
+    start = time.monotonic()
+    assert conpty["run"]("import time; time.sleep(30)") is None
+    assert time.monotonic() - start < 10
+    assert handler.finished == [False]

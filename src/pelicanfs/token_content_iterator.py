@@ -22,15 +22,18 @@ __lazy_modules__ = {
     "igwn_auth_utils.scitokens",
     "io",
     "json",
+    "pelicanfs.auth_handler",
     "pelicanfs.log_utils",
     "pty",
     "queue",
     "select",
     "shutil",
+    "signal",
     "subprocess",
     "termios",
     "threading",
     "typing",
+    "winpty",
 }
 
 import contextlib
@@ -44,6 +47,7 @@ import platform
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -58,11 +62,14 @@ from igwn_auth_utils.scitokens import (
     default_bearer_token_file,
 )
 
+from pelicanfs.auth_handler import AuthHandler, get_auth_handler
 from pelicanfs.log_utils import TokenForLog
 
 # Platform-specific imports
 _IS_WINDOWS = platform.system() == "Windows"
-if not _IS_WINDOWS:
+if _IS_WINDOWS:
+    import winpty
+else:
     import pty
     import select
     import termios
@@ -74,6 +81,11 @@ DEFAULT_OIDC_TIMEOUT_SECONDS = 300  # 5 minutes
 DEFAULT_PTY_BUFFER_SIZE = 1024
 DEFAULT_SELECT_TIMEOUT = 0.1  # 100ms for responsive I/O
 READER_JOIN_TIMEOUT = 1.0  # Windows: wait for the output thread to reach EOF
+# ConPTY wraps output at the console width, so the width is the largest that fits a 16-bit signed integer
+CONPTY_COLUMNS = 32000
+CONPTY_ROWS = 24
+CONPTY_CLOSE_TIMEOUT = 3.0  # wait for the pywinpty reader thread after the child exits
+CONPTY_THREAD_EXIT_DELAY = 0.1  # the pywinpty exit-watch thread polls each 50 ms
 
 _JWT_PATTERN = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 # Text at the end of a read that can be the start of a JWT.
@@ -82,6 +94,14 @@ _PARTIAL_JWT_PATTERN = re.compile(r"(?:e|ey|eyJ[A-Za-z0-9_.-]*)\Z")
 # Prose such as "asked for this password whenever a new session is started." must not match.
 _PASSWORD_PROMPT_PATTERN = re.compile(r"[Pp]assword[^:\n]*:\s*$")
 _DEVICE_URL_PATTERN = re.compile(r"https?://\S+/(?:device|activate|authorize|login|oauth)\S*")
+_VT_SEQUENCE = re.compile(
+    r"\x1b\[(?P<forward>\d*)C"  # cursor forward (older ConPTY versions can write this in place of spaces)
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"  # other CSI sequences
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC (window title)
+    r"|\x1b[ -/]*[0-~]"
+)
+# Text at the end of a read that can be the start of an escape sequence.
+_PARTIAL_VT_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*|\][^\x07\x1b]*\x1b?|[ -/]*)\Z")
 
 
 def _redact(text: str) -> str:
@@ -97,22 +117,35 @@ def _running_in_ipykernel() -> bool:
     return shell is not None and any(cls.__name__ == "ZMQInteractiveShell" for cls in type(shell).__mro__)
 
 
-def _send_password(master_fd: int) -> None:
-    """Ask through getpass (a masked box in notebooks) and answer the prompt on the pty."""
-    password = getpass.getpass("")
-    os.write(master_fd, (password + "\n").encode())
-
-
 def _display_device_url(line: str, url: str) -> None:
     """Show the URL line once: a clickable link in notebook frontends, plain text elsewhere."""
     try:
         from IPython.display import display  # noqa: PLC0415
     except ImportError:
-        print(line, end="", flush=True)  # noqa: T201
+        print(line, flush=True)  # noqa: T201
         return
-    text = line.strip()
     link = f'<a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(url)}</a>'
-    display({"text/html": html.escape(text).replace(html.escape(url), link), "text/plain": text}, raw=True)
+    display({"text/html": html.escape(line).replace(html.escape(url), link), "text/plain": line}, raw=True)
+
+
+class _KernelHandler:
+    """Notebook cell: the device URL is a link, the password comes from getpass (a masked box)."""
+
+    def show(self, text: str, url: str | None = None) -> None:
+        if url:
+            _display_device_url(text.strip(), url)
+        else:
+            print(text, flush=True)  # noqa: T201
+
+    def ask_password(self, prompt: str) -> str:
+        print(prompt, flush=True)  # noqa: T201
+        return getpass.getpass("")
+
+    def cancelled(self) -> bool:
+        return False  # the kernel interrupt stops the flow
+
+    def finish(self, success: bool) -> None:
+        pass
 
 
 def _write_terminal(text: str) -> None:
@@ -146,17 +179,18 @@ class _TerminalEcho:
         self.pending = ""
 
 
-class _KernelEcho:
+class _HandlerEcho:
     """
-    Line-based echo for a notebook cell.
+    Line-based echo through an AuthHandler.
 
-    Answers the password prompt through getpass, shows the device URL as a link,
+    Answers the password prompt on the pty, marks the device URL,
     and drops lines that contain only the token.
     """
 
-    def __init__(self, master_fd: int) -> None:
-        self.master_fd = master_fd
-        self.pending = ""  # text read but not yet printed (no trailing newline)
+    def __init__(self, send_password: Callable[[str], object], handler: AuthHandler) -> None:
+        self.send_password = send_password
+        self.handler = handler
+        self.pending = ""  # text read but not yet shown (no trailing newline)
 
     def __call__(self, text: str) -> None:
         self.pending += text
@@ -166,20 +200,74 @@ class _KernelEcho:
             lines.append(self.pending)
             self.pending = ""
         for line in lines:
-            if _JWT_PATTERN.fullmatch(line.strip()):
-                continue
-            redacted = _redact(line)
-            if match := _DEVICE_URL_PATTERN.search(redacted):
-                _display_device_url(redacted, match.group(0))
-            else:
-                print(redacted, end="", flush=True)  # noqa: T201
-                if _PASSWORD_PROMPT_PATTERN.search(line):
-                    _send_password(self.master_fd)
+            self._handle(line)
+
+    def _handle(self, line: str) -> None:
+        if _JWT_PATTERN.fullmatch(line.strip()):
+            return
+        redacted = _redact(line).rstrip("\r\n")
+        if match := _DEVICE_URL_PATTERN.search(redacted):
+            self.handler.show(redacted, match.group(0))
+        elif _PASSWORD_PROMPT_PATTERN.search(line):
+            self.send_password(self.handler.ask_password(redacted))
+        else:
+            self.handler.show(redacted)
 
     def flush(self) -> None:
-        if self.pending and not _JWT_PATTERN.fullmatch(self.pending.strip()):
-            print(_redact(self.pending), flush=True)  # noqa: T201
+        if self.pending:
+            self._handle(self.pending)
         self.pending = ""
+
+
+class _VtFilter:
+    """
+    Remove terminal escape sequences from ConPTY output.
+
+    A read can end inside a sequence, so text that can be the start of one waits for the next read.
+    """
+
+    def __init__(self) -> None:
+        self.pending = ""
+
+    def __call__(self, text: str) -> str:
+        text = self.pending + text
+        partial = _PARTIAL_VT_SEQUENCE.search(text)
+        end = partial.start() if partial else len(text)
+        self.pending = text[end:]
+        return _VT_SEQUENCE.sub(lambda match: "" if match["forward"] is None else " " * int(match["forward"] or 1), text[:end])
+
+
+def _spawn_conpty(cmd: list[str]) -> "winpty.PTY":
+    pty = winpty.PTY(CONPTY_COLUMNS, CONPTY_ROWS, backend=winpty.Backend.ConPTY)
+    pty.spawn(shutil.which(cmd[0]) or cmd[0], cmdline=subprocess.list2cmdline(cmd[1:]) or None)
+    return pty
+
+
+def _close_conpty(pty: "winpty.PTY") -> None:
+    """
+    Stop the child if it still runs, and wait for the threads of pywinpty to end.
+
+    pywinpty 3.1.2 closes its handles when the PTY object is freed, but its threads can
+    still wait on them. Windows can give the same handle to a new object (for example
+    a lock of a new Python thread), and that object then loses its wake-up.
+    """
+    with contextlib.suppress(OSError, winpty.WinptyError):
+        if pty.isalive():
+            os.kill(pty.pid, signal.SIGTERM)
+        deadline = time.monotonic() + CONPTY_CLOSE_TIMEOUT
+        while not pty.iseof() and time.monotonic() < deadline:
+            pty.read()  # EOF needs an empty queue
+            time.sleep(0.01)
+    time.sleep(CONPTY_THREAD_EXIT_DELAY)
+
+
+def _finish_handler(handler: AuthHandler | None, success: bool) -> None:
+    if handler is None:
+        return
+    try:
+        handler.finish(success)
+    except Exception as err:
+        logger.debug("Auth handler finish() failed: %s", err, exc_info=True)
 
 
 def _disable_echo(fd: int) -> None:
@@ -343,8 +431,10 @@ class TokenContentIterator:
         Invoke pelican binary to get token via OIDC device flow.
 
         - Unix terminal: pty for output, stdin from /dev/tty
-        - Unix Jupyter kernel: pty for stdin too, password via getpass, URL as a link
-        - Windows: subprocess with inherited stdin
+        - Windows terminal: subprocess with inherited stdin
+        - With an AuthHandler (set by the caller, or the built-in one in a Jupyter
+          kernel): a pty (Unix) or ConPTY (Windows) for stdin too, the handler shows
+          output and gives the password
 
         Returns:
             str: JWT token if successful, None otherwise
@@ -360,9 +450,20 @@ class TokenContentIterator:
         logger.info("Invoking OIDC device flow via pelican binary: %s", " ".join(cmd))
 
         try:
-            if _IS_WINDOWS:
-                return self._run_pelican_windows(cmd)
-            return self._run_pelican_pty(cmd, in_kernel=_running_in_ipykernel())
+            handler = get_auth_handler()
+            if handler is None and _running_in_ipykernel():
+                handler = _KernelHandler()
+            token = None
+            try:
+                if not _IS_WINDOWS:
+                    token = self._run_pelican_pty(cmd, handler)
+                elif handler is None:
+                    token = self._run_pelican_windows(cmd)
+                else:
+                    token = self._run_pelican_conpty(cmd, handler)
+                return token
+            finally:
+                _finish_handler(handler, token is not None)
         except Exception as err:
             logger.debug("Error invoking pelican binary: %s", err, exc_info=True)
             return None
@@ -412,20 +513,62 @@ class TokenContentIterator:
             if not reader.is_alive():
                 stdout.close()
 
-    def _run_pelican_pty(self, cmd: list[str], in_kernel: bool) -> str | None:
+    def _run_pelican_conpty(self, cmd: list[str], handler: AuthHandler) -> str | None:
+        """Run pelican under ConPTY (Windows): pelican reads the password only from a console."""
+        pty = _spawn_conpty(cmd)
+        clean = _VtFilter()
+        eof = False
+        exit_time = None
+
+        def read() -> str:
+            nonlocal eof
+            try:
+                text = pty.read()  # does not block
+            except winpty.WinptyError:  # EOF
+                eof = True
+                text = ""
+            if not text:
+                time.sleep(self.select_timeout)
+            return clean(text)
+
+        def drained() -> bool:
+            nonlocal exit_time
+            if eof or pty.iseof():
+                return True
+            if pty.isalive():
+                return False
+            # ConPTY can hold the output open after the child exits
+            exit_time = exit_time or time.monotonic()
+            return time.monotonic() - exit_time > READER_JOIN_TIMEOUT
+
+        # The Enter key is "\r" on a Windows console
+        echo = _HandlerEcho(lambda password: pty.write(password + "\r"), handler)
+        try:
+            output = self._pump(read, drained, echo, handler.cancelled)
+            echo.flush()
+            if output is None:
+                return None
+            if (status := pty.get_exitstatus()) != 0:
+                logger.debug("Pelican binary exited with code %s", status)
+                return None
+            return self._extract_token(output)
+        finally:
+            _close_conpty(pty)
+
+    def _run_pelican_pty(self, cmd: list[str], handler: AuthHandler | None) -> str | None:
         """
         Run pelican under a pty (Unix).
 
         In a terminal the child reads stdin from /dev/tty, so pelican handles the
-        password prompt itself. In a kernel, or when /dev/tty is unavailable, stdin
-        is the pty: the kernel answers the prompt through getpass, a script forwards
-        its redirected stdin once.
+        password prompt itself. With a handler, or when /dev/tty is unavailable, stdin
+        is the pty: the handler answers the prompt, a script forwards its redirected
+        stdin once.
         """
         master_fd, slave_fd = pty.openpty()
         tty_fd = None
         process = None
         try:
-            if not in_kernel:
+            if handler is None:
                 try:
                     tty_fd = os.open("/dev/tty", os.O_RDWR)
                 except OSError as err:
@@ -433,22 +576,34 @@ class TokenContentIterator:
             use_tty = tty_fd is not None
             if not use_tty:
                 _disable_echo(slave_fd)
-            # A new session keeps the kernel's SIGINT away from pelican; _reap stops it instead.
-            process = subprocess.Popen(cmd, stdin=tty_fd if use_tty else slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=in_kernel)
+            # A new session keeps the host's SIGINT away from pelican; _reap stops it instead.
+            process = subprocess.Popen(cmd, stdin=tty_fd if use_tty else slave_fd, stdout=slave_fd, stderr=slave_fd, start_new_session=handler is not None)
             os.close(slave_fd)
             slave_fd = None
             if tty_fd is not None:
                 os.close(tty_fd)
                 tty_fd = None
 
-            if in_kernel:
-                echo = _KernelEcho(master_fd)
+            if handler is not None:
+                echo = _HandlerEcho(lambda password: os.write(master_fd, (password + "\n").encode()), handler)
                 stdin_data = None
             else:
                 echo = _TerminalEcho()
                 stdin_data = None if use_tty else _read_redirected_stdin()
 
-            output = self._pump_pty(master_fd, process, echo, stdin_data)
+            def read() -> str:
+                nonlocal stdin_data
+                ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
+                data = b""
+                if ready:
+                    with contextlib.suppress(OSError):  # EIO once the child closes the slave
+                        data = os.read(master_fd, self.pty_buffer_size)
+                if stdin_data:
+                    os.write(master_fd, stdin_data)
+                    stdin_data = None
+                return data.decode("utf-8", errors="replace")
+
+            output = self._pump(read, lambda: process.poll() is not None, echo, handler.cancelled if handler else None)
             echo.flush()
             if output is None:
                 return None
@@ -461,37 +616,27 @@ class TokenContentIterator:
             if process is not None:
                 _reap(process)
 
-    def _pump_pty(self, master_fd: int, process: subprocess.Popen, echo: Callable[[str], None], stdin_data: bytes | None) -> str | None:
-        """Relay child output until it exits. Returns the full output, or None on timeout."""
+    def _pump(self, read: Callable[[], str], exited: Callable[[], bool], echo: Callable[[str], None], cancelled: Callable[[], bool] | None = None) -> str | None:
+        """
+        Relay child output until it exits. Returns the full output, or None on timeout or cancel.
+
+        ``read`` waits no longer than ``select_timeout`` and returns "" if there is no output.
+        """
         output: list[str] = []
         start = time.monotonic()
-
-        def read() -> bytes:
-            ready, _, _ = select.select([master_fd], [], [], self.select_timeout)
-            if not ready:
-                return b""
-            try:
-                return os.read(master_fd, self.pty_buffer_size)
-            except OSError:  # EIO once the child closes the slave
-                return b""
-
-        def handle(data: bytes) -> None:
-            text = data.decode("utf-8", errors="replace")
-            output.append(text)
-            echo(text)
-
         while True:
             if time.monotonic() - start > self.oidc_timeout_seconds:
                 logger.warning("Pelican binary timed out (exceeded %s seconds)", self.oidc_timeout_seconds)
                 return None
-            exited = process.poll() is not None  # checked first so output written just before exit is read
-            if data := read():
-                handle(data)
-            elif exited:
+            if cancelled is not None and cancelled():
+                logger.info("OIDC device flow cancelled by the auth handler")
+                return None
+            done = exited()  # checked first so output written just before exit is read
+            if text := read():
+                output.append(text)
+                echo(text)
+            elif done:
                 break
-            if stdin_data:
-                os.write(master_fd, stdin_data)
-                stdin_data = None
         return "".join(output)
 
     def _finish(self, process: subprocess.Popen, output: str) -> str | None:
