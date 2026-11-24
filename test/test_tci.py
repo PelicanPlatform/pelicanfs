@@ -1086,7 +1086,7 @@ import sys
 
 if not sys.stdin.isatty():
     sys.exit(2)
-sys.stderr.write("Please create a new password to protect your local credentials: \\r\\n")
+sys.stderr.write("Please create a new password to protect your local credentials: \\n")
 sys.stderr.flush()
 if getpass.getpass("") != "s3cret":
     sys.exit(3)
@@ -1173,40 +1173,3 @@ def test_conpty_real_child_cancelled(conpty):
     assert conpty["run"]("import time; time.sleep(30)") is None
     assert time.monotonic() - start < 10
     assert handler.finished == [False]
-
-
-# TEMP RAW
-@pytest.mark.skipif(sys.platform != "win32", reason="temp")
-@pytest.mark.parametrize(("cols", "jwt"), [(32000, LONG_JWT), (80, FAKE_JWT), (120, "eyJ" + "a" * 50 + "   x      y" + " " * 30 + "z.b.c")])
-def test_raw(tmp_path, monkeypatch, cols, jwt):
-    import winpty
-
-    monkeypatch.setattr(tci, "CONPTY_COLUMNS", cols)
-    path = tmp_path / "child.py"
-    path.write_text(CONPTY_CHILD.format(jwt=jwt, status=0))
-    start = time.monotonic()
-    pty = tci._spawn_conpty([sys.executable, str(path)])
-    raw = []
-    sent = False
-    events = []
-    while time.monotonic() - start < 20:
-        try:
-            text = pty.read()
-        except winpty.WinptyError as err:
-            events.append((round(time.monotonic() - start, 2), "error", str(err)))
-            break
-        if text:
-            raw.append((round(time.monotonic() - start, 2), text))
-        if not sent and "credentials" in "".join(t for _, t in raw):
-            pty.write("s3cret\r")
-            sent = True
-        if pty.iseof():
-            events.append((round(time.monotonic() - start, 2), "iseof"))
-            break
-        if not text:
-            time.sleep(0.05)
-    print(winpty.__version__, sys.getwindowsversion())
-    for item in raw:
-        print(repr(item))
-    print(events, pty.isalive(), pty.get_exitstatus())
-    pytest.fail("raw dump")

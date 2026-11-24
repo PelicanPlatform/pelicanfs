@@ -93,7 +93,7 @@ _PARTIAL_JWT_PATTERN = re.compile(r"(?:e|ey|eyJ[A-Za-z0-9_.-]*)\Z")
 _PASSWORD_PROMPT_PATTERN = re.compile(r"[Pp]assword[^:\n]*:\s*$")
 _DEVICE_URL_PATTERN = re.compile(r"https?://\S+/(?:device|activate|authorize|login|oauth)\S*")
 _VT_SEQUENCE = re.compile(
-    r"\x1b\[(?P<forward>\d*)C"  # cursor forward (ConPTY writes this in place of spaces)
+    r"\x1b\[(?P<forward>\d*)C"  # cursor forward (older ConPTY versions can write this in place of spaces)
     r"|\x1b\[[0-?]*[ -/]*[@-~]"  # other CSI sequences
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC (window title)
     r"|\x1b[ -/]*[0-~]"
