@@ -71,6 +71,8 @@ addopts = ["-ra", "--showlocals", "--import-mode=importlib"]
 strict = true
 filterwarnings = ["error"]
 log_level = "INFO"
+faulthandler_timeout = 60
+faulthandler_exit_on_timeout = true
 testpaths = ["test"]
 markers = [
     "integration: marks tests as integration tests (require live OSDF infrastructure)",
